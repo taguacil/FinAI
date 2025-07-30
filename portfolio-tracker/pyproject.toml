@@ -20,3 +20,16 @@ dependencies = [
     "streamlit>=1.47.1",
     "yfinance>=0.2.65",
 ]
+
+[dependency-groups]
+dev = [
+    "black>=25.1.0",
+    "coverage>=7.10.1",
+    "flake8>=7.3.0",
+    "isort>=6.0.1",
+    "mypy>=1.17.0",
+    "pre-commit>=4.2.0",
+    "pytest>=8.4.1",
+    "pytest-cov>=6.2.1",
+    "pytest-mock>=3.14.1",
+]
