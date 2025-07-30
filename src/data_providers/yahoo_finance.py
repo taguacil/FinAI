@@ -9,7 +9,7 @@ from decimal import Decimal
 from typing import Dict, List, Optional
 import time
 
-from .base import BaseDataProvider, PriceData, InstrumentInfo, DataProviderError, InvalidSymbolError
+from .base import BaseDataProvider, PriceData, InstrumentInfo, DataProviderError, InvalidSymbolError, RateLimitError, ConnectionError, TimeoutError
 from ..portfolio.models import Currency, InstrumentType
 
 
@@ -41,6 +41,9 @@ class YahooFinanceProvider(BaseDataProvider):
             ticker = self._get_ticker(symbol)
             info = ticker.info
             
+            if not info or info.get('regularMarketPrice') is None:
+                raise InvalidSymbolError(f"Invalid or delisted symbol: {symbol}")
+            
             # Try different price fields
             price = info.get('currentPrice') or info.get('regularMarketPrice') or info.get('previousClose')
             
@@ -48,9 +51,19 @@ class YahooFinanceProvider(BaseDataProvider):
                 return Decimal(str(price))
             return None
             
+        except InvalidSymbolError:
+            raise
         except Exception as e:
-            print(f"Error getting current price for {symbol}: {e}")
-            return None
+            error_msg = str(e).lower()
+            if "rate limit" in error_msg or "too many requests" in error_msg:
+                raise RateLimitError(f"Rate limit exceeded for Yahoo Finance: {e}")
+            elif "connection" in error_msg or "network" in error_msg:
+                raise ConnectionError(f"Network error accessing Yahoo Finance: {e}")
+            elif "timeout" in error_msg:
+                raise TimeoutError(f"Timeout accessing Yahoo Finance: {e}")
+            else:
+                print(f"Error getting current price for {symbol}: {e}")
+                return None
     
     def get_historical_prices(self, symbol: str, start_date: date, end_date: date) -> List[PriceData]:
         """Get historical price data for a symbol."""

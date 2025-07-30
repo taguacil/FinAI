@@ -52,12 +52,12 @@ class Currency(str, Enum):
 class FinancialInstrument(BaseModel):
     """Represents a financial instrument (stock, bond, crypto, etc.)."""
     
-    symbol: str = Field(..., description="Trading symbol (e.g., AAPL, TSLA)")
-    isin: Optional[str] = Field(None, description="International Securities Identification Number")
-    name: str = Field(..., description="Full name of the instrument")
+    symbol: str = Field(..., description="Trading symbol (e.g., AAPL, TSLA)", min_length=1, max_length=50)
+    isin: Optional[str] = Field(None, description="International Securities Identification Number", max_length=12)
+    name: str = Field(..., description="Full name of the instrument", min_length=1, max_length=200)
     instrument_type: InstrumentType = Field(..., description="Type of financial instrument")
     currency: Currency = Field(..., description="Trading currency")
-    exchange: Optional[str] = Field(None, description="Exchange where traded")
+    exchange: Optional[str] = Field(None, description="Exchange where traded", max_length=100)
     
     class Config:
         use_enum_values = True
@@ -66,15 +66,15 @@ class FinancialInstrument(BaseModel):
 class Transaction(BaseModel):
     """Represents a single portfolio transaction."""
     
-    id: str = Field(..., description="Unique transaction identifier")
+    id: str = Field(..., description="Unique transaction identifier", min_length=1, max_length=100)
     timestamp: datetime = Field(..., description="When the transaction occurred")
     instrument: FinancialInstrument = Field(..., description="The financial instrument")
     transaction_type: TransactionType = Field(..., description="Type of transaction")
-    quantity: Decimal = Field(..., description="Number of shares/units")
-    price: Decimal = Field(..., description="Price per unit")
-    fees: Decimal = Field(default=Decimal("0"), description="Transaction fees")
+    quantity: Decimal = Field(..., description="Number of shares/units", gt=0)
+    price: Decimal = Field(..., description="Price per unit", ge=0)
+    fees: Decimal = Field(default=Decimal("0"), description="Transaction fees", ge=0)
     currency: Currency = Field(..., description="Transaction currency")
-    notes: Optional[str] = Field(None, description="Additional notes")
+    notes: Optional[str] = Field(None, description="Additional notes", max_length=500)
     
     @property
     def total_value(self) -> Decimal:
@@ -199,18 +199,24 @@ class Portfolio(BaseModel):
         
         # Add cash balances
         for currency, amount in self.cash_balances.items():
-            if currency == self.base_currency.value:
+            # Handle both Currency enum and string keys
+            currency_code = currency.value if hasattr(currency, 'value') else currency
+            base_currency_code = self.base_currency.value if hasattr(self.base_currency, 'value') else self.base_currency
+            
+            if currency_code == base_currency_code:
                 total += amount
-            elif exchange_rates and currency in exchange_rates:
-                total += amount * exchange_rates[currency]
+            elif exchange_rates and currency_code in exchange_rates:
+                total += amount * exchange_rates[currency_code]
         
         # Add position values
         for position in self.positions.values():
             if position.market_value:
-                if position.instrument.currency == self.base_currency:
+                position_currency_code = position.instrument.currency.value if hasattr(position.instrument.currency, 'value') else position.instrument.currency
+                
+                if position_currency_code == base_currency_code:
                     total += position.market_value
-                elif exchange_rates and position.instrument.currency.value in exchange_rates:
-                    total += position.market_value * exchange_rates[position.instrument.currency.value]
+                elif exchange_rates and position_currency_code in exchange_rates:
+                    total += position.market_value * exchange_rates[position_currency_code]
         
         return total
     

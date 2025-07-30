@@ -55,10 +55,27 @@ class FileBasedStorage:
     
     def save_portfolio(self, portfolio: Portfolio) -> None:
         """Save portfolio to file."""
-        filepath = self.portfolios_dir / f"{portfolio.id}.json"
-        
-        with open(filepath, 'w') as f:
-            json.dump(portfolio.dict(), f, cls=PortfolioEncoder, indent=2)
+        try:
+            filepath = self.portfolios_dir / f"{portfolio.id}.json"
+            
+            # Validate portfolio ID to prevent path traversal
+            if not portfolio.id.replace('-', '').replace('_', '').isalnum():
+                raise ValueError(f"Invalid portfolio ID: {portfolio.id}")
+            
+            # Create backup if file exists
+            if filepath.exists():
+                backup_path = filepath.with_suffix('.json.backup')
+                filepath.rename(backup_path)
+            
+            with open(filepath, 'w') as f:
+                json.dump(portfolio.dict(), f, cls=PortfolioEncoder, indent=2)
+                
+        except Exception as e:
+            # Restore backup if save failed
+            backup_path = filepath.with_suffix('.json.backup')
+            if backup_path.exists():
+                backup_path.rename(filepath)
+            raise RuntimeError(f"Failed to save portfolio {portfolio.id}: {e}") from e
     
     def load_portfolio(self, portfolio_id: str) -> Optional[Portfolio]:
         """Load portfolio from file."""
@@ -91,13 +108,21 @@ class FileBasedStorage:
     
     def save_snapshot(self, portfolio_id: str, snapshot: PortfolioSnapshot) -> None:
         """Save portfolio snapshot to file."""
-        portfolio_snapshots_dir = self.snapshots_dir / portfolio_id
-        portfolio_snapshots_dir.mkdir(exist_ok=True)
-        
-        filepath = portfolio_snapshots_dir / f"{snapshot.date.isoformat()}.json"
-        
-        with open(filepath, 'w') as f:
-            json.dump(snapshot.dict(), f, cls=PortfolioEncoder, indent=2)
+        try:
+            # Validate portfolio ID
+            if not portfolio_id.replace('-', '').replace('_', '').isalnum():
+                raise ValueError(f"Invalid portfolio ID: {portfolio_id}")
+                
+            portfolio_snapshots_dir = self.snapshots_dir / portfolio_id
+            portfolio_snapshots_dir.mkdir(exist_ok=True)
+            
+            filepath = portfolio_snapshots_dir / f"{snapshot.date.isoformat()}.json"
+            
+            with open(filepath, 'w') as f:
+                json.dump(snapshot.dict(), f, cls=PortfolioEncoder, indent=2)
+                
+        except Exception as e:
+            raise RuntimeError(f"Failed to save snapshot for portfolio {portfolio_id}: {e}") from e
     
     def load_snapshots(self, portfolio_id: str, 
                       start_date: Optional[date] = None,

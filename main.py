@@ -12,6 +12,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from src.utils.initializer import PortfolioInitializer
+from src.utils.logging_config import setup_logging
+from src.utils.health_check import HealthChecker
 
 
 def main():
@@ -23,8 +25,15 @@ def main():
                        help="Data directory path")
     parser.add_argument("--sample-name", default="Demo Portfolio",
                        help="Name for sample portfolio")
+    parser.add_argument("--log-level", default="INFO",
+                       choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+                       help="Logging level")
     
     args = parser.parse_args()
+    
+    # Setup logging
+    logger = setup_logging(log_level=args.log_level, log_dir=f"{args.data_dir}/logs")
+    logger.info(f"Starting Portfolio Tracker in {args.mode} mode")
     
     # Initialize the system
     initializer = PortfolioInitializer(args.data_dir)
@@ -55,14 +64,55 @@ def main():
             print("❌ Failed to create sample portfolio. Check logs for details.")
     
     elif args.mode == "status":
-        print("📊 Getting system status...")
+        print("📊 Getting comprehensive system status...")
+        
+        # Get traditional status
         status = initializer.get_system_status()
+        
+        # Get health check results
+        health_checker = HealthChecker(args.data_dir)
+        health_summary = health_checker.get_health_summary()
         
         if 'error' in status:
             print(f"❌ Error getting status: {status['error']}")
             return
         
-        print(f"\n🕒 Status as of: {status['timestamp']}")
+        # Overall health status
+        overall_status = health_summary['overall_status']
+        status_emoji = {
+            'healthy': '✅',
+            'warning': '⚠️',
+            'critical': '❌',
+            'unknown': '❓'
+        }.get(overall_status, '❓')
+        
+        print(f"\n🏥 Overall System Health: {status_emoji} {overall_status.upper()}")
+        print(f"🕒 Status as of: {status['timestamp']}")
+        
+        # Health summary
+        summary = health_summary['summary']
+        print(f"\n📊 Health Summary:")
+        print(f"   Total Services: {summary['total_services']}")
+        print(f"   ✅ Healthy: {summary['healthy_services']}")
+        print(f"   ⚠️  Warning: {summary['warning_services']}")
+        print(f"   ❌ Critical: {summary['critical_services']}")
+        
+        # Service details
+        print(f"\n🔧 Service Status:")
+        for service_name, service_info in health_summary['services'].items():
+            status_emoji = {
+                'healthy': '✅',
+                'warning': '⚠️',
+                'critical': '❌',
+                'unknown': '❓'
+            }.get(service_info['status'], '❓')
+            
+            response_time = ""
+            if service_info.get('response_time_ms'):
+                response_time = f" ({service_info['response_time_ms']:.0f}ms)"
+            
+            print(f"   {status_emoji} {service_name.replace('_', ' ').title()}: {service_info['message']}{response_time}")
+        
         print(f"\n📁 Storage:")
         print(f"   Data Directory: {status['storage']['data_directory']}")
         print(f"   Directory Exists: {status['storage']['directories_exist']}")
