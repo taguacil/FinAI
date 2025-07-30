@@ -1,0 +1,2 @@
+# FinAI
+Financial Framework Assistant
