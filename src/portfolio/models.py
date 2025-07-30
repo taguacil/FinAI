@@ -2,7 +2,8 @@
 Portfolio data models for tracking financial instruments and transactions.
 """
 
-from datetime import datetime, date
+from datetime import datetime
+from datetime import date as date_type
 from enum import Enum
 from typing import Dict, List, Optional, Union
 from decimal import Decimal
@@ -128,7 +129,7 @@ class Position(BaseModel):
 class PortfolioSnapshot(BaseModel):
     """Represents a portfolio state at a specific point in time."""
     
-    date: date = Field(..., description="Date of the snapshot")
+    date: date_type = Field(..., description="Date of the snapshot")
     total_value: Decimal = Field(..., description="Total portfolio value")
     cash_balance: Decimal = Field(..., description="Cash balance")
     positions_value: Decimal = Field(..., description="Total value of positions")
