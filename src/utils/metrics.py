@@ -2,13 +2,14 @@
 Financial metrics calculator for portfolio analysis.
 """
 
-import numpy as np
+import logging
 from datetime import date
 from typing import Dict, List, Optional, Tuple
-import logging
 
-from ..portfolio.models import PortfolioSnapshot
+import numpy as np
+
 from ..data_providers.manager import DataProviderManager
+from ..portfolio.models import PortfolioSnapshot
 
 
 class FinancialMetricsCalculator:
@@ -25,7 +26,7 @@ class FinancialMetricsCalculator:
 
         returns = []
         for i in range(1, len(snapshots)):
-            prev_value = float(snapshots[i-1].total_value)
+            prev_value = float(snapshots[i - 1].total_value)
             curr_value = float(snapshots[i].total_value)
 
             if prev_value > 0:
@@ -34,7 +35,9 @@ class FinancialMetricsCalculator:
 
         return returns
 
-    def calculate_volatility(self, returns: List[float], annualized: bool = True) -> float:
+    def calculate_volatility(
+        self, returns: List[float], annualized: bool = True
+    ) -> float:
         """Calculate portfolio volatility."""
         if len(returns) < 2:
             return 0.0
@@ -47,7 +50,9 @@ class FinancialMetricsCalculator:
 
         return float(volatility)
 
-    def calculate_sharpe_ratio(self, returns: List[float], risk_free_rate: float = 0.02) -> float:
+    def calculate_sharpe_ratio(
+        self, returns: List[float], risk_free_rate: float = 0.02
+    ) -> float:
         """Calculate Sharpe ratio."""
         if len(returns) < 2:
             return 0.0
@@ -65,7 +70,9 @@ class FinancialMetricsCalculator:
         sharpe = (annualized_return - risk_free_rate) / annualized_volatility
         return float(sharpe)
 
-    def calculate_max_drawdown(self, snapshots: List[PortfolioSnapshot]) -> Tuple[float, int]:
+    def calculate_max_drawdown(
+        self, snapshots: List[PortfolioSnapshot]
+    ) -> Tuple[float, int]:
         """Calculate maximum drawdown and duration."""
         if len(snapshots) < 2:
             return 0.0, 0
@@ -88,9 +95,14 @@ class FinancialMetricsCalculator:
 
         return max_drawdown, max_duration
 
-    def calculate_beta(self, portfolio_returns: List[float], benchmark_returns: List[float]) -> float:
+    def calculate_beta(
+        self, portfolio_returns: List[float], benchmark_returns: List[float]
+    ) -> float:
         """Calculate beta against a benchmark."""
-        if len(portfolio_returns) != len(benchmark_returns) or len(portfolio_returns) < 2:
+        if (
+            len(portfolio_returns) != len(benchmark_returns)
+            or len(portfolio_returns) < 2
+        ):
             return 0.0
 
         # Calculate covariance and variance
@@ -106,10 +118,17 @@ class FinancialMetricsCalculator:
         beta = covariance / benchmark_variance
         return float(beta)
 
-    def calculate_alpha(self, portfolio_returns: List[float], benchmark_returns: List[float],
-                       risk_free_rate: float = 0.02) -> float:
+    def calculate_alpha(
+        self,
+        portfolio_returns: List[float],
+        benchmark_returns: List[float],
+        risk_free_rate: float = 0.02,
+    ) -> float:
         """Calculate Jensen's alpha."""
-        if len(portfolio_returns) != len(benchmark_returns) or len(portfolio_returns) < 2:
+        if (
+            len(portfolio_returns) != len(benchmark_returns)
+            or len(portfolio_returns) < 2
+        ):
             return 0.0
 
         beta = self.calculate_beta(portfolio_returns, benchmark_returns)
@@ -117,13 +136,19 @@ class FinancialMetricsCalculator:
         avg_portfolio_return = np.mean(portfolio_returns) * 252  # Annualized
         avg_benchmark_return = np.mean(benchmark_returns) * 252  # Annualized
 
-        alpha = avg_portfolio_return - (risk_free_rate + beta * (avg_benchmark_return - risk_free_rate))
+        alpha = avg_portfolio_return - (
+            risk_free_rate + beta * (avg_benchmark_return - risk_free_rate)
+        )
         return float(alpha)
 
-    def calculate_information_ratio(self, portfolio_returns: List[float],
-                                  benchmark_returns: List[float]) -> float:
+    def calculate_information_ratio(
+        self, portfolio_returns: List[float], benchmark_returns: List[float]
+    ) -> float:
         """Calculate information ratio (active return / tracking error)."""
-        if len(portfolio_returns) != len(benchmark_returns) or len(portfolio_returns) < 2:
+        if (
+            len(portfolio_returns) != len(benchmark_returns)
+            or len(portfolio_returns) < 2
+        ):
             return 0.0
 
         # Calculate excess returns
@@ -141,8 +166,12 @@ class FinancialMetricsCalculator:
 
         return float(annualized_excess_return / annualized_tracking_error)
 
-    def calculate_sortino_ratio(self, returns: List[float], target_return: float = 0.0,
-                               risk_free_rate: float = 0.02) -> float:
+    def calculate_sortino_ratio(
+        self,
+        returns: List[float],
+        target_return: float = 0.0,
+        risk_free_rate: float = 0.02,
+    ) -> float:
         """Calculate Sortino ratio (uses downside deviation instead of total volatility)."""
         if len(returns) < 2:
             return 0.0
@@ -154,9 +183,9 @@ class FinancialMetricsCalculator:
         downside_returns = excess_returns[excess_returns < 0]
 
         if len(downside_returns) == 0:
-            return float('inf')  # No downside risk
+            return float("inf")  # No downside risk
 
-        downside_deviation = np.sqrt(np.mean(downside_returns ** 2))
+        downside_deviation = np.sqrt(np.mean(downside_returns**2))
 
         if downside_deviation == 0:
             return 0.0
@@ -167,7 +196,9 @@ class FinancialMetricsCalculator:
         sortino = (avg_return - risk_free_rate) / annualized_downside_dev
         return float(sortino)
 
-    def calculate_calmar_ratio(self, returns: List[float], snapshots: List[PortfolioSnapshot]) -> float:
+    def calculate_calmar_ratio(
+        self, returns: List[float], snapshots: List[PortfolioSnapshot]
+    ) -> float:
         """Calculate Calmar ratio (annual return / max drawdown)."""
         if len(returns) < 2 or len(snapshots) < 2:
             return 0.0
@@ -176,21 +207,25 @@ class FinancialMetricsCalculator:
         max_drawdown, _ = self.calculate_max_drawdown(snapshots)
 
         if max_drawdown == 0:
-            return float('inf')
+            return float("inf")
 
         return float(annual_return / max_drawdown)
 
-    def get_benchmark_returns(self, symbol: str, start_date: date, end_date: date) -> List[float]:
+    def get_benchmark_returns(
+        self, symbol: str, start_date: date, end_date: date
+    ) -> List[float]:
         """Get benchmark returns for comparison."""
         try:
-            price_data = self.data_manager.get_historical_prices(symbol, start_date, end_date)
+            price_data = self.data_manager.get_historical_prices(
+                symbol, start_date, end_date
+            )
 
             if len(price_data) < 2:
                 return []
 
             returns = []
             for i in range(1, len(price_data)):
-                prev_price = float(price_data[i-1].close_price or 0)
+                prev_price = float(price_data[i - 1].close_price or 0)
                 curr_price = float(price_data[i].close_price or 0)
 
                 if prev_price > 0:
@@ -203,7 +238,9 @@ class FinancialMetricsCalculator:
             logging.error(f"Error getting benchmark returns for {symbol}: {e}")
             return []
 
-    def calculate_value_at_risk(self, returns: List[float], confidence_level: float = 0.05) -> float:
+    def calculate_value_at_risk(
+        self, returns: List[float], confidence_level: float = 0.05
+    ) -> float:
         """Calculate Value at Risk (VaR) at given confidence level."""
         if len(returns) < 2:
             return 0.0
@@ -213,7 +250,9 @@ class FinancialMetricsCalculator:
 
         return float(-var)  # Return as positive value
 
-    def calculate_conditional_var(self, returns: List[float], confidence_level: float = 0.05) -> float:
+    def calculate_conditional_var(
+        self, returns: List[float], confidence_level: float = 0.05
+    ) -> float:
         """Calculate Conditional Value at Risk (Expected Shortfall)."""
         if len(returns) < 2:
             return 0.0
@@ -230,23 +269,28 @@ class FinancialMetricsCalculator:
         cvar = np.mean(tail_returns)
         return float(-cvar)  # Return as positive value
 
-    def calculate_portfolio_metrics(self, snapshots: List[PortfolioSnapshot],
-                                  benchmark_symbol: str = "SPY",
-                                  risk_free_rate: float = 0.02) -> Dict:
+    def calculate_portfolio_metrics(
+        self,
+        snapshots: List[PortfolioSnapshot],
+        benchmark_symbol: str = "SPY",
+        risk_free_rate: float = 0.02,
+    ) -> Dict:
         """Calculate comprehensive portfolio metrics."""
         if len(snapshots) < 2:
-            return {'error': 'Insufficient data for metrics calculation'}
+            return {"error": "Insufficient data for metrics calculation"}
 
         # Calculate portfolio returns
         portfolio_returns = self.calculate_returns(snapshots)
 
         if len(portfolio_returns) == 0:
-            return {'error': 'Could not calculate returns'}
+            return {"error": "Could not calculate returns"}
 
         # Get benchmark returns
         start_date = snapshots[0].date
         end_date = snapshots[-1].date
-        benchmark_returns = self.get_benchmark_returns(benchmark_symbol, start_date, end_date)
+        benchmark_returns = self.get_benchmark_returns(
+            benchmark_symbol, start_date, end_date
+        )
 
         # Align portfolio and benchmark returns by length
         min_length = min(len(portfolio_returns), len(benchmark_returns))
@@ -259,33 +303,47 @@ class FinancialMetricsCalculator:
 
         metrics = {
             # Basic metrics
-            'total_return': float(np.sum(portfolio_returns)),
-            'annualized_return': float(np.mean(portfolio_returns) * 252),
-            'volatility': self.calculate_volatility(portfolio_returns),
-            'sharpe_ratio': self.calculate_sharpe_ratio(portfolio_returns, risk_free_rate),
-            'sortino_ratio': self.calculate_sortino_ratio(portfolio_returns, risk_free_rate=risk_free_rate),
-
+            "total_return": float(np.sum(portfolio_returns)),
+            "annualized_return": float(np.mean(portfolio_returns) * 252),
+            "volatility": self.calculate_volatility(portfolio_returns),
+            "sharpe_ratio": self.calculate_sharpe_ratio(
+                portfolio_returns, risk_free_rate
+            ),
+            "sortino_ratio": self.calculate_sortino_ratio(
+                portfolio_returns, risk_free_rate=risk_free_rate
+            ),
             # Risk metrics
-            'max_drawdown': self.calculate_max_drawdown(snapshots)[0],
-            'max_drawdown_duration': self.calculate_max_drawdown(snapshots)[1],
-            'var_5pct': self.calculate_value_at_risk(portfolio_returns, 0.05),
-            'cvar_5pct': self.calculate_conditional_var(portfolio_returns, 0.05),
-            'calmar_ratio': self.calculate_calmar_ratio(portfolio_returns, snapshots),
-
+            "max_drawdown": self.calculate_max_drawdown(snapshots)[0],
+            "max_drawdown_duration": self.calculate_max_drawdown(snapshots)[1],
+            "var_5pct": self.calculate_value_at_risk(portfolio_returns, 0.05),
+            "cvar_5pct": self.calculate_conditional_var(portfolio_returns, 0.05),
+            "calmar_ratio": self.calculate_calmar_ratio(portfolio_returns, snapshots),
             # Benchmark comparison (if available)
-            'benchmark_symbol': benchmark_symbol,
-            'benchmark_available': len(benchmark_returns_aligned) > 0
+            "benchmark_symbol": benchmark_symbol,
+            "benchmark_available": len(benchmark_returns_aligned) > 0,
         }
 
         # Add benchmark-relative metrics if benchmark data is available
         if len(benchmark_returns_aligned) > 0:
-            metrics.update({
-                'beta': self.calculate_beta(portfolio_returns_aligned, benchmark_returns_aligned),
-                'alpha': self.calculate_alpha(portfolio_returns_aligned, benchmark_returns_aligned, risk_free_rate),
-                'information_ratio': self.calculate_information_ratio(portfolio_returns_aligned, benchmark_returns_aligned),
-                'benchmark_return': float(np.mean(benchmark_returns_aligned) * 252),
-                'benchmark_volatility': self.calculate_volatility(benchmark_returns_aligned)
-            })
+            metrics.update(
+                {
+                    "beta": self.calculate_beta(
+                        portfolio_returns_aligned, benchmark_returns_aligned
+                    ),
+                    "alpha": self.calculate_alpha(
+                        portfolio_returns_aligned,
+                        benchmark_returns_aligned,
+                        risk_free_rate,
+                    ),
+                    "information_ratio": self.calculate_information_ratio(
+                        portfolio_returns_aligned, benchmark_returns_aligned
+                    ),
+                    "benchmark_return": float(np.mean(benchmark_returns_aligned) * 252),
+                    "benchmark_volatility": self.calculate_volatility(
+                        benchmark_returns_aligned
+                    ),
+                }
+            )
 
         return metrics
 
@@ -295,16 +353,16 @@ class FinancialMetricsCalculator:
         total_value = 0.0
 
         for position in positions:
-            if position.get('market_value') and position['market_value'] > 0:
+            if position.get("market_value") and position["market_value"] > 0:
                 # Get instrument info to determine sector
-                symbol = position['symbol']
+                symbol = position["symbol"]
                 instrument_info = self.data_manager.get_instrument_info(symbol)
 
-                sector = 'Unknown'
+                sector = "Unknown"
                 if instrument_info and instrument_info.sector:
                     sector = instrument_info.sector
 
-                market_value = float(position['market_value'])
+                market_value = float(position["market_value"])
 
                 if sector in sector_values:
                     sector_values[sector] += market_value
@@ -315,8 +373,10 @@ class FinancialMetricsCalculator:
 
         # Convert to percentages
         if total_value > 0:
-            return {sector: (value / total_value) * 100
-                   for sector, value in sector_values.items()}
+            return {
+                sector: (value / total_value) * 100
+                for sector, value in sector_values.items()
+            }
 
         return {}
 
@@ -326,9 +386,9 @@ class FinancialMetricsCalculator:
         total_value = 0.0
 
         for position in positions:
-            if position.get('market_value') and position['market_value'] > 0:
-                currency = position.get('currency', 'USD')
-                market_value = float(position['market_value'])
+            if position.get("market_value") and position["market_value"] > 0:
+                currency = position.get("currency", "USD")
+                market_value = float(position["market_value"])
 
                 if currency in currency_values:
                     currency_values[currency] += market_value
@@ -339,7 +399,9 @@ class FinancialMetricsCalculator:
 
         # Convert to percentages
         if total_value > 0:
-            return {currency: (value / total_value) * 100
-                   for currency, value in currency_values.items()}
+            return {
+                currency: (value / total_value) * 100
+                for currency, value in currency_values.items()
+            }
 
         return {}

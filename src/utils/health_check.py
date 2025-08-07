@@ -3,10 +3,10 @@ Health check system for Portfolio Tracker.
 """
 
 import time
-from datetime import datetime
-from typing import Dict, Optional, Any
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
+from typing import Any, Dict, Optional
 
 from ..data_providers.manager import DataProviderManager
 from ..portfolio.storage import FileBasedStorage
@@ -16,6 +16,7 @@ from .logging_config import get_logger
 @dataclass
 class HealthCheckResult:
     """Result of a health check operation."""
+
     service: str
     status: str  # "healthy", "warning", "critical", "unknown"
     message: str
@@ -42,11 +43,11 @@ class HealthChecker:
         self.logger.info("Starting comprehensive health check")
 
         checks = {
-            'storage': self.check_storage_health,
-            'data_providers': self.check_data_providers_health,
-            'portfolio_data': self.check_portfolio_data_health,
-            'system_resources': self.check_system_resources,
-            'dependencies': self.check_dependencies,
+            "storage": self.check_storage_health,
+            "data_providers": self.check_data_providers_health,
+            "portfolio_data": self.check_portfolio_data_health,
+            "system_resources": self.check_system_resources,
+            "dependencies": self.check_dependencies,
         }
 
         results = {}
@@ -57,13 +58,19 @@ class HealthChecker:
                 result.response_time_ms = (time.time() - start_time) * 1000
                 results[check_name] = result
 
-                self.logger.debug(f"Health check '{check_name}': {result.status} - {result.message}")
+                self.logger.debug(
+                    f"Health check '{check_name}': {result.status} - {result.message}"
+                )
             except Exception as e:
                 results[check_name] = HealthCheckResult(
                     service=check_name,
                     status="critical",
                     message=f"Health check failed: {e}",
-                    response_time_ms=(time.time() - start_time) * 1000 if 'start_time' in locals() else None
+                    response_time_ms=(
+                        (time.time() - start_time) * 1000
+                        if "start_time" in locals()
+                        else None
+                    ),
                 )
                 self.logger.error(f"Health check '{check_name}' failed: {e}")
 
@@ -80,7 +87,7 @@ class HealthChecker:
                 return HealthCheckResult(
                     service="storage",
                     status="critical",
-                    message="Data directory does not exist"
+                    message="Data directory does not exist",
                 )
 
             # Test write permission
@@ -89,7 +96,7 @@ class HealthChecker:
             test_file.unlink()
 
             # Check subdirectories
-            subdirs = ['portfolios', 'snapshots', 'logs', 'exports', 'backups']
+            subdirs = ["portfolios", "snapshots", "logs", "exports", "backups"]
             missing_dirs = []
             for subdir in subdirs:
                 if not (self.data_dir / subdir).exists():
@@ -97,16 +104,17 @@ class HealthChecker:
 
             # Check disk space (basic check)
             import shutil
+
             total, used, free = shutil.disk_usage(self.data_dir)
             free_gb = free // (1024**3)
 
             details = {
-                'data_directory': str(self.data_dir),
-                'writable': True,
-                'missing_subdirs': missing_dirs,
-                'free_space_gb': free_gb,
-                'total_space_gb': total // (1024**3),
-                'used_space_gb': used // (1024**3)
+                "data_directory": str(self.data_dir),
+                "writable": True,
+                "missing_subdirs": missing_dirs,
+                "free_space_gb": free_gb,
+                "total_space_gb": total // (1024**3),
+                "used_space_gb": used // (1024**3),
             }
 
             if free_gb < 1:
@@ -114,28 +122,28 @@ class HealthChecker:
                     service="storage",
                     status="warning",
                     message=f"Low disk space: {free_gb}GB free",
-                    details=details
+                    details=details,
                 )
             elif missing_dirs:
                 return HealthCheckResult(
                     service="storage",
                     status="warning",
                     message=f"Missing subdirectories: {', '.join(missing_dirs)}",
-                    details=details
+                    details=details,
                 )
             else:
                 return HealthCheckResult(
                     service="storage",
                     status="healthy",
                     message=f"Storage system operational ({free_gb}GB free)",
-                    details=details
+                    details=details,
                 )
 
         except Exception as e:
             return HealthCheckResult(
                 service="storage",
                 status="critical",
-                message=f"Storage system failure: {e}"
+                message=f"Storage system failure: {e}",
             )
 
     def check_data_providers_health(self) -> HealthCheckResult:
@@ -154,25 +162,27 @@ class HealthChecker:
 
                     if price is not None:
                         provider_results[provider_name] = {
-                            'status': 'healthy',
-                            'response_time_ms': response_time,
-                            'test_price': float(price)
+                            "status": "healthy",
+                            "response_time_ms": response_time,
+                            "test_price": float(price),
                         }
                     else:
                         provider_results[provider_name] = {
-                            'status': 'warning',
-                            'response_time_ms': response_time,
-                            'error': 'No price data returned'
+                            "status": "warning",
+                            "response_time_ms": response_time,
+                            "error": "No price data returned",
                         }
 
                 except Exception as e:
                     provider_results[provider_name] = {
-                        'status': 'critical',
-                        'error': str(e)
+                        "status": "critical",
+                        "error": str(e),
                     }
 
             # Determine overall status
-            healthy_providers = [p for p in provider_results.values() if p['status'] == 'healthy']
+            healthy_providers = [
+                p for p in provider_results.values() if p["status"] == "healthy"
+            ]
             total_providers = len(provider_results)
 
             if len(healthy_providers) == total_providers:
@@ -189,14 +199,14 @@ class HealthChecker:
                 service="data_providers",
                 status=status,
                 message=message,
-                details=provider_results
+                details=provider_results,
             )
 
         except Exception as e:
             return HealthCheckResult(
                 service="data_providers",
                 status="critical",
-                message=f"Data provider check failed: {e}"
+                message=f"Data provider check failed: {e}",
             )
 
     def check_portfolio_data_health(self) -> HealthCheckResult:
@@ -210,7 +220,7 @@ class HealthChecker:
                     service="portfolio_data",
                     status="warning",
                     message="No portfolios found",
-                    details={'portfolio_count': 0}
+                    details={"portfolio_count": 0},
                 )
 
             portfolio_health = []
@@ -223,14 +233,16 @@ class HealthChecker:
                         # Check portfolio integrity
                         snapshots = self.storage.load_snapshots(portfolio_id)
 
-                        portfolio_health.append({
-                            'id': portfolio_id,
-                            'name': portfolio.name,
-                            'transactions': len(portfolio.transactions),
-                            'positions': len(portfolio.positions),
-                            'snapshots': len(snapshots),
-                            'status': 'healthy'
-                        })
+                        portfolio_health.append(
+                            {
+                                "id": portfolio_id,
+                                "name": portfolio.name,
+                                "transactions": len(portfolio.transactions),
+                                "positions": len(portfolio.positions),
+                                "snapshots": len(snapshots),
+                                "status": "healthy",
+                            }
+                        )
                     else:
                         corrupted_portfolios.append(portfolio_id)
 
@@ -238,11 +250,11 @@ class HealthChecker:
                     corrupted_portfolios.append(f"{portfolio_id} ({e})")
 
             details = {
-                'total_portfolios': len(portfolio_ids),
-                'checked_portfolios': len(portfolio_health),
-                'healthy_portfolios': len(portfolio_health),
-                'corrupted_portfolios': corrupted_portfolios,
-                'portfolio_sample': portfolio_health[:5]  # First 5 for details
+                "total_portfolios": len(portfolio_ids),
+                "checked_portfolios": len(portfolio_health),
+                "healthy_portfolios": len(portfolio_health),
+                "corrupted_portfolios": corrupted_portfolios,
+                "portfolio_sample": portfolio_health[:5],  # First 5 for details
             }
 
             if corrupted_portfolios:
@@ -250,21 +262,21 @@ class HealthChecker:
                     service="portfolio_data",
                     status="warning",
                     message=f"{len(corrupted_portfolios)} portfolios have issues",
-                    details=details
+                    details=details,
                 )
             else:
                 return HealthCheckResult(
                     service="portfolio_data",
                     status="healthy",
                     message=f"All {len(portfolio_health)} checked portfolios are healthy",
-                    details=details
+                    details=details,
                 )
 
         except Exception as e:
             return HealthCheckResult(
                 service="portfolio_data",
                 status="critical",
-                message=f"Portfolio data check failed: {e}"
+                message=f"Portfolio data check failed: {e}",
             )
 
     def check_system_resources(self) -> HealthCheckResult:
@@ -286,11 +298,11 @@ class HealthChecker:
             disk_percent = (disk_usage.used / disk_usage.total) * 100
 
             details = {
-                'cpu_percent': cpu_percent,
-                'memory_percent': memory_percent,
-                'memory_available_gb': memory_available_gb,
-                'disk_free_gb': disk_free_gb,
-                'disk_used_percent': disk_percent
+                "cpu_percent": cpu_percent,
+                "memory_percent": memory_percent,
+                "memory_available_gb": memory_available_gb,
+                "disk_free_gb": disk_free_gb,
+                "disk_used_percent": disk_percent,
             }
 
             # Determine status based on thresholds
@@ -307,39 +319,39 @@ class HealthChecker:
                     service="system_resources",
                     status="warning",
                     message="; ".join(issues),
-                    details=details
+                    details=details,
                 )
             else:
                 return HealthCheckResult(
                     service="system_resources",
                     status="healthy",
                     message="System resources within normal limits",
-                    details=details
+                    details=details,
                 )
 
         except ImportError:
             return HealthCheckResult(
                 service="system_resources",
                 status="unknown",
-                message="psutil not available for resource monitoring"
+                message="psutil not available for resource monitoring",
             )
         except Exception as e:
             return HealthCheckResult(
                 service="system_resources",
                 status="warning",
-                message=f"Could not check system resources: {e}"
+                message=f"Could not check system resources: {e}",
             )
 
     def check_dependencies(self) -> HealthCheckResult:
         """Check critical dependencies."""
         try:
             dependencies = {
-                'pydantic': 'Core data models',
-                'pandas': 'Data manipulation',
-                'numpy': 'Numerical calculations',
-                'yfinance': 'Yahoo Finance data',
-                'requests': 'HTTP requests',
-                'streamlit': 'Web UI'
+                "pydantic": "Core data models",
+                "pandas": "Data manipulation",
+                "numpy": "Numerical calculations",
+                "yfinance": "Yahoo Finance data",
+                "requests": "HTTP requests",
+                "streamlit": "Web UI",
             }
 
             missing_deps = []
@@ -348,24 +360,24 @@ class HealthChecker:
             for dep_name, description in dependencies.items():
                 try:
                     module = __import__(dep_name)
-                    version = getattr(module, '__version__', 'unknown')
+                    version = getattr(module, "__version__", "unknown")
                     available_deps[dep_name] = {
-                        'version': version,
-                        'description': description,
-                        'status': 'available'
+                        "version": version,
+                        "description": description,
+                        "status": "available",
                     }
                 except ImportError:
                     missing_deps.append(dep_name)
                     available_deps[dep_name] = {
-                        'status': 'missing',
-                        'description': description
+                        "status": "missing",
+                        "description": description,
                     }
 
             details = {
-                'total_dependencies': len(dependencies),
-                'available_dependencies': len(dependencies) - len(missing_deps),
-                'missing_dependencies': missing_deps,
-                'dependency_details': available_deps
+                "total_dependencies": len(dependencies),
+                "available_dependencies": len(dependencies) - len(missing_deps),
+                "missing_dependencies": missing_deps,
+                "dependency_details": available_deps,
             }
 
             if missing_deps:
@@ -373,21 +385,21 @@ class HealthChecker:
                     service="dependencies",
                     status="critical",
                     message=f"Missing critical dependencies: {', '.join(missing_deps)}",
-                    details=details
+                    details=details,
                 )
             else:
                 return HealthCheckResult(
                     service="dependencies",
                     status="healthy",
                     message=f"All {len(dependencies)} dependencies available",
-                    details=details
+                    details=details,
                 )
 
         except Exception as e:
             return HealthCheckResult(
                 service="dependencies",
                 status="warning",
-                message=f"Dependency check failed: {e}"
+                message=f"Dependency check failed: {e}",
             )
 
     def _determine_overall_status(self, results: Dict[str, HealthCheckResult]) -> str:
@@ -408,20 +420,26 @@ class HealthChecker:
         results = self.check_all()
 
         return {
-            'timestamp': datetime.now().isoformat(),
-            'overall_status': self._determine_overall_status(results),
-            'services': {
+            "timestamp": datetime.now().isoformat(),
+            "overall_status": self._determine_overall_status(results),
+            "services": {
                 name: {
-                    'status': result.status,
-                    'message': result.message,
-                    'response_time_ms': result.response_time_ms
+                    "status": result.status,
+                    "message": result.message,
+                    "response_time_ms": result.response_time_ms,
                 }
                 for name, result in results.items()
             },
-            'summary': {
-                'total_services': len(results),
-                'healthy_services': len([r for r in results.values() if r.status == "healthy"]),
-                'warning_services': len([r for r in results.values() if r.status == "warning"]),
-                'critical_services': len([r for r in results.values() if r.status == "critical"]),
-            }
+            "summary": {
+                "total_services": len(results),
+                "healthy_services": len(
+                    [r for r in results.values() if r.status == "healthy"]
+                ),
+                "warning_services": len(
+                    [r for r in results.values() if r.status == "warning"]
+                ),
+                "critical_services": len(
+                    [r for r in results.values() if r.status == "critical"]
+                ),
+            },
         }

@@ -4,7 +4,7 @@ Pytest configuration and shared fixtures for Portfolio Tracker tests.
 
 import sys
 import tempfile
-from datetime import datetime, date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Dict, Generator, List
@@ -14,6 +14,8 @@ import pytest
 # Add src to Python path for testing
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
+from src.data_providers.manager import DataProviderManager
+from src.portfolio.manager import PortfolioManager
 from src.portfolio.models import (
     Currency,
     FinancialInstrument,
@@ -23,8 +25,6 @@ from src.portfolio.models import (
     TransactionType,
 )
 from src.portfolio.storage import FileBasedStorage
-from src.portfolio.manager import PortfolioManager
-from src.data_providers.manager import DataProviderManager
 from src.utils.metrics import FinancialMetricsCalculator
 
 
@@ -152,13 +152,17 @@ def mock_data_manager() -> DataProviderManager:
 
 
 @pytest.fixture
-def portfolio_manager(storage: FileBasedStorage, mock_data_manager: DataProviderManager) -> PortfolioManager:
+def portfolio_manager(
+    storage: FileBasedStorage, mock_data_manager: DataProviderManager
+) -> PortfolioManager:
     """Create a portfolio manager for testing."""
     return PortfolioManager(storage, mock_data_manager)
 
 
 @pytest.fixture
-def metrics_calculator(mock_data_manager: DataProviderManager) -> FinancialMetricsCalculator:
+def metrics_calculator(
+    mock_data_manager: DataProviderManager,
+) -> FinancialMetricsCalculator:
     """Create a metrics calculator for testing."""
     return FinancialMetricsCalculator(mock_data_manager)
 
@@ -173,14 +177,16 @@ def sample_price_data() -> List[Dict]:
         price_date = base_date + timedelta(days=i)
         price = 100 + (i * 0.5) + (i % 5)  # Trending up with some volatility
 
-        prices.append({
-            "date": price_date,
-            "open": price - 0.5,
-            "high": price + 1.0,
-            "low": price - 1.0,
-            "close": price,
-            "volume": 1000000 + (i * 10000),
-        })
+        prices.append(
+            {
+                "date": price_date,
+                "open": price - 0.5,
+                "high": price + 1.0,
+                "low": price - 1.0,
+                "close": price,
+                "volume": 1000000 + (i * 10000),
+            }
+        )
 
     return prices
 
@@ -190,6 +196,7 @@ def sample_returns() -> List[float]:
     """Create sample returns data for testing."""
     # Generate 252 trading days of sample returns (roughly 1 year)
     import random
+
     random.seed(42)  # For reproducible tests
 
     returns = []

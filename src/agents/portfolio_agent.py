@@ -5,27 +5,29 @@ Portfolio AI agent using LangGraph for financial advice and portfolio management
 import os
 from typing import Dict, List, Optional
 
-from langchain_openai import ChatOpenAI
-from langchain.tools import Tool
-from langchain_core.messages import HumanMessage, AIMessage
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain.agents import create_openai_tools_agent, AgentExecutor
+from langchain.agents import AgentExecutor, create_openai_tools_agent
 from langchain.memory import ConversationBufferMemory
+from langchain.tools import Tool
+from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_openai import ChatOpenAI
 
-from .tools import create_portfolio_tools
-from ..portfolio.manager import PortfolioManager
 from ..data_providers.manager import DataProviderManager
+from ..portfolio.manager import PortfolioManager
 from ..utils.metrics import FinancialMetricsCalculator
+from .tools import create_portfolio_tools
 
 
 class PortfolioAgent:
     """AI agent for portfolio management and financial advice."""
 
-    def __init__(self,
-                 portfolio_manager: PortfolioManager,
-                 data_manager: DataProviderManager,
-                 metrics_calculator: FinancialMetricsCalculator,
-                 openai_api_key: Optional[str] = None):
+    def __init__(
+        self,
+        portfolio_manager: PortfolioManager,
+        data_manager: DataProviderManager,
+        metrics_calculator: FinancialMetricsCalculator,
+        openai_api_key: Optional[str] = None,
+    ):
         """Initialize the portfolio agent."""
 
         self.portfolio_manager = portfolio_manager
@@ -33,11 +35,11 @@ class PortfolioAgent:
         self.metrics_calculator = metrics_calculator
 
         # Initialize LLM
-        api_key = openai_api_key or os.getenv('OPENAI_API_KEY', 'OPENAI_API_KEY_PLACEHOLDER')
+        api_key = openai_api_key or os.getenv(
+            "OPENAI_API_KEY", "OPENAI_API_KEY_PLACEHOLDER"
+        )
         self.llm = ChatOpenAI(
-            model="gpt-4-turbo-preview",
-            temperature=0.1,
-            api_key=api_key
+            model="gpt-4-turbo-preview", temperature=0.1, api_key=api_key
         )
 
         # Create tools
@@ -53,8 +55,7 @@ class PortfolioAgent:
 
         # Memory for conversation
         self.memory = ConversationBufferMemory(
-            memory_key="chat_history",
-            return_messages=True
+            memory_key="chat_history", return_messages=True
         )
 
         # Create agent
@@ -62,6 +63,7 @@ class PortfolioAgent:
 
     def _create_web_search_tool(self) -> Tool:
         """Create web search tool for financial information."""
+
         def search_web(query: str) -> str:
             """Search the web for financial information."""
             try:
@@ -74,7 +76,7 @@ class PortfolioAgent:
         return Tool(
             name="web_search",
             description="Search the web for current financial news, market information, and investment analysis. Use this for real-time market data, company news, economic indicators, and investment advice.",
-            func=search_web
+            func=search_web,
         )
 
     def _create_agent(self) -> AgentExecutor:
@@ -112,18 +114,16 @@ class PortfolioAgent:
         Remember: This is for educational purposes. Always recommend consulting with qualified financial professionals for personalized advice.
         """
 
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", system_prompt),
-            MessagesPlaceholder(variable_name="chat_history"),
-            ("user", "{input}"),
-            MessagesPlaceholder(variable_name="agent_scratchpad"),
-        ])
-
-        agent = create_openai_tools_agent(
-            llm=self.llm,
-            tools=self.tools,
-            prompt=prompt
+        prompt = ChatPromptTemplate.from_messages(
+            [
+                ("system", system_prompt),
+                MessagesPlaceholder(variable_name="chat_history"),
+                ("user", "{input}"),
+                MessagesPlaceholder(variable_name="agent_scratchpad"),
+            ]
         )
+
+        agent = create_openai_tools_agent(llm=self.llm, tools=self.tools, prompt=prompt)
 
         return AgentExecutor(
             agent=agent,
@@ -131,7 +131,7 @@ class PortfolioAgent:
             verbose=True,
             memory=self.memory,
             handle_parsing_errors=True,
-            max_iterations=5
+            max_iterations=5,
         )
 
     def chat(self, message: str) -> str:
@@ -140,7 +140,9 @@ class PortfolioAgent:
             # Add current portfolio context if available
             context = self._get_portfolio_context()
             if context:
-                enhanced_message = f"Current portfolio context: {context}\n\nUser message: {message}"
+                enhanced_message = (
+                    f"Current portfolio context: {context}\n\nUser message: {message}"
+                )
             else:
                 enhanced_message = message
 
@@ -160,8 +162,10 @@ class PortfolioAgent:
             total_value = self.portfolio_manager.get_portfolio_value()
             positions_count = len(portfolio.positions)
 
-            return (f"Portfolio '{portfolio.name}' loaded with "
-                   f"${total_value:,.2f} total value across {positions_count} positions.")
+            return (
+                f"Portfolio '{portfolio.name}' loaded with "
+                f"${total_value:,.2f} total value across {positions_count} positions."
+            )
 
         except Exception:
             return ""
@@ -186,8 +190,12 @@ To get started, I can create a new portfolio for you or load an existing one. Ju
             else:
                 # Get portfolio summary
                 summary_tool = next(
-                    (tool for tool in self.portfolio_tools if tool.name == "get_portfolio_summary"),
-                    None
+                    (
+                        tool
+                        for tool in self.portfolio_tools
+                        if tool.name == "get_portfolio_summary"
+                    ),
+                    None,
                 )
 
                 if summary_tool:

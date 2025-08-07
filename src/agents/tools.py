@@ -2,28 +2,32 @@
 LangChain tools for portfolio management and analysis.
 """
 
-from datetime import datetime, date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import List, Optional
 
 from langchain.tools import BaseTool
 from pydantic import BaseModel, Field
 
+from ..data_providers.manager import DataProviderManager
 from ..portfolio.manager import PortfolioManager
 from ..portfolio.models import TransactionType
 from ..utils.metrics import FinancialMetricsCalculator
-from ..data_providers.manager import DataProviderManager
 
 
 class PortfolioToolInput(BaseModel):
     """Base input model for portfolio tools."""
+
     pass
 
 
 class AddTransactionInput(PortfolioToolInput):
     """Input for adding a transaction."""
+
     symbol: str = Field(description="Stock symbol (e.g., AAPL, TSLA)")
-    transaction_type: str = Field(description="Type: buy, sell, dividend, deposit, withdrawal")
+    transaction_type: str = Field(
+        description="Type: buy, sell, dividend, deposit, withdrawal"
+    )
     quantity: float = Field(description="Number of shares or amount")
     price: float = Field(description="Price per share or total amount")
     fees: float = Field(default=0.0, description="Transaction fees")
@@ -33,21 +37,27 @@ class AddTransactionInput(PortfolioToolInput):
 
 class GetPortfolioSummaryInput(PortfolioToolInput):
     """Input for portfolio summary."""
-    include_metrics: bool = Field(default=True, description="Include performance metrics")
+
+    include_metrics: bool = Field(
+        default=True, description="Include performance metrics"
+    )
 
 
 class SearchInstrumentInput(PortfolioToolInput):
     """Input for instrument search."""
+
     query: str = Field(description="Search query (symbol or company name)")
 
 
 class GetPriceInput(PortfolioToolInput):
     """Input for getting current price."""
+
     symbol: str = Field(description="Stock symbol")
 
 
 class GetMetricsInput(PortfolioToolInput):
     """Input for getting portfolio metrics."""
+
     days: int = Field(default=365, description="Number of days to analyze")
     benchmark: str = Field(default="SPY", description="Benchmark symbol for comparison")
 
@@ -55,8 +65,8 @@ class GetMetricsInput(PortfolioToolInput):
 class AddTransactionTool(BaseTool):
     """Tool for adding transactions to the portfolio."""
 
-    name : str = "add_transaction"
-    description : str = """Add a transaction to the portfolio. Supports:
+    name: str = "add_transaction"
+    description: str = """Add a transaction to the portfolio. Supports:
     - buy/sell stocks: specify symbol, quantity, price
     - deposit/withdraw cash: use 'CASH' as symbol
     - dividends: specify symbol and amount
@@ -65,25 +75,33 @@ class AddTransactionTool(BaseTool):
     - "I sold 25 TSLA shares at $200 yesterday"
     - "I deposited $5000 cash"
     """
-    args_schema : type[BaseModel] = AddTransactionInput
-    portfolio_manager : PortfolioManager | None = None
+    args_schema: type[BaseModel] = AddTransactionInput
+    portfolio_manager: PortfolioManager | None = None
 
     def __init__(self, portfolio_manager: PortfolioManager):
         super().__init__()
         self.portfolio_manager = portfolio_manager
 
-    def _run(self, symbol: str, transaction_type: str, quantity: float, price: float,
-             fees: float = 0.0, days_ago: int = 0, notes: Optional[str] = None) -> str:
+    def _run(
+        self,
+        symbol: str,
+        transaction_type: str,
+        quantity: float,
+        price: float,
+        fees: float = 0.0,
+        days_ago: int = 0,
+        notes: Optional[str] = None,
+    ) -> str:
         """Add a transaction to the portfolio."""
         try:
             # Parse transaction type
             txn_type_map = {
-                'buy': TransactionType.BUY,
-                'sell': TransactionType.SELL,
-                'dividend': TransactionType.DIVIDEND,
-                'deposit': TransactionType.DEPOSIT,
-                'withdrawal': TransactionType.WITHDRAWAL,
-                'withdraw': TransactionType.WITHDRAWAL
+                "buy": TransactionType.BUY,
+                "sell": TransactionType.SELL,
+                "dividend": TransactionType.DIVIDEND,
+                "deposit": TransactionType.DEPOSIT,
+                "withdrawal": TransactionType.WITHDRAWAL,
+                "withdraw": TransactionType.WITHDRAWAL,
             }
 
             txn_type = txn_type_map.get(transaction_type.lower())
@@ -101,7 +119,7 @@ class AddTransactionTool(BaseTool):
                 price=Decimal(str(price)),
                 timestamp=timestamp,
                 fees=Decimal(str(fees)),
-                notes=notes
+                notes=notes,
             )
 
             if success:
@@ -116,13 +134,19 @@ class AddTransactionTool(BaseTool):
 class GetPortfolioSummaryTool(BaseTool):
     """Tool for getting portfolio summary."""
 
-    name : str = "get_portfolio_summary"
-    description : str = "Get a comprehensive summary of the current portfolio including positions, cash balances, and performance."
-    args_schema : type[BaseModel]= GetPortfolioSummaryInput
+    name: str = "get_portfolio_summary"
+    description: str = (
+        "Get a comprehensive summary of the current portfolio including positions, cash balances, and performance."
+    )
+    args_schema: type[BaseModel] = GetPortfolioSummaryInput
     portfolio_manager: PortfolioManager | None = None
     metrics_calculator: FinancialMetricsCalculator | None = None
 
-    def __init__(self, portfolio_manager: PortfolioManager, metrics_calculator: FinancialMetricsCalculator):
+    def __init__(
+        self,
+        portfolio_manager: PortfolioManager,
+        metrics_calculator: FinancialMetricsCalculator,
+    ):
         super().__init__()
         self.portfolio_manager = portfolio_manager
         self.metrics_calculator = metrics_calculator
@@ -131,7 +155,9 @@ class GetPortfolioSummaryTool(BaseTool):
         """Get portfolio summary."""
         try:
             if not self.portfolio_manager.current_portfolio:
-                return "❌ No portfolio loaded. Please create or load a portfolio first."
+                return (
+                    "❌ No portfolio loaded. Please create or load a portfolio first."
+                )
 
             portfolio = self.portfolio_manager.current_portfolio
 
@@ -146,7 +172,7 @@ class GetPortfolioSummaryTool(BaseTool):
                 f"📊 **Portfolio Summary: {portfolio.name}**",
                 f"💰 **Total Value**: ${total_value:,.2f} {portfolio.base_currency.value}",
                 f"📅 **Created**: {portfolio.created_at.strftime('%Y-%m-%d')}",
-                ""
+                "",
             ]
 
             # Cash balances
@@ -161,9 +187,9 @@ class GetPortfolioSummaryTool(BaseTool):
                 summary.append("📈 **Current Positions:**")
                 for pos in positions:
                     pnl_str = ""
-                    if pos['unrealized_pnl'] is not None:
-                        pnl = float(pos['unrealized_pnl'])
-                        pnl_pct = float(pos['unrealized_pnl_percent'] or 0)
+                    if pos["unrealized_pnl"] is not None:
+                        pnl = float(pos["unrealized_pnl"])
+                        pnl_pct = float(pos["unrealized_pnl_percent"] or 0)
                         pnl_emoji = "📈" if pnl >= 0 else "📉"
                         pnl_str = f" | {pnl_emoji} {pnl:+.2f} ({pnl_pct:+.1f}%)"
 
@@ -177,10 +203,14 @@ class GetPortfolioSummaryTool(BaseTool):
             # Basic metrics if requested
             if include_metrics:
                 metrics = self.portfolio_manager.get_performance_metrics()
-                if 'error' not in metrics:
+                if "error" not in metrics:
                     summary.append("📊 **Performance Metrics:**")
-                    summary.append(f"  • Total Return: {metrics.get('total_return_percent', 0):.2f}%")
-                    summary.append(f"  • Volatility: {metrics.get('annualized_volatility_percent', 0):.2f}%")
+                    summary.append(
+                        f"  • Total Return: {metrics.get('total_return_percent', 0):.2f}%"
+                    )
+                    summary.append(
+                        f"  • Volatility: {metrics.get('annualized_volatility_percent', 0):.2f}%"
+                    )
                     summary.append("")
 
             return "\n".join(summary)
@@ -192,9 +222,11 @@ class GetPortfolioSummaryTool(BaseTool):
 class SearchInstrumentTool(BaseTool):
     """Tool for searching financial instruments."""
 
-    name : str = "search_instrument"
-    description : str = "Search for stocks, ETFs, or other financial instruments by symbol or company name."
-    args_schema : type[BaseModel] = SearchInstrumentInput
+    name: str = "search_instrument"
+    description: str = (
+        "Search for stocks, ETFs, or other financial instruments by symbol or company name."
+    )
+    args_schema: type[BaseModel] = SearchInstrumentInput
     data_manager: DataProviderManager | None = None
 
     def __init__(self, data_manager: DataProviderManager):
@@ -216,7 +248,11 @@ class SearchInstrumentTool(BaseTool):
                     f"• **{instrument.symbol}** - {instrument.name}\n"
                     f"  Type: {instrument.instrument_type.value.title()} | "
                     f"Currency: {instrument.currency.value}"
-                    + (f" | Exchange: {instrument.exchange}" if instrument.exchange else "")
+                    + (
+                        f" | Exchange: {instrument.exchange}"
+                        if instrument.exchange
+                        else ""
+                    )
                 )
 
             return "\n".join(search_results)
@@ -228,9 +264,11 @@ class SearchInstrumentTool(BaseTool):
 class GetCurrentPriceTool(BaseTool):
     """Tool for getting current price of an instrument."""
 
-    name : str = "get_current_price"
-    description : str = "Get the current market price of a stock, ETF, or other financial instrument."
-    args_schema : type[BaseModel] = GetPriceInput
+    name: str = "get_current_price"
+    description: str = (
+        "Get the current market price of a stock, ETF, or other financial instrument."
+    )
+    args_schema: type[BaseModel] = GetPriceInput
     data_manager: DataProviderManager | None = None
 
     def __init__(self, data_manager: DataProviderManager):
@@ -258,13 +296,19 @@ class GetCurrentPriceTool(BaseTool):
 class GetPortfolioMetricsTool(BaseTool):
     """Tool for getting detailed portfolio metrics."""
 
-    name : str = "get_portfolio_metrics"
-    description : str = "Calculate detailed portfolio performance metrics including volatility, Sharpe ratio, drawdown, alpha, and beta."
-    args_schema : type[BaseModel] = GetMetricsInput
+    name: str = "get_portfolio_metrics"
+    description: str = (
+        "Calculate detailed portfolio performance metrics including volatility, Sharpe ratio, drawdown, alpha, and beta."
+    )
+    args_schema: type[BaseModel] = GetMetricsInput
     portfolio_manager: PortfolioManager | None = None
     metrics_calculator: FinancialMetricsCalculator | None = None
 
-    def __init__(self, portfolio_manager: PortfolioManager, metrics_calculator: FinancialMetricsCalculator):
+    def __init__(
+        self,
+        portfolio_manager: PortfolioManager,
+        metrics_calculator: FinancialMetricsCalculator,
+    ):
         super().__init__()
         self.portfolio_manager = portfolio_manager
         self.metrics_calculator = metrics_calculator
@@ -289,7 +333,7 @@ class GetPortfolioMetricsTool(BaseTool):
                 snapshots, benchmark_symbol=benchmark
             )
 
-            if 'error' in metrics:
+            if "error" in metrics:
                 return f"❌ {metrics['error']}"
 
             result = [
@@ -311,15 +355,17 @@ class GetPortfolioMetricsTool(BaseTool):
             ]
 
             # Add benchmark comparison if available
-            if metrics.get('benchmark_available'):
-                result.extend([
-                    "",
-                    f"**📊 vs {benchmark}:**",
-                    f"  • Beta: {metrics.get('beta', 0):.3f}",
-                    f"  • Alpha: {metrics.get('alpha', 0)*100:.2f}%",
-                    f"  • Information Ratio: {metrics.get('information_ratio', 0):.3f}",
-                    f"  • Benchmark Return: {metrics.get('benchmark_return', 0)*100:.2f}%"
-                ])
+            if metrics.get("benchmark_available"):
+                result.extend(
+                    [
+                        "",
+                        f"**📊 vs {benchmark}:**",
+                        f"  • Beta: {metrics.get('beta', 0):.3f}",
+                        f"  • Alpha: {metrics.get('alpha', 0)*100:.2f}%",
+                        f"  • Information Ratio: {metrics.get('information_ratio', 0):.3f}",
+                        f"  • Benchmark Return: {metrics.get('benchmark_return', 0)*100:.2f}%",
+                    ]
+                )
 
             return "\n".join(result)
 
@@ -330,8 +376,8 @@ class GetPortfolioMetricsTool(BaseTool):
 class GetTransactionHistoryTool(BaseTool):
     """Tool for getting transaction history."""
 
-    name : str = "get_transaction_history"
-    description : str = "Get recent transaction history for the portfolio."
+    name: str = "get_transaction_history"
+    description: str = "Get recent transaction history for the portfolio."
     portfolio_manager: PortfolioManager | None = None
 
     def __init__(self, portfolio_manager: PortfolioManager):
@@ -352,17 +398,19 @@ class GetTransactionHistoryTool(BaseTool):
             result = [f"📝 **Transaction History** (Last {days} days)", ""]
 
             for txn in transactions[:20]:  # Limit to 20 most recent
-                date_str = txn['timestamp'].strftime('%Y-%m-%d')
-                txn_type = txn['type'].upper()
-                symbol = txn['symbol']
+                date_str = txn["timestamp"].strftime("%Y-%m-%d")
+                txn_type = txn["type"].upper()
+                symbol = txn["symbol"]
 
-                if txn_type in ['BUY', 'SELL']:
+                if txn_type in ["BUY", "SELL"]:
                     result.append(
                         f"• {date_str}: {txn_type} {txn['quantity']} {symbol} "
                         f"@ ${txn['price']} (Total: ${txn['total_value']})"
                     )
-                elif txn_type == 'DIVIDEND':
-                    result.append(f"• {date_str}: DIVIDEND {symbol} ${txn['total_value']}")
+                elif txn_type == "DIVIDEND":
+                    result.append(
+                        f"• {date_str}: DIVIDEND {symbol} ${txn['total_value']}"
+                    )
                 else:
                     result.append(f"• {date_str}: {txn_type} ${txn['total_value']}")
 
@@ -372,9 +420,11 @@ class GetTransactionHistoryTool(BaseTool):
             return f"❌ Error getting transaction history: {str(e)}"
 
 
-def create_portfolio_tools(portfolio_manager: PortfolioManager,
-                          data_manager: DataProviderManager,
-                          metrics_calculator: FinancialMetricsCalculator) -> List[BaseTool]:
+def create_portfolio_tools(
+    portfolio_manager: PortfolioManager,
+    data_manager: DataProviderManager,
+    metrics_calculator: FinancialMetricsCalculator,
+) -> List[BaseTool]:
     """Create all portfolio management tools."""
     print("HELLO")
     return [
@@ -383,5 +433,5 @@ def create_portfolio_tools(portfolio_manager: PortfolioManager,
         SearchInstrumentTool(data_manager),
         GetCurrentPriceTool(data_manager),
         GetPortfolioMetricsTool(portfolio_manager, metrics_calculator),
-        GetTransactionHistoryTool(portfolio_manager)
+        GetTransactionHistoryTool(portfolio_manager),
     ]
