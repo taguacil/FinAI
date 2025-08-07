@@ -7,7 +7,7 @@ import logging
 from abc import ABC, abstractmethod
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Dict, List, Optional, Tuple, Callable
+from typing import List, Optional, Callable
 from dataclasses import dataclass
 from functools import wraps
 
@@ -25,7 +25,7 @@ def retry_with_backoff(max_retries: int = 3, base_delay: float = 1.0, max_delay:
                 except (RateLimitError, ConnectionError, TimeoutError) as e:
                     if attempt == max_retries - 1:
                         raise e
-                    
+
                     delay = min(base_delay * (2 ** attempt), max_delay)
                     logging.warning(f"API call failed (attempt {attempt + 1}/{max_retries}), retrying in {delay}s: {e}")
                     time.sleep(delay)
@@ -67,12 +67,12 @@ class InstrumentInfo:
 
 class BaseDataProvider(ABC):
     """Abstract base class for all financial data providers."""
-    
+
     def __init__(self):
         self.name = "Base Provider"
         self.last_request_time = 0
         self.min_request_interval = 0.1  # Minimum seconds between requests
-        
+
     def _rate_limit(self):
         """Enforce rate limiting between requests."""
         current_time = time.time()
@@ -80,7 +80,7 @@ class BaseDataProvider(ABC):
         if time_since_last < self.min_request_interval:
             time.sleep(self.min_request_interval - time_since_last)
         self.last_request_time = time.time()
-    
+
     @retry_with_backoff(max_retries=3)
     @abstractmethod
     def get_current_price(self, symbol: str) -> Optional[Decimal]:

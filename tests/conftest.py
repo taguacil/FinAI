@@ -2,7 +2,6 @@
 Pytest configuration and shared fixtures for Portfolio Tracker tests.
 """
 
-import os
 import sys
 import tempfile
 from datetime import datetime, date, timedelta
@@ -132,10 +131,10 @@ def portfolio_with_transactions(
     portfolio.add_transaction(sample_buy_transaction)
     portfolio.add_transaction(sample_sell_transaction)
     portfolio.add_transaction(sample_dividend_transaction)
-    
+
     # Add some cash
     portfolio.cash_balances[Currency.USD] = Decimal("1000.00")
-    
+
     return portfolio
 
 
@@ -169,11 +168,11 @@ def sample_price_data() -> List[Dict]:
     """Create sample price data for testing."""
     base_date = date(2024, 1, 1)
     prices = []
-    
+
     for i in range(30):
         price_date = base_date + timedelta(days=i)
         price = 100 + (i * 0.5) + (i % 5)  # Trending up with some volatility
-        
+
         prices.append({
             "date": price_date,
             "open": price - 0.5,
@@ -182,7 +181,7 @@ def sample_price_data() -> List[Dict]:
             "close": price,
             "volume": 1000000 + (i * 10000),
         })
-    
+
     return prices
 
 
@@ -192,29 +191,29 @@ def sample_returns() -> List[float]:
     # Generate 252 trading days of sample returns (roughly 1 year)
     import random
     random.seed(42)  # For reproducible tests
-    
+
     returns = []
     for _ in range(252):
         # Generate realistic daily returns (mean ~0.08% daily, std ~1.2%)
         daily_return = random.normalvariate(0.0008, 0.012)
         returns.append(daily_return)
-    
+
     return returns
 
 
 @pytest.fixture(autouse=True)
 def mock_external_apis(monkeypatch):
     """Mock external API calls to avoid network dependencies in tests."""
-    
+
     def mock_yfinance_price(*args, **kwargs):
         return Decimal("150.00")
-    
+
     def mock_alpha_vantage_price(*args, **kwargs):
         return Decimal("150.00")
-    
+
     def mock_exchange_rate(*args, **kwargs):
         return Decimal("1.0")
-    
+
     # Mock the actual API methods if needed
     # monkeypatch.setattr("yfinance.Ticker.info", lambda x: {"regularMarketPrice": 150.00})
     # This would be expanded based on actual implementation needs
@@ -236,11 +235,11 @@ def pytest_collection_modifyitems(config, items):
         # Add unit marker to all tests in unit/ directory
         if "unit" in str(item.fspath):
             item.add_marker(pytest.mark.unit)
-        
+
         # Add integration marker to all tests in integration/ directory
         elif "integration" in str(item.fspath):
             item.add_marker(pytest.mark.integration)
-        
+
         # Mark tests that use external APIs
         if "external" in item.name or "api" in item.name.lower():
             item.add_marker(pytest.mark.external)

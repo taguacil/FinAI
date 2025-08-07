@@ -4,24 +4,24 @@ Yahoo Finance data provider implementation.
 
 import yfinance as yf
 import pandas as pd
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from decimal import Decimal
-from typing import Dict, List, Optional
+from typing import List, Optional
 import time
 
-from .base import BaseDataProvider, PriceData, InstrumentInfo, DataProviderError, InvalidSymbolError, RateLimitError, ConnectionError, TimeoutError
+from .base import BaseDataProvider, PriceData, InstrumentInfo, InvalidSymbolError, RateLimitError, ConnectionError, TimeoutError
 from ..portfolio.models import Currency, InstrumentType
 
 
 class YahooFinanceProvider(BaseDataProvider):
     """Yahoo Finance data provider for stocks, ETFs, and some other instruments."""
-    
+
     def __init__(self):
         """Initialize Yahoo Finance provider."""
         self.name = "Yahoo Finance"
         self.last_request_time = 0
         self.min_request_interval = 0.1  # Minimum time between requests (100ms)
-    
+
     def _rate_limit(self):
         """Simple rate limiting to avoid overwhelming the API."""
         current_time = time.time()
@@ -29,28 +29,28 @@ class YahooFinanceProvider(BaseDataProvider):
         if time_since_last < self.min_request_interval:
             time.sleep(self.min_request_interval - time_since_last)
         self.last_request_time = time.time()
-    
+
     def _get_ticker(self, symbol: str) -> yf.Ticker:
         """Get yfinance Ticker object with rate limiting."""
         self._rate_limit()
         return yf.Ticker(symbol)
-    
+
     def get_current_price(self, symbol: str) -> Optional[Decimal]:
         """Get current price for a symbol."""
         try:
             ticker = self._get_ticker(symbol)
             info = ticker.info
-            
+
             if not info or info.get('regularMarketPrice') is None:
                 raise InvalidSymbolError(f"Invalid or delisted symbol: {symbol}")
-            
+
             # Try different price fields
             price = info.get('currentPrice') or info.get('regularMarketPrice') or info.get('previousClose')
-            
+
             if price is not None:
                 return Decimal(str(price))
             return None
-            
+
         except InvalidSymbolError:
             raise
         except Exception as e:
@@ -64,18 +64,18 @@ class YahooFinanceProvider(BaseDataProvider):
             else:
                 print(f"Error getting current price for {symbol}: {e}")
                 return None
-    
+
     def get_historical_prices(self, symbol: str, start_date: date, end_date: date) -> List[PriceData]:
         """Get historical price data for a symbol."""
         try:
             ticker = self._get_ticker(symbol)
-            
+
             # Get historical data
             hist = ticker.history(start=start_date, end=end_date + timedelta(days=1))
-            
+
             if hist.empty:
                 return []
-            
+
             price_data = []
             for date_idx, row in hist.iterrows():
                 try:
@@ -91,22 +91,22 @@ class YahooFinanceProvider(BaseDataProvider):
                 except (ValueError, TypeError) as e:
                     print(f"Error processing price data for {symbol} on {date_idx.date()}: {e}")
                     continue
-            
+
             return price_data
-            
+
         except Exception as e:
             print(f"Error getting historical prices for {symbol}: {e}")
             return []
-    
+
     def get_instrument_info(self, symbol: str) -> Optional[InstrumentInfo]:
         """Get detailed information about an instrument."""
         try:
             ticker = self._get_ticker(symbol)
             info = ticker.info
-            
+
             if not info or 'symbol' not in info:
                 return None
-            
+
             # Map Yahoo Finance quote types to our instrument types
             quote_type = info.get('quoteType', '').upper()
             if quote_type in ['EQUITY', 'STOCK']:
@@ -119,14 +119,14 @@ class YahooFinanceProvider(BaseDataProvider):
                 instrument_type = InstrumentType.CRYPTO
             else:
                 instrument_type = InstrumentType.STOCK  # Default fallback
-            
+
             # Get currency
             currency_str = info.get('currency', 'USD')
             try:
                 currency = Currency(currency_str)
             except ValueError:
                 currency = Currency.USD
-            
+
             return InstrumentInfo(
                 symbol=symbol.upper(),
                 name=info.get('longName') or info.get('shortName') or symbol,
@@ -139,11 +139,11 @@ class YahooFinanceProvider(BaseDataProvider):
                 market_cap=Decimal(str(info['marketCap'])) if info.get('marketCap') else None,
                 description=info.get('longBusinessSummary')
             )
-            
+
         except Exception as e:
             print(f"Error getting instrument info for {symbol}: {e}")
             return None
-    
+
     def search_instruments(self, query: str) -> List[InstrumentInfo]:
         """Search for instruments by name or symbol."""
         # Yahoo Finance doesn't have a direct search API through yfinance
@@ -153,12 +153,12 @@ class YahooFinanceProvider(BaseDataProvider):
             return [info] if info else []
         except Exception:
             return []
-    
+
     def get_exchange_rate(self, from_currency: Currency, to_currency: Currency) -> Optional[Decimal]:
         """Get current exchange rate between two currencies."""
         if from_currency == to_currency:
             return Decimal("1")
-        
+
         try:
             # Yahoo Finance uses format like "EURUSD=X" for forex pairs
             if from_currency == Currency.USD:
@@ -174,13 +174,13 @@ class YahooFinanceProvider(BaseDataProvider):
                 rate = ticker.info.get('regularMarketPrice')
                 if rate:
                     return Decimal(str(rate))
-            
+
             return None
-            
+
         except Exception as e:
             print(f"Error getting exchange rate {from_currency} to {to_currency}: {e}")
             return None
-    
+
     def supports_instrument_type(self, instrument_type: InstrumentType) -> bool:
         """Check if provider supports a specific instrument type."""
         supported_types = {
