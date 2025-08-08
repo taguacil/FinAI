@@ -6,7 +6,7 @@ A comprehensive portfolio management system with AI-powered investment advice, b
 
 ### 📊 Portfolio Management
 - **Multi-currency support** - Track investments in USD, EUR, GBP, JPY, CHF, CAD, AUD, BTC, ETH
-- **Real-time price updates** - Automatic price fetching from Yahoo Finance and Alpha Vantage
+- **Manual price updates** - Fetch latest prices only when explicitly requested
 - **Transaction tracking** - Buy, sell, dividend, deposit, withdrawal transactions
 - **Position management** - Automatic cost basis calculation and P&L tracking
 - **Historical snapshots** - Daily portfolio value tracking for performance analysis
@@ -50,7 +50,7 @@ A comprehensive portfolio management system with AI-powered investment advice, b
    ```bash
    # Install uv if not already installed
    curl -LsSf https://astral.sh/uv/install.sh | sh
-   
+
    # Install project dependencies
    uv sync
    ```
@@ -99,12 +99,18 @@ python main.py --data-dir /path/to/data
    - Add transactions through forms or AI chat
    - View real-time positions and P&L
 
-2. **AI Chat**
+2. **Data Management**
+   - **Manual Price Updates**: Click "Update Current Prices" in the sidebar to fetch latest market data
+   - **Snapshot Creation**: Use "Create Snapshots Since Last" to generate historical snapshots
+   - **Data Freshness**: The UI shows when prices were last updated and warns about stale data
+   - **API Control**: This approach helps control API usage and ensures you only get fresh data when needed
+
+3. **AI Chat**
    - Natural language portfolio management
    - Investment advice and market insights
    - Transaction parsing: "I bought 50 shares of AAPL at $150"
 
-3. **Analytics Dashboard**
+4. **Analytics Dashboard**
    - Performance metrics and risk analysis
    - Interactive charts and visualizations
    - Benchmark comparisons
@@ -243,7 +249,7 @@ snapshots = storage.load_snapshots(portfolio_id)
 
 # Calculate comprehensive metrics
 metrics = calculator.calculate_portfolio_metrics(
-    snapshots, 
+    snapshots,
     benchmark_symbol="SPY"
 )
 

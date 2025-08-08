@@ -21,7 +21,7 @@ def main():
     parser = argparse.ArgumentParser(description="AI Portfolio Tracker")
     parser.add_argument(
         "--mode",
-        choices=["ui", "init", "sample", "status"],
+        choices=["ui", "init", "sample", "status", "update-snapshots"],
         default="ui",
         help="Application mode",
     )
@@ -143,8 +143,8 @@ def main():
     elif args.mode == "ui":
         print("🚀 Starting Portfolio Tracker UI...")
 
-        # Initialize system first
-        print("   Initializing system...")
+        # Initialize system first (load existing data only)
+        print("   Loading existing data...")
         init_results = initializer.initialize_system()
 
         # Check if we have any portfolios
@@ -163,12 +163,72 @@ def main():
 
             print("🌐 Starting web interface...")
             print("   Open your browser to: http://localhost:8501")
+            print("   Note: Use the 'Update Prices' button to fetch new data")
             run_streamlit()
         except ImportError as e:
             print(f"❌ Failed to start UI: {e}")
             print("   Make sure all dependencies are installed: uv sync")
         except Exception as e:
             print(f"❌ Error starting UI: {e}")
+
+    elif args.mode == "update-snapshots":
+        print("📊 Updating portfolio snapshots...")
+
+        # Initialize system
+        init_results = initializer.initialize_system()
+        if not init_results.get("system_ready", False):
+            print("❌ System initialization failed")
+            return
+
+        # Find and update sample portfolio
+        portfolios = initializer.storage.list_portfolios()
+        sample_portfolio_id = None
+
+        for portfolio_id in portfolios:
+            portfolio = initializer.storage.load_portfolio(portfolio_id)
+            if portfolio and (
+                "Sample" in portfolio.name or "My Portfolio" in portfolio.name
+            ):
+                sample_portfolio_id = portfolio_id
+                break
+
+        if not sample_portfolio_id:
+            print("❌ No sample portfolio found")
+            return
+
+        print(f"📈 Updating snapshots for portfolio: {sample_portfolio_id}")
+
+        # Load portfolio and update prices
+        portfolio_manager = initializer.portfolio_manager
+        portfolio_manager.load_portfolio(sample_portfolio_id)
+
+        # Update current prices
+        print("🔄 Updating current market prices...")
+        price_results = portfolio_manager.update_current_prices()
+        print(f"   Price update results: {price_results}")
+
+        # Create snapshots for the past 60 days
+        print("📅 Creating historical snapshots...")
+        from datetime import date, timedelta
+
+        end_date = date.today()
+        snapshots_created = 0
+
+        for days_back in range(60, -1, -1):
+            snapshot_date = end_date - timedelta(days=days_back)
+            try:
+                snapshot = portfolio_manager.create_snapshot(snapshot_date)
+                snapshots_created += 1
+                if days_back % 10 == 0:
+                    print(f"   Created snapshot for {snapshot_date}")
+            except Exception as e:
+                print(f"   ⚠️  Failed to create snapshot for {snapshot_date}: {e}")
+
+        print(f"✅ Successfully created {snapshots_created} snapshots")
+
+        # Show current portfolio value
+        portfolio_value = portfolio_manager.get_portfolio_value()
+        print(f"💰 Current portfolio value: ${portfolio_value:,.2f}")
 
     else:
         parser.print_help()

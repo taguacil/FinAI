@@ -42,7 +42,9 @@ class YahooFinanceProvider(BaseDataProvider):
     def _get_ticker(self, symbol: str) -> yf.Ticker:
         """Get yfinance Ticker object with rate limiting."""
         self._rate_limit()
-        return yf.Ticker(symbol)
+        # Normalize common user inputs like $SYMBOL
+        norm = symbol.strip().lstrip("$")
+        return yf.Ticker(norm)
 
     def get_current_price(self, symbol: str) -> Optional[Decimal]:
         """Get current price for a symbol."""

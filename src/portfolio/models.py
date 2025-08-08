@@ -6,7 +6,7 @@ from datetime import date as date_type
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Callable
 
 from pydantic import BaseModel, Field
 
@@ -198,7 +198,7 @@ class Portfolio(BaseModel):
         self._update_position_from_transaction(transaction)
 
     def _update_position_from_transaction(self, transaction: Transaction) -> None:
-        """Update position based on a new transaction."""
+        """Update position and cash balances based on a new transaction."""
         symbol = transaction.instrument.symbol
 
         if transaction.transaction_type == TransactionType.BUY:
@@ -219,12 +219,24 @@ class Portfolio(BaseModel):
                     average_cost=transaction.price,
                 )
 
+            # Decrease cash by the total cost of the buy (including fees)
+            currency = transaction.currency
+            if currency not in self.cash_balances:
+                self.cash_balances[currency] = Decimal("0")
+            self.cash_balances[currency] -= transaction.total_value
+
         elif transaction.transaction_type == TransactionType.SELL:
             if symbol in self.positions:
                 pos = self.positions[symbol]
                 pos.quantity -= transaction.quantity
                 if pos.quantity <= 0:
                     del self.positions[symbol]
+
+            # Increase cash by proceeds from the sale (net of fees)
+            currency = transaction.currency
+            if currency not in self.cash_balances:
+                self.cash_balances[currency] = Decimal("0")
+            self.cash_balances[currency] += transaction.total_value
 
         elif transaction.transaction_type in [
             TransactionType.DEPOSIT,
@@ -239,6 +251,16 @@ class Portfolio(BaseModel):
                 self.cash_balances[currency] += transaction.total_value
             else:
                 self.cash_balances[currency] -= transaction.total_value
+
+        elif transaction.transaction_type in [
+            TransactionType.DIVIDEND,
+            TransactionType.INTEREST,
+        ]:
+            # Income adds to cash in the transaction currency
+            currency = transaction.currency
+            if currency not in self.cash_balances:
+                self.cash_balances[currency] = Decimal("0")
+            self.cash_balances[currency] += transaction.total_value
 
     def get_total_value(
         self, exchange_rates: Optional[Dict[str, Decimal]] = None
@@ -276,6 +298,33 @@ class Portfolio(BaseModel):
                     total += (
                         position.market_value * exchange_rates[position_currency_code]
                     )
+
+        return total
+
+    def get_total_value_with_rate_function(
+        self, rate_function: Callable[[Currency, Currency], Optional[Decimal]]
+    ) -> Decimal:
+        """Calculate total portfolio value using a rate function for on-demand currency conversion."""
+        total = Decimal("0")
+
+        # Add cash balances
+        for currency, amount in self.cash_balances.items():
+            if currency == self.base_currency:
+                total += amount
+            else:
+                rate = rate_function(currency, self.base_currency)
+                if rate:
+                    total += amount * rate
+
+        # Add position values
+        for position in self.positions.values():
+            if position.market_value:
+                if position.instrument.currency == self.base_currency:
+                    total += position.market_value
+                else:
+                    rate = rate_function(position.instrument.currency, self.base_currency)
+                    if rate:
+                        total += position.market_value * rate
 
         return total
 

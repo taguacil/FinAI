@@ -112,19 +112,41 @@ class FileBasedStorage:
         return False
 
     def save_snapshot(self, portfolio_id: str, snapshot: PortfolioSnapshot) -> None:
-        """Save portfolio snapshot to file."""
+        """Save portfolio snapshot into a consolidated file per portfolio.
+
+        New structure: data/snapshots/{portfolio_id}.json containing an array of
+        daily snapshots. If a snapshot for the date exists, it is replaced.
+        """
         try:
-            # Validate portfolio ID
             if not portfolio_id.replace("-", "").replace("_", "").isalnum():
                 raise ValueError(f"Invalid portfolio ID: {portfolio_id}")
 
-            portfolio_snapshots_dir = self.snapshots_dir / portfolio_id
-            portfolio_snapshots_dir.mkdir(exist_ok=True)
+            consolidated_path = self.snapshots_dir / f"{portfolio_id}.json"
 
-            filepath = portfolio_snapshots_dir / f"{snapshot.date.isoformat()}.json"
+            snapshots_data = []
+            if consolidated_path.exists():
+                with open(consolidated_path, "r") as f:
+                    snapshots_data = json.load(f, object_hook=PortfolioDecoder.decimal_hook)
 
-            with open(filepath, "w") as f:
-                json.dump(snapshot.dict(), f, cls=PortfolioEncoder, indent=2)
+                # Ensure snapshots_data is a list
+                if isinstance(snapshots_data, dict):
+                    # Migrate old single-snapshot structure if encountered
+                    snapshots_data = [snapshots_data]
+
+            # Remove any existing snapshot for this date
+            snapshot_date_str = snapshot.date.isoformat()
+            snapshots_data = [s for s in snapshots_data if s.get("date") != snapshot_date_str]
+
+            # Append new snapshot (ensure date is a string for consistent sorting)
+            new_item = snapshot.dict()
+            new_item["date"] = snapshot_date_str
+            snapshots_data.append(new_item)
+
+            # Sort by date
+            snapshots_data.sort(key=lambda s: s.get("date"))
+
+            with open(consolidated_path, "w") as f:
+                json.dump(snapshots_data, f, cls=PortfolioEncoder, indent=2)
 
         except Exception as e:
             raise RuntimeError(
@@ -138,31 +160,56 @@ class FileBasedStorage:
         end_date: Optional[date] = None,
     ) -> List[PortfolioSnapshot]:
         """Load portfolio snapshots within date range."""
-        portfolio_snapshots_dir = self.snapshots_dir / portfolio_id
+        consolidated_path = self.snapshots_dir / f"{portfolio_id}.json"
 
-        if not portfolio_snapshots_dir.exists():
+        # If consolidated file doesn't exist, attempt migration from legacy per-day files
+        if not consolidated_path.exists():
+            legacy_dir = self.snapshots_dir / portfolio_id
+            if legacy_dir.exists():
+                try:
+                    legacy_snapshots: List[PortfolioSnapshot] = []
+                    for filepath in legacy_dir.glob("*.json"):
+                        try:
+                            with open(filepath, "r") as f:
+                                data = json.load(f, object_hook=PortfolioDecoder.decimal_hook)
+                            legacy_snapshots.append(PortfolioSnapshot(**data))
+                        except Exception as e:
+                            print(f"Error loading legacy snapshot {filepath}: {e}")
+                            continue
+
+                    # Write consolidated file
+                    legacy_snapshots_sorted = sorted(legacy_snapshots, key=lambda x: x.date)
+                    with open(consolidated_path, "w") as f:
+                        json.dump([s.dict() for s in legacy_snapshots_sorted], f, cls=PortfolioEncoder, indent=2)
+                except Exception as e:
+                    print(f"Error migrating legacy snapshots for {portfolio_id}: {e}")
+                    # Fall through to return from legacy in-memory if migration fails
+                    pass
+
+        if not consolidated_path.exists():
             return []
 
-        snapshots = []
-        for filepath in portfolio_snapshots_dir.glob("*.json"):
-            try:
-                snapshot_date = date.fromisoformat(filepath.stem)
+        try:
+            with open(consolidated_path, "r") as f:
+                snapshots_data = json.load(f, object_hook=PortfolioDecoder.decimal_hook)
 
-                # Filter by date range if specified
-                if start_date and snapshot_date < start_date:
+            snapshots: List[PortfolioSnapshot] = []
+            for item in snapshots_data:
+                try:
+                    snap = PortfolioSnapshot(**item)
+                    if start_date and snap.date < start_date:
+                        continue
+                    if end_date and snap.date > end_date:
+                        continue
+                    snapshots.append(snap)
+                except Exception as e:
+                    print(f"Error parsing snapshot item: {e}")
                     continue
-                if end_date and snapshot_date > end_date:
-                    continue
 
-                with open(filepath, "r") as f:
-                    data = json.load(f, object_hook=PortfolioDecoder.decimal_hook)
-
-                snapshots.append(PortfolioSnapshot(**data))
-            except Exception as e:
-                print(f"Error loading snapshot {filepath}: {e}")
-                continue
-
-        return sorted(snapshots, key=lambda x: x.date)
+            return sorted(snapshots, key=lambda x: x.date)
+        except Exception as e:
+            print(f"Error loading snapshots for {portfolio_id}: {e}")
+            return []
 
     def get_latest_snapshot(self, portfolio_id: str) -> Optional[PortfolioSnapshot]:
         """Get the most recent snapshot for a portfolio."""

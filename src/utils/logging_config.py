@@ -86,8 +86,8 @@ def configure_module_loggers():
     # Metrics calculations - moderate verbosity
     logging.getLogger("src.utils.metrics").setLevel(logging.INFO)
 
-    # External libraries - reduce noise
-    logging.getLogger("yfinance").setLevel(logging.WARNING)
+    # External libraries - reduce noise (suppress yfinance error spam)
+    logging.getLogger("yfinance").setLevel(logging.CRITICAL)
     logging.getLogger("alpha_vantage").setLevel(logging.WARNING)
     logging.getLogger("requests").setLevel(logging.WARNING)
     logging.getLogger("urllib3").setLevel(logging.WARNING)

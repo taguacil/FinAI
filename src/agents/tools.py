@@ -24,14 +24,19 @@ class PortfolioToolInput(BaseModel):
 class AddTransactionInput(PortfolioToolInput):
     """Input for adding a transaction."""
 
-    symbol: str = Field(description="Stock symbol (e.g., AAPL, TSLA)")
+    symbol: Optional[str] = Field(default=None, description="Stock symbol (e.g., AAPL, TSLA)")
+    isin: Optional[str] = Field(default=None, description="ISIN identifier (e.g., US0378331005)")
     transaction_type: str = Field(
         description="Type: buy, sell, dividend, deposit, withdrawal"
     )
     quantity: float = Field(description="Number of shares or amount")
     price: float = Field(description="Price per share or total amount")
     fees: float = Field(default=0.0, description="Transaction fees")
-    days_ago: int = Field(default=0, description="How many days ago (0 for today)")
+    date: Optional[str] = Field(
+        default=None,
+        description="Trade date in YYYY-MM-DD format (defaults to today if omitted)",
+    )
+    days_ago: int = Field(default=0, description="Fallback: how many days ago (0 for today)")
     notes: Optional[str] = Field(default=None, description="Additional notes")
 
 
@@ -84,11 +89,13 @@ class AddTransactionTool(BaseTool):
 
     def _run(
         self,
-        symbol: str,
-        transaction_type: str,
-        quantity: float,
-        price: float,
+        symbol: Optional[str] = None,
+        isin: Optional[str] = None,
+        transaction_type: str = "buy",
+        quantity: float = 0.0,
+        price: float = 0.0,
         fees: float = 0.0,
+        date: Optional[str] = None,
         days_ago: int = 0,
         notes: Optional[str] = None,
     ) -> str:
@@ -108,22 +115,35 @@ class AddTransactionTool(BaseTool):
             if not txn_type:
                 return f"Invalid transaction type: {transaction_type}. Use: buy, sell, dividend, deposit, withdrawal"
 
-            # Calculate timestamp
-            timestamp = datetime.now() - timedelta(days=days_ago)
+            # Determine timestamp: prefer explicit date, else days_ago
+            if date:
+                try:
+                    timestamp = datetime.strptime(date, "%Y-%m-%d")
+                except ValueError:
+                    return "Invalid date format. Use YYYY-MM-DD."
+            else:
+                timestamp = datetime.now() - timedelta(days=days_ago)
+
+            # Choose identifier: symbol or ISIN (at least one required)
+            identifier = (symbol or isin)
+            if not identifier:
+                return "Please provide either a symbol or an ISIN."
 
             # Add transaction
             success = self.portfolio_manager.add_transaction(
-                symbol=symbol.upper(),
+                symbol=identifier.upper(),
                 transaction_type=txn_type,
                 quantity=Decimal(str(quantity)),
                 price=Decimal(str(price)),
                 timestamp=timestamp,
                 fees=Decimal(str(fees)),
                 notes=notes,
+                isin=(isin.upper() if isin else None),
             )
 
             if success:
-                return f"✅ Added {transaction_type} transaction: {quantity} {symbol} @ ${price}"
+                label = (symbol.upper() if symbol else isin.upper())
+                return f"✅ Added {transaction_type} transaction: {quantity} {label} @ ${price}"
             else:
                 return "❌ Failed to add transaction. Make sure a portfolio is loaded."
 
@@ -161,8 +181,8 @@ class GetPortfolioSummaryTool(BaseTool):
 
             portfolio = self.portfolio_manager.current_portfolio
 
-            # Update current prices
-            self.portfolio_manager.update_current_prices()
+            # Note: Prices are not automatically updated - use existing data only
+            # Users should manually update prices via the UI if needed
 
             # Get positions summary
             positions = self.portfolio_manager.get_position_summary()
@@ -426,7 +446,6 @@ def create_portfolio_tools(
     metrics_calculator: FinancialMetricsCalculator,
 ) -> List[BaseTool]:
     """Create all portfolio management tools."""
-    print("HELLO")
     return [
         AddTransactionTool(portfolio_manager),
         GetPortfolioSummaryTool(portfolio_manager, metrics_calculator),
