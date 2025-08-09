@@ -241,9 +241,13 @@ class PortfolioInitializer:
             today = date.today()
             start_date = last_snapshot_date + timedelta(days=1)
             if start_date <= today:
-                snaps = self.portfolio_manager.create_snapshots_for_range(start_date, today)
+                snaps = self.portfolio_manager.create_snapshots_for_range(
+                    start_date, today
+                )
                 results["snapshots_created"] = len(snaps)
-                logging.info(f"Created {len(snaps)} snapshots from {start_date} to {today}")
+                logging.info(
+                    f"Created {len(snaps)} snapshots from {start_date} to {today}"
+                )
 
             logging.info(f"Portfolio update completed for {portfolio.name}: {results}")
             return results
@@ -302,7 +306,9 @@ class PortfolioInitializer:
             logging.info("Creating historical snapshots for sample portfolio...")
             end_date = date.today()
             start_date = end_date - timedelta(days=60)
-            snaps = self.portfolio_manager.create_snapshots_for_range(start_date, end_date)
+            snaps = self.portfolio_manager.create_snapshots_for_range(
+                start_date, end_date
+            )
             snapshots_created = len(snaps)
             logging.info(
                 f"Created {snapshots_created} snapshots for sample portfolio: {name} ({portfolio.id})"
@@ -432,7 +438,9 @@ class PortfolioInitializer:
             # Create snapshots for the specified number of days using historical prices
             end_date = date.today()
             start_date = end_date - timedelta(days=days)
-            snaps = self.portfolio_manager.create_snapshots_for_range(start_date, end_date)
+            snaps = self.portfolio_manager.create_snapshots_for_range(
+                start_date, end_date
+            )
             snapshots_created = len(snaps)
             failed_snapshots = 0
 

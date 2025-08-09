@@ -19,7 +19,11 @@ class FinancialMetricsCalculator:
         """Initialize metrics calculator."""
         self.data_manager = data_manager or DataProviderManager()
 
-    def calculate_returns(self, snapshots: List[PortfolioSnapshot], cash_flows_by_day: Optional[Dict[date, float]] = None) -> List[float]:
+    def calculate_returns(
+        self,
+        snapshots: List[PortfolioSnapshot],
+        cash_flows_by_day: Optional[Dict[date, float]] = None,
+    ) -> List[float]:
         """Calculate daily time-weighted returns (ignoring external cash injections/withdrawals).
 
         If cash_flows_by_day is provided (base currency amounts, positive for deposits,

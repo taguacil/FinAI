@@ -126,7 +126,9 @@ class FileBasedStorage:
             snapshots_data = []
             if consolidated_path.exists():
                 with open(consolidated_path, "r") as f:
-                    snapshots_data = json.load(f, object_hook=PortfolioDecoder.decimal_hook)
+                    snapshots_data = json.load(
+                        f, object_hook=PortfolioDecoder.decimal_hook
+                    )
 
                 # Ensure snapshots_data is a list
                 if isinstance(snapshots_data, dict):
@@ -135,7 +137,9 @@ class FileBasedStorage:
 
             # Remove any existing snapshot for this date
             snapshot_date_str = snapshot.date.isoformat()
-            snapshots_data = [s for s in snapshots_data if s.get("date") != snapshot_date_str]
+            snapshots_data = [
+                s for s in snapshots_data if s.get("date") != snapshot_date_str
+            ]
 
             # Append new snapshot (ensure date is a string for consistent sorting)
             new_item = snapshot.dict()
@@ -171,16 +175,25 @@ class FileBasedStorage:
                     for filepath in legacy_dir.glob("*.json"):
                         try:
                             with open(filepath, "r") as f:
-                                data = json.load(f, object_hook=PortfolioDecoder.decimal_hook)
+                                data = json.load(
+                                    f, object_hook=PortfolioDecoder.decimal_hook
+                                )
                             legacy_snapshots.append(PortfolioSnapshot(**data))
                         except Exception as e:
                             print(f"Error loading legacy snapshot {filepath}: {e}")
                             continue
 
                     # Write consolidated file
-                    legacy_snapshots_sorted = sorted(legacy_snapshots, key=lambda x: x.date)
+                    legacy_snapshots_sorted = sorted(
+                        legacy_snapshots, key=lambda x: x.date
+                    )
                     with open(consolidated_path, "w") as f:
-                        json.dump([s.dict() for s in legacy_snapshots_sorted], f, cls=PortfolioEncoder, indent=2)
+                        json.dump(
+                            [s.dict() for s in legacy_snapshots_sorted],
+                            f,
+                            cls=PortfolioEncoder,
+                            indent=2,
+                        )
                 except Exception as e:
                     print(f"Error migrating legacy snapshots for {portfolio_id}: {e}")
                     # Fall through to return from legacy in-memory if migration fails

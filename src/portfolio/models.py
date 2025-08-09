@@ -6,7 +6,7 @@ from datetime import date as date_type
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
-from typing import Dict, List, Optional, Callable
+from typing import Callable, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -322,7 +322,9 @@ class Portfolio(BaseModel):
                 if position.instrument.currency == self.base_currency:
                     total += position.market_value
                 else:
-                    rate = rate_function(position.instrument.currency, self.base_currency)
+                    rate = rate_function(
+                        position.instrument.currency, self.base_currency
+                    )
                     if rate:
                         total += position.market_value * rate
 

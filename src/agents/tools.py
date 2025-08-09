@@ -2,6 +2,7 @@
 LangChain tools for portfolio management and analysis.
 """
 
+import math
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import List, Optional
@@ -9,7 +10,6 @@ from typing import List, Optional
 from langchain.tools import BaseTool
 from pydantic import BaseModel, Field
 from pypdf import PdfReader
-import math
 
 from ..data_providers.manager import DataProviderManager
 from ..portfolio.manager import PortfolioManager
@@ -26,8 +26,12 @@ class PortfolioToolInput(BaseModel):
 class AddTransactionInput(PortfolioToolInput):
     """Input for adding a transaction."""
 
-    symbol: Optional[str] = Field(default=None, description="Stock symbol (e.g., AAPL, TSLA)")
-    isin: Optional[str] = Field(default=None, description="ISIN identifier (e.g., US0378331005)")
+    symbol: Optional[str] = Field(
+        default=None, description="Stock symbol (e.g., AAPL, TSLA)"
+    )
+    isin: Optional[str] = Field(
+        default=None, description="ISIN identifier (e.g., US0378331005)"
+    )
     transaction_type: str = Field(
         description="Type: buy, sell, dividend, deposit, withdrawal"
     )
@@ -38,7 +42,9 @@ class AddTransactionInput(PortfolioToolInput):
         default=None,
         description="Trade date in YYYY-MM-DD format (defaults to today if omitted)",
     )
-    days_ago: int = Field(default=0, description="Fallback: how many days ago (0 for today)")
+    days_ago: int = Field(
+        default=0, description="Fallback: how many days ago (0 for today)"
+    )
     notes: Optional[str] = Field(default=None, description="Additional notes")
 
 
@@ -127,7 +133,7 @@ class AddTransactionTool(BaseTool):
                 timestamp = datetime.now() - timedelta(days=days_ago)
 
             # Choose identifier: symbol or ISIN (at least one required)
-            identifier = (symbol or isin)
+            identifier = symbol or isin
             if not identifier:
                 return "Please provide either a symbol or an ISIN."
 
@@ -144,7 +150,7 @@ class AddTransactionTool(BaseTool):
             )
 
             if success:
-                label = (symbol.upper() if symbol else isin.upper())
+                label = symbol.upper() if symbol else isin.upper()
                 return f"✅ Added {transaction_type} transaction: {quantity} {label} @ ${price}"
             else:
                 return "❌ Failed to add transaction. Make sure a portfolio is loaded."
@@ -313,20 +319,49 @@ class SimulateWhatIfTool(BaseTool):
 
             start_date = date_cls.fromisoformat(start)
             end_date = date_cls.fromisoformat(end)
+            if start_date > end_date:
+                return "❌ Start date must be on or before end date."
 
-            symbols = [s.strip().upper() for s in exclude_symbols.split(" ") if s.strip()]
-            ids = [x.strip() for x in exclude_txn_ids.split(" ") if x.strip()]
+            # Split on commas and whitespace
+            import re
 
-            snaps = self.portfolio_manager.simulate_snapshots_for_range(
-                start_date, end_date, exclude_symbols=symbols, exclude_transaction_ids=ids
+            splitter = re.compile(r"[\s,]+")
+            symbols = [
+                s.strip().upper() for s in splitter.split(exclude_symbols) if s.strip()
+            ]
+            ids = [x.strip() for x in splitter.split(exclude_txn_ids) if x.strip()]
+
+            # Baseline (no exclusions)
+            baseline_snaps = self.portfolio_manager.simulate_snapshots_for_range(
+                start_date, end_date
             )
 
-            if not snaps:
+            # What-if with exclusions
+            snaps = self.portfolio_manager.simulate_snapshots_for_range(
+                start_date,
+                end_date,
+                exclude_symbols=symbols,
+                exclude_transaction_ids=ids,
+            )
+
+            if not snaps or not baseline_snaps:
                 return "No snapshots generated for the specified range."
 
             end_value = float(snaps[-1].total_value)
             start_value = float(snaps[0].total_value)
-            total_return = ((end_value - start_value) / start_value * 100) if start_value > 0 else 0.0
+            total_return = (
+                ((end_value - start_value) / start_value * 100)
+                if start_value > 0
+                else 0.0
+            )
+
+            base_end = float(baseline_snaps[-1].total_value)
+            base_start = float(baseline_snaps[0].total_value)
+            base_return = (
+                ((base_end - base_start) / base_start * 100) if base_start > 0 else 0.0
+            )
+            delta_value = end_value - base_end
+            delta_return = total_return - base_return
 
             return (
                 f"📈 What-if Simulation ({start} → {end})\n"
@@ -334,7 +369,9 @@ class SimulateWhatIfTool(BaseTool):
                 f"• Excluded txn ids: {ids or '-'}\n"
                 f"• Start value: ${start_value:,.2f}\n"
                 f"• End value: ${end_value:,.2f}\n"
-                f"• Total return: {total_return:.2f}%"
+                f"• Total return: {total_return:.2f}%\n"
+                f"• Baseline end: ${base_end:,.2f} | Baseline return: {base_return:.2f}%\n"
+                f"• Δ End value vs baseline: {delta_value:+,.2f} | Δ Return: {delta_return:+.2f}%"
             )
         except Exception as e:
             return f"❌ Error running simulation: {str(e)}"
@@ -573,7 +610,9 @@ class CalculatorTool(BaseTool):
     def _run(self, expression: str) -> str:
         try:
             # Allowed names from math
-            allowed_names = {k: getattr(math, k) for k in dir(math) if not k.startswith("__")}
+            allowed_names = {
+                k: getattr(math, k) for k in dir(math) if not k.startswith("__")
+            }
             # Common constants
             allowed_names.update({"pi": math.pi, "e": math.e})
 
@@ -609,7 +648,9 @@ class IngestPdfTool(BaseTool):
             # Truncate extremely long content to keep within LLM context (basic safeguard)
             if len(content) > 200_000:
                 content = content[:200_000] + "\n\n...[truncated]"
-            return f"📄 PDF Content Extracted (length: {len(content)} chars)\n\n{content}"
+            return (
+                f"📄 PDF Content Extracted (length: {len(content)} chars)\n\n{content}"
+            )
         except FileNotFoundError:
             return f"❌ File not found: {path}"
         except Exception as e:

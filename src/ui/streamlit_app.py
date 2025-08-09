@@ -6,13 +6,13 @@ import os
 import sys
 from datetime import date, datetime, timedelta
 from decimal import Decimal
-from typing import Dict, Optional, List
-from pypdf import PdfReader
+from typing import Dict, List, Optional
 
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+from pypdf import PdfReader
 
 # Add src to path for imports
 sys.path.append(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -137,7 +137,9 @@ class PortfolioTrackerUI:
                 if sel_name and sel_name in options:
                     default_index = options.index(sel_name)
 
-            chosen_name = st.sidebar.selectbox("Select Portfolio:", options, index=default_index)
+            chosen_name = st.sidebar.selectbox(
+                "Select Portfolio:", options, index=default_index
+            )
 
             if chosen_name != "None":
                 # Map back to id
@@ -194,7 +196,9 @@ class PortfolioTrackerUI:
             st.sidebar.subheader("🔄 Data Management")
 
             # Combined update: current prices + snapshots since last
-            if st.sidebar.button("🔄 Update Portfolio (Prices + Snapshots)", type="primary"):
+            if st.sidebar.button(
+                "🔄 Update Portfolio (Prices + Snapshots)", type="primary"
+            ):
                 with st.spinner("Updating prices and snapshots..."):
                     price_results = portfolio_manager.update_current_prices()
                     success_count = sum(price_results.values())
@@ -261,13 +265,18 @@ class PortfolioTrackerUI:
 
         # PDF Uploader
         with col_pdf:
-            uploaded_pdf = st.file_uploader("Attach PDF (datasheet)", type=["pdf"], accept_multiple_files=False)
+            uploaded_pdf = st.file_uploader(
+                "Attach PDF (datasheet)", type=["pdf"], accept_multiple_files=False
+            )
             if uploaded_pdf is not None:
-                st.caption(f"Selected: {uploaded_pdf.name} ({uploaded_pdf.size/1024:.1f} KB)")
+                st.caption(
+                    f"Selected: {uploaded_pdf.name} ({uploaded_pdf.size/1024:.1f} KB)"
+                )
                 pdf_bytes = uploaded_pdf.read()
                 if st.button("Attach PDF to Chat"):
                     try:
                         import io
+
                         reader = PdfReader(io.BytesIO(pdf_bytes))
                         texts = []
                         for page in reader.pages:
@@ -283,10 +292,12 @@ class PortfolioTrackerUI:
                         else:
                             if len(content) > 100_000:
                                 content = content[:100_000] + "\n\n...[truncated]"
-                            st.session_state.chat_history.append({
-                                "role": "user",
-                                "content": f"📄 Attached PDF: {uploaded_pdf.name}\n\n{content}"
-                            })
+                            st.session_state.chat_history.append(
+                                {
+                                    "role": "user",
+                                    "content": f"📄 Attached PDF: {uploaded_pdf.name}\n\n{content}",
+                                }
+                            )
                             st.success("PDF content attached to chat.")
                             st.rerun()
                     except Exception as e:
@@ -294,6 +305,7 @@ class PortfolioTrackerUI:
                 if st.button("Analyze PDF Now"):
                     try:
                         import io
+
                         reader = PdfReader(io.BytesIO(pdf_bytes))
                         texts = []
                         for page in reader.pages:
@@ -314,10 +326,14 @@ class PortfolioTrackerUI:
                                 f"Summarize key points, risks, and any financial metrics or terms.\n\n"
                                 f"Extracted text follows:\n{content}"
                             )
-                            st.session_state.chat_history.append({"role": "user", "content": prompt})
+                            st.session_state.chat_history.append(
+                                {"role": "user", "content": prompt}
+                            )
                             with st.spinner("Analyzing PDF..."):
                                 response = agent.chat(prompt)
-                            st.session_state.chat_history.append({"role": "assistant", "content": response})
+                            st.session_state.chat_history.append(
+                                {"role": "assistant", "content": response}
+                            )
                             st.rerun()
                     except Exception as e:
                         st.error(f"Failed to analyze PDF: {e}")
@@ -326,13 +342,50 @@ class PortfolioTrackerUI:
             st.markdown("**AI Model**")
             # Single dropdown with all supported models and their providers
             all_models = [
-                ("Azure GPT-4.1", {"provider": "azure-openai", "endpoint": "https://kallamai.openai.azure.com/", "model": "gpt-4.1"}),
-                ("Azure GPT-4.1 Mini", {"provider": "azure-openai", "endpoint": "https://kallamai.openai.azure.com/", "model": "gpt-4.1-mini"}),
-                ("Azure o4-mini", {"provider": "azure-openai", "endpoint": "https://kallamai.openai.azure.com/", "model": "o4-mini"}),
-                ("Azure GPT-5 Mini", {"provider": "azure-openai", "endpoint": "https://kallamai.openai.azure.com/", "model": "gpt-5-mini"}),
-                ("Claude Sonnet 4 (thinking)", {"provider": "anthropic", "model": "claude-sonnet-4-20250514"}),
-                ("Gemini 2.0 Flash Lite", {"provider": "vertex-ai", "model": "gemini-2.0-flash-lite-001"}),
-                ("Gemini 2.5 Pro (thinking)", {"provider": "vertex-ai", "model": "gemini-2.5-pro"}),
+                (
+                    "Azure GPT-4.1",
+                    {
+                        "provider": "azure-openai",
+                        "endpoint": "https://kallamai.openai.azure.com/",
+                        "model": "gpt-4.1",
+                    },
+                ),
+                (
+                    "Azure GPT-4.1 Mini",
+                    {
+                        "provider": "azure-openai",
+                        "endpoint": "https://kallamai.openai.azure.com/",
+                        "model": "gpt-4.1-mini",
+                    },
+                ),
+                (
+                    "Azure o4-mini",
+                    {
+                        "provider": "azure-openai",
+                        "endpoint": "https://kallamai.openai.azure.com/",
+                        "model": "o4-mini",
+                    },
+                ),
+                (
+                    "Azure GPT-5 Mini",
+                    {
+                        "provider": "azure-openai",
+                        "endpoint": "https://kallamai.openai.azure.com/",
+                        "model": "gpt-5-mini",
+                    },
+                ),
+                (
+                    "Claude Sonnet 4 (thinking)",
+                    {"provider": "anthropic", "model": "claude-sonnet-4-20250514"},
+                ),
+                (
+                    "Gemini 2.0 Flash Lite",
+                    {"provider": "vertex-ai", "model": "gemini-2.0-flash-lite-001"},
+                ),
+                (
+                    "Gemini 2.5 Pro (thinking)",
+                    {"provider": "vertex-ai", "model": "gemini-2.5-pro"},
+                ),
             ]
             model_choice = st.selectbox("Model", all_models, format_func=lambda x: x[0])
             if st.button("Apply Model"):
@@ -355,7 +408,9 @@ class PortfolioTrackerUI:
                             anthropic_model=meta.get("model"),
                         )
                     else:
-                        project = os.getenv("GOOGLE_VERTEX_PROJECT", "mystic-fountain-415918")
+                        project = os.getenv(
+                            "GOOGLE_VERTEX_PROJECT", "mystic-fountain-415918"
+                        )
                         location = os.getenv("GOOGLE_VERTEX_LOCATION", "us-central1")
                         agent.set_llm_config(
                             provider="vertex-ai",
@@ -419,19 +474,27 @@ class PortfolioTrackerUI:
             ref_prices_by_symbol: Dict[str, Decimal] = {}
             for snap in ytd_snaps:
                 for sym, snap_pos in snap.positions.items():
-                    if sym not in ref_prices_by_symbol and snap_pos.current_price is not None:
+                    if (
+                        sym not in ref_prices_by_symbol
+                        and snap_pos.current_price is not None
+                    ):
                         ref_prices_by_symbol[sym] = snap_pos.current_price
 
             # Current price: last available snapshot (scan from most recent backwards to fill gaps)
             curr_prices_by_symbol: Dict[str, Decimal] = {}
             for snap in reversed(ytd_snaps):
                 for sym, snap_pos in snap.positions.items():
-                    if sym not in curr_prices_by_symbol and snap_pos.current_price is not None:
+                    if (
+                        sym not in curr_prices_by_symbol
+                        and snap_pos.current_price is not None
+                    ):
                         curr_prices_by_symbol[sym] = snap_pos.current_price
 
             # Fallback to latest snapshot overall if YTD list is empty
             if not ytd_snaps:
-                latest_snap = portfolio_manager.storage.get_latest_snapshot(portfolio.id)
+                latest_snap = portfolio_manager.storage.get_latest_snapshot(
+                    portfolio.id
+                )
                 if latest_snap:
                     for sym, snap_pos in latest_snap.positions.items():
                         if snap_pos.current_price is not None:
@@ -545,7 +608,7 @@ class PortfolioTrackerUI:
                     # Geometric aggregation for period return
                     twr = 1.0
                     for r in daily_returns:
-                        twr *= (1.0 + r)
+                        twr *= 1.0 + r
                     ytd_perf_pct = (twr - 1.0) * 100.0
                     ytd_col1.metric("YTD Performance (TWR)", f"{ytd_perf_pct:.2f}%")
                 else:
@@ -581,20 +644,31 @@ class PortfolioTrackerUI:
 
             for pos in positions:
                 symbol = pos["symbol"]
-                instrument = portfolio.positions.get(symbol).instrument if symbol in portfolio.positions else None
+                instrument = (
+                    portfolio.positions.get(symbol).instrument
+                    if symbol in portfolio.positions
+                    else None
+                )
                 isin = instrument.isin if instrument else None
                 currency_code = pos.get("currency")
 
                 # Market value in base currency
                 mv = pos.get("market_value") or Decimal("0")
                 mv_base = self._convert_to_base(
-                    portfolio_manager, mv, currency_code, base_currency.value, allow_fetch=False
+                    portfolio_manager,
+                    mv,
+                    currency_code,
+                    base_currency.value,
+                    allow_fetch=False,
                 )
 
                 # Convert unrealized PnL to base currency
                 unreal_val_native = pos.get("unrealized_pnl") or Decimal("0")
                 unreal_val_base = self._convert_to_base(
-                    portfolio_manager, unreal_val_native, currency_code, base_currency.value
+                    portfolio_manager,
+                    unreal_val_native,
+                    currency_code,
+                    base_currency.value,
                 )
 
                 # Category classification
@@ -618,19 +692,29 @@ class PortfolioTrackerUI:
                             ytd_market_pnl_native = (curr_px - ref_price) * qty_dec
                             base_val_start_native = ref_price * qty_dec
                             if base_val_start_native != 0:
-                                ytd_market_pct = (ytd_market_pnl_native / base_val_start_native) * 100
+                                ytd_market_pct = (
+                                    ytd_market_pnl_native / base_val_start_native
+                                ) * 100
                 except Exception:
                     pass
 
                 # Total buy price (cost basis) in native and base
                 total_buy_native = pos.get("cost_basis")
-                total_buy_base = self._convert_to_base(
-                    portfolio_manager,
-                    total_buy_native if total_buy_native is not None else Decimal("0"),
-                    currency_code,
-                    base_currency.value,
-                    allow_fetch=False,
-                ) if total_buy_native is not None else None
+                total_buy_base = (
+                    self._convert_to_base(
+                        portfolio_manager,
+                        (
+                            total_buy_native
+                            if total_buy_native is not None
+                            else Decimal("0")
+                        ),
+                        currency_code,
+                        base_currency.value,
+                        allow_fetch=False,
+                    )
+                    if total_buy_native is not None
+                    else None
+                )
 
                 # Latest purchase date for this position
                 latest_buy_date = None
@@ -638,7 +722,8 @@ class PortfolioTrackerUI:
                     buys = [
                         t.timestamp.date()
                         for t in portfolio.transactions
-                        if t.instrument.symbol == symbol and t.transaction_type == TransactionType.BUY
+                        if t.instrument.symbol == symbol
+                        and t.transaction_type == TransactionType.BUY
                     ]
                     if buys:
                         latest_buy_date = max(buys).isoformat()
@@ -664,7 +749,13 @@ class PortfolioTrackerUI:
             # No YTD aggregate metrics in overview to avoid external data fetches
 
             # Render by category using cards
-            categories = ["Short Term", "Bonds", "Equities", "Alternatives", "Miscellaneous"]
+            categories = [
+                "Short Term",
+                "Bonds",
+                "Equities",
+                "Alternatives",
+                "Miscellaneous",
+            ]
             for cat in categories:
                 group = [e for e in enriched if e.get("category") == cat]
                 # Include cash under Short Term as its own items
@@ -673,20 +764,25 @@ class PortfolioTrackerUI:
                     for curr, amt in portfolio.cash_balances.items():
                         curr_code = getattr(curr, "value", str(curr))
                         amt_base = self._convert_to_base(
-                            portfolio_manager, Decimal(str(amt)), curr_code, base_currency.value
+                            portfolio_manager,
+                            Decimal(str(amt)),
+                            curr_code,
+                            base_currency.value,
                         )
-                        cash_items.append({
-                            "name": f"Cash ({curr_code})",
-                            "isin": "-",
-                            "currency": curr_code,
-                            "quantity": None,
-                            "current_price": None,
-                            "market_value_base": amt_base,
-                            "unrealized_pnl_base": None,
-                            "unrealized_pnl_percent": None,
-                            "ytd_unrealized_pnl": None,
-                            "ytd_unrealized_pnl_percent": None,
-                        })
+                        cash_items.append(
+                            {
+                                "name": f"Cash ({curr_code})",
+                                "isin": "-",
+                                "currency": curr_code,
+                                "quantity": None,
+                                "current_price": None,
+                                "market_value_base": amt_base,
+                                "unrealized_pnl_base": None,
+                                "unrealized_pnl_percent": None,
+                                "ytd_unrealized_pnl": None,
+                                "ytd_unrealized_pnl_percent": None,
+                            }
+                        )
 
                 if not group and not cash_items:
                     continue
@@ -696,7 +792,7 @@ class PortfolioTrackerUI:
                 # Display in rows of 3 cards
                 for i in range(0, len(items), 3):
                     cols = st.columns(3)
-                    for col, item in zip(cols, items[i:i+3]):
+                    for col, item in zip(cols, items[i : i + 3]):
                         with col:
                             self._render_position_card(item, base_currency.value)
 
@@ -704,9 +800,19 @@ class PortfolioTrackerUI:
             st.subheader("📊 Allocation")
             col_a, col_b = st.columns(2)
             with col_a:
-                self.plot_allocation_by_category(enriched, base_currency.value, portfolio_manager, allow_fetch=fetch_live)
+                self.plot_allocation_by_category(
+                    enriched,
+                    base_currency.value,
+                    portfolio_manager,
+                    allow_fetch=fetch_live,
+                )
             with col_b:
-                self.plot_allocation_by_currency(enriched, base_currency.value, portfolio_manager, allow_fetch=fetch_live)
+                self.plot_allocation_by_currency(
+                    enriched,
+                    base_currency.value,
+                    portfolio_manager,
+                    allow_fetch=fetch_live,
+                )
 
         # Add transaction form
         st.subheader("➕ Add Transaction")
@@ -733,7 +839,13 @@ class PortfolioTrackerUI:
         else:
             st.info("No recent transactions found.")
 
-    def plot_allocation_by_category(self, positions, base_currency_code: str, portfolio_manager, allow_fetch: bool = False):
+    def plot_allocation_by_category(
+        self,
+        positions,
+        base_currency_code: str,
+        portfolio_manager,
+        allow_fetch: bool = False,
+    ):
         """Plot allocation by category using base-currency market values."""
         if not positions:
             return
@@ -751,10 +863,16 @@ class PortfolioTrackerUI:
             for curr, amt in portfolio.cash_balances.items():
                 curr_code = getattr(curr, "value", str(curr))
                 cash_total_base += self._convert_to_base(
-                    portfolio_manager, Decimal(str(amt)), curr_code, base_currency_code, allow_fetch=allow_fetch
+                    portfolio_manager,
+                    Decimal(str(amt)),
+                    curr_code,
+                    base_currency_code,
+                    allow_fetch=allow_fetch,
                 )
         if cash_total_base > 0:
-            totals["Short Term"] = totals.get("Short Term", 0.0) + float(cash_total_base)
+            totals["Short Term"] = totals.get("Short Term", 0.0) + float(
+                cash_total_base
+            )
 
         labels = list(totals.keys())
         values = [totals[k] for k in labels]
@@ -772,7 +890,13 @@ class PortfolioTrackerUI:
         fig.update_layout(height=400)
         st.plotly_chart(fig, use_container_width=True)
 
-    def plot_allocation_by_currency(self, positions, base_currency_code: str, portfolio_manager, allow_fetch: bool = False):
+    def plot_allocation_by_currency(
+        self,
+        positions,
+        base_currency_code: str,
+        portfolio_manager,
+        allow_fetch: bool = False,
+    ):
         """Plot allocation by instrument currency (converted to base for weights)."""
         if not positions:
             return
@@ -796,12 +920,18 @@ class PortfolioTrackerUI:
                 curr_code = getattr(curr, "value", str(curr))
                 if allow_fetch:
                     amt_base = self._convert_to_base(
-                        portfolio_manager, Decimal(str(amt)), curr_code, base_currency_code, allow_fetch=allow_fetch
+                        portfolio_manager,
+                        Decimal(str(amt)),
+                        curr_code,
+                        base_currency_code,
+                        allow_fetch=allow_fetch,
                     )
                     totals[curr_code] = totals.get(curr_code, 0.0) + float(amt_base)
                 else:
                     if curr_code == base_currency_code:
-                        totals[curr_code] = totals.get(curr_code, 0.0) + float(Decimal(str(amt)))
+                        totals[curr_code] = totals.get(curr_code, 0.0) + float(
+                            Decimal(str(amt))
+                        )
 
         labels = list(totals.keys())
         values = [totals[k] for k in labels]
@@ -861,13 +991,9 @@ class PortfolioTrackerUI:
         ]
         # YTD Market from snapshots (native currency) — always show, N/A if missing
         if ytd_mkt_native is not None:
-            ytd_line = (
-                f"<div style='font-size:13px; margin-top:4px;'><em>YTD Market:</em> {colored(ytd_mkt_native)} {currency} ({fmt_signed(ytd_mkt_pct)}%)</div>"
-            )
+            ytd_line = f"<div style='font-size:13px; margin-top:4px;'><em>YTD Market:</em> {colored(ytd_mkt_native)} {currency} ({fmt_signed(ytd_mkt_pct)}%)</div>"
         else:
-            ytd_line = (
-                f"<div style='font-size:13px; margin-top:4px;'><em>YTD Market:</em> N/A</div>"
-            )
+            ytd_line = f"<div style='font-size:13px; margin-top:4px;'><em>YTD Market:</em> N/A</div>"
         lines.append(ytd_line)
         if total_buy is not None:
             qty_str = fmt_money(qty) if qty is not None else "-"
@@ -891,7 +1017,14 @@ class PortfolioTrackerUI:
         )
         st.markdown(card_html, unsafe_allow_html=True)
 
-    def _convert_to_base(self, portfolio_manager, amount: Decimal, from_currency_code: str, base_currency_code: str, allow_fetch: bool = False) -> Decimal:
+    def _convert_to_base(
+        self,
+        portfolio_manager,
+        amount: Decimal,
+        from_currency_code: str,
+        base_currency_code: str,
+        allow_fetch: bool = False,
+    ) -> Decimal:
         """Convert an amount from a currency code to portfolio base currency using provider rates."""
         if amount is None:
             return Decimal("0")
@@ -902,6 +1035,7 @@ class PortfolioTrackerUI:
             return Decimal(str(amount))
         try:
             from src.portfolio.models import Currency
+
             rate = portfolio_manager.data_manager.get_exchange_rate(
                 Currency(from_currency_code), Currency(base_currency_code)
             )
@@ -928,7 +1062,11 @@ class PortfolioTrackerUI:
         # Alternatives: crypto or gold
         if itype == "crypto":
             return "Alternatives"
-        if any(hint in name for hint in ["gold", "bullion"]) or symbol in {"GLD", "IAU", "PHYS"}:
+        if any(hint in name for hint in ["gold", "bullion"]) or symbol in {
+            "GLD",
+            "IAU",
+            "PHYS",
+        }:
             return "Alternatives"
 
         # Equities default for stocks and ETFs
@@ -937,11 +1075,15 @@ class PortfolioTrackerUI:
 
         return "Miscellaneous"
 
-    def _get_reference_price_for_date(self, portfolio_manager, symbol: str, ref_date: date) -> Optional[Decimal]:
+    def _get_reference_price_for_date(
+        self, portfolio_manager, symbol: str, ref_date: date
+    ) -> Optional[Decimal]:
         """Get historical close price for the given date, with short lookahead if missing."""
         try:
             # Exact date
-            prices = portfolio_manager.data_manager.get_historical_prices(symbol, ref_date, ref_date)
+            prices = portfolio_manager.data_manager.get_historical_prices(
+                symbol, ref_date, ref_date
+            )
             if prices:
                 pd0 = prices[0]
                 return (
@@ -949,7 +1091,9 @@ class PortfolioTrackerUI:
                 )
             # Look ahead a few business days (first available of the year)
             end = ref_date + timedelta(days=5)
-            prices = portfolio_manager.data_manager.get_historical_prices(symbol, ref_date, end)
+            prices = portfolio_manager.data_manager.get_historical_prices(
+                symbol, ref_date, end
+            )
             if prices:
                 pd0 = prices[0]
                 return (
@@ -966,7 +1110,9 @@ class PortfolioTrackerUI:
 
             with col1:
                 symbol = st.text_input("Symbol (optional)", placeholder="e.g., AAPL")
-                isin = st.text_input("ISIN (optional)", placeholder="e.g., US0378331005")
+                isin = st.text_input(
+                    "ISIN (optional)", placeholder="e.g., US0378331005"
+                )
                 transaction_type = st.selectbox(
                     "Type", ["buy", "sell", "dividend", "deposit", "withdrawal"]
                 )
@@ -1010,7 +1156,7 @@ class PortfolioTrackerUI:
                         )
 
                         if success:
-                            label = (symbol.upper() if symbol else isin.upper())
+                            label = symbol.upper() if symbol else isin.upper()
                             st.success(
                                 f"Added {transaction_type} transaction: {quantity} {label} @ ${price}"
                             )
@@ -1021,7 +1167,9 @@ class PortfolioTrackerUI:
                     except Exception as e:
                         st.error(f"Error adding transaction: {e}")
                 else:
-                    st.error("Please provide a Symbol or ISIN, and ensure quantity/price are greater than 0")
+                    st.error(
+                        "Please provide a Symbol or ISIN, and ensure quantity/price are greater than 0"
+                    )
 
     def render_analytics(self, portfolio_manager, metrics_calculator):
         """Render portfolio analytics and charts."""
@@ -1061,7 +1209,9 @@ class PortfolioTrackerUI:
         )
 
         if len(snapshots) < 2:
-            st.warning("Insufficient data for selected period. Please add more historical data or create snapshots.")
+            st.warning(
+                "Insufficient data for selected period. Please add more historical data or create snapshots."
+            )
             return
 
         # Show snapshot data freshness
@@ -1077,13 +1227,72 @@ class PortfolioTrackerUI:
                     f"✅ Latest snapshot: {latest_snapshot_date.strftime('%Y-%m-%d')}"
                 )
 
-        # Calculate metrics (time-weighted returns using external flows)
+        # Calculate metrics (time-weighted returns in display currency)
         with st.spinner("Calculating metrics..."):
-            flows = portfolio_manager.get_external_cash_flows_by_day(start_date, end_date)
-            flows_float = {d: float(v) for d, v in flows.items()}
+            from src.portfolio.models import Currency as Cur
 
-            # Returns with flows
-            portfolio_returns = metrics_calculator.calculate_returns(snapshots, flows_float)
+            # Build FX helper
+            fx_cache_m: Dict[tuple, Optional[Decimal]] = {}
+            last_pair: Dict[tuple, Optional[Decimal]] = {}
+
+            def fx(day: date, from_code: str, to_code: str) -> Optional[Decimal]:
+                if from_code == to_code:
+                    return Decimal("1")
+                key = (day, from_code, to_code)
+                if key in fx_cache_m:
+                    return fx_cache_m[key]
+                try:
+                    r = portfolio_manager.data_manager.get_historical_fx_rate_on(
+                        day, Cur(from_code), Cur(to_code)
+                    )
+                except Exception:
+                    r = None
+                fx_cache_m[key] = r
+                pair = (from_code, to_code)
+                if r is not None:
+                    last_pair[pair] = r
+                else:
+                    last = last_pair.get(pair)
+                    if last is not None:
+                        r = last
+                        fx_cache_m[key] = r
+                return r
+
+            base_code = (
+                snapshots[0].base_currency.value
+                if hasattr(snapshots[0].base_currency, "value")
+                else str(snapshots[0].base_currency)
+            )
+
+            # Values in display currency
+            values_disp: List[float] = []
+            for s in snapshots:
+                r = fx(s.date, base_code, display_currency_code)
+                v = Decimal(str(s.total_value))
+                if r is not None:
+                    v = v * r
+                values_disp.append(float(v))
+
+            # External cash flows in display currency
+            flows_base = portfolio_manager.get_external_cash_flows_by_day(
+                start_date, end_date
+            )
+            flows_disp: Dict[date, float] = {}
+            for d, a in flows_base.items():
+                r = fx(d, base_code, display_currency_code)
+                val = Decimal(str(a))
+                if r is not None:
+                    val = val * r
+                flows_disp[d] = float(val)
+
+            # Returns with flows (in display currency)
+            portfolio_returns: List[float] = []
+            for i in range(1, len(values_disp)):
+                prev_v = values_disp[i - 1]
+                curr_v = values_disp[i]
+                cf = float(flows_disp.get(snapshots[i].date, 0.0))
+                if prev_v > 0:
+                    portfolio_returns.append((curr_v - prev_v - cf) / prev_v)
             if len(portfolio_returns) == 0:
                 st.error("Could not calculate returns")
                 return
@@ -1093,6 +1302,7 @@ class PortfolioTrackerUI:
 
             # TWR total and annualized
             import numpy as np
+
             twr_product = float(np.prod([1.0 + r for r in portfolio_returns]))
             total_return_twr = twr_product - 1.0
             n = len(portfolio_returns)
@@ -1100,28 +1310,46 @@ class PortfolioTrackerUI:
 
             metrics["total_return"] = total_return_twr
             metrics["annualized_return"] = annualized_return_twr
-            metrics["volatility"] = metrics_calculator.calculate_volatility(portfolio_returns)
-            metrics["sharpe_ratio"] = metrics_calculator.calculate_sharpe_ratio(portfolio_returns)
-            metrics["sortino_ratio"] = metrics_calculator.calculate_sortino_ratio(portfolio_returns)
+            metrics["volatility"] = metrics_calculator.calculate_volatility(
+                portfolio_returns
+            )
+            metrics["sharpe_ratio"] = metrics_calculator.calculate_sharpe_ratio(
+                portfolio_returns
+            )
+            metrics["sortino_ratio"] = metrics_calculator.calculate_sortino_ratio(
+                portfolio_returns
+            )
             # Risk metrics
             md, md_dur = metrics_calculator.calculate_max_drawdown(snapshots)
             metrics["max_drawdown"] = md
             metrics["max_drawdown_duration"] = md_dur
-            metrics["var_5pct"] = metrics_calculator.calculate_value_at_risk(portfolio_returns, 0.05)
-            metrics["cvar_5pct"] = metrics_calculator.calculate_conditional_var(portfolio_returns, 0.05)
-            metrics["calmar_ratio"] = metrics_calculator.calculate_calmar_ratio(portfolio_returns, snapshots)
+            metrics["var_5pct"] = metrics_calculator.calculate_value_at_risk(
+                portfolio_returns, 0.05
+            )
+            metrics["cvar_5pct"] = metrics_calculator.calculate_conditional_var(
+                portfolio_returns, 0.05
+            )
+            metrics["calmar_ratio"] = metrics_calculator.calculate_calmar_ratio(
+                portfolio_returns, snapshots
+            )
 
             # Benchmark-relative metrics computed against the same date range
-            bench_returns = metrics_calculator.get_benchmark_returns(benchmark, start_date, end_date)
+            bench_returns = metrics_calculator.get_benchmark_returns(
+                benchmark, start_date, end_date
+            )
             min_len = min(len(portfolio_returns), len(bench_returns))
             if min_len > 1:
                 pr = portfolio_returns[-min_len:]
                 br = bench_returns[-min_len:]
                 metrics["beta"] = metrics_calculator.calculate_beta(pr, br)
                 metrics["alpha"] = metrics_calculator.calculate_alpha(pr, br)
-                metrics["information_ratio"] = metrics_calculator.calculate_information_ratio(pr, br)
+                metrics["information_ratio"] = (
+                    metrics_calculator.calculate_information_ratio(pr, br)
+                )
                 metrics["benchmark_return"] = float(np.mean(br) * 252)
-                metrics["benchmark_volatility"] = metrics_calculator.calculate_volatility(br)
+                metrics["benchmark_volatility"] = (
+                    metrics_calculator.calculate_volatility(br)
+                )
                 metrics["benchmark_available"] = True
             else:
                 metrics["benchmark_available"] = False
@@ -1169,11 +1397,16 @@ class PortfolioTrackerUI:
 
             # YTD Performance (TWR)
             if len(ytd_snaps) >= 2:
-                ytd_flows = portfolio_manager.get_external_cash_flows_by_day(ytd_start, end_date)
+                ytd_flows = portfolio_manager.get_external_cash_flows_by_day(
+                    ytd_start, end_date
+                )
                 ytd_flows_f = {d: float(v) for d, v in ytd_flows.items()}
-                ytd_returns = metrics_calculator.calculate_returns(ytd_snaps, ytd_flows_f)
+                ytd_returns = metrics_calculator.calculate_returns(
+                    ytd_snaps, ytd_flows_f
+                )
                 if ytd_returns:
                     import numpy as np
+
                     prod = float(np.prod([1.0 + r for r in ytd_returns]))
                     ytd_twr_pct = (prod - 1.0) * 100.0
                     col_ytd1.metric("YTD Performance (TWR)", f"{ytd_twr_pct:.2f}%")
@@ -1188,28 +1421,73 @@ class PortfolioTrackerUI:
                 last_snap = ytd_snaps[-1]
                 disp_code = display_currency_code
                 from src.portfolio.models import Currency as Cur
+
                 for pos in last_snap.positions.values():
-                    if pos.current_price is None or pos.average_cost is None or pos.quantity is None:
+                    if (
+                        pos.current_price is None
+                        or pos.average_cost is None
+                        or pos.quantity is None
+                    ):
                         continue
                     try:
-                        pnl_native = (pos.current_price - pos.average_cost) * pos.quantity
-                        from_code = pos.instrument.currency.value if hasattr(pos.instrument.currency, "value") else str(pos.instrument.currency)
+                        pnl_native = (
+                            pos.current_price - pos.average_cost
+                        ) * pos.quantity
+                        from_code = (
+                            pos.instrument.currency.value
+                            if hasattr(pos.instrument.currency, "value")
+                            else str(pos.instrument.currency)
+                        )
                         if from_code == disp_code:
                             unreal_sum += float(pnl_native)
                         else:
-                            rate = portfolio_manager.data_manager.get_historical_fx_rate_on(last_snap.date, Cur(from_code), Cur(disp_code))
+                            rate = portfolio_manager.data_manager.get_historical_fx_rate_on(
+                                last_snap.date, Cur(from_code), Cur(disp_code)
+                            )
                             if rate:
                                 unreal_sum += float(pnl_native * rate)
                             else:
                                 unreal_sum += float(pnl_native)
                     except Exception:
                         continue
-            col_ytd2.metric(f"Unrealized PnL ({display_currency_code})", f"{unreal_sum:,.2f} {display_currency_code}")
+            col_ytd2.metric(
+                f"Unrealized PnL ({display_currency_code})",
+                f"{unreal_sum:,.2f} {display_currency_code}",
+            )
         except Exception:
             pass
 
-        # Portfolio value chart with category overlays in selected currency
-        self.plot_portfolio_and_categories(snapshots, display_currency_code, portfolio_manager, start_date, end_date)
+        # Prepare benchmark series (aligned to snapshot dates)
+        bench_map: Dict[date, float] = {}
+        try:
+            price_data = portfolio_manager.data_manager.get_historical_prices(
+                benchmark, start_date, end_date
+            )
+            for pd_item in price_data:
+                if pd_item.close_price:
+                    bench_map[pd_item.date] = float(pd_item.close_price)
+        except Exception:
+            bench_map = {}
+
+        # Align benchmark prices to snapshot dates with forward-fill
+        bench_prices_aligned: List[Optional[float]] = []
+        last_px: Optional[float] = None
+        for s in snapshots:
+            px = bench_map.get(s.date, last_px)
+            bench_prices_aligned.append(px)
+            if px is not None:
+                last_px = px
+
+        # Portfolio value chart with category overlays and benchmark in selected currency
+        self.plot_portfolio_and_categories(
+            snapshots,
+            display_currency_code,
+            portfolio_manager,
+            start_date,
+            end_date,
+            benchmark_symbol=benchmark,
+            benchmark_prices_aligned=bench_prices_aligned,
+        )
 
         # Risk metrics
         st.subheader("⚠️ Risk Analysis")
@@ -1226,13 +1504,23 @@ class PortfolioTrackerUI:
                     "Information Ratio", f"{metrics.get('information_ratio', 0):.3f}"
                 )
 
-    def plot_portfolio_and_categories(self, snapshots, display_currency_code: str, portfolio_manager, start_date: date, end_date: date):
+    def plot_portfolio_and_categories(
+        self,
+        snapshots,
+        display_currency_code: str,
+        portfolio_manager,
+        start_date: date,
+        end_date: date,
+        benchmark_symbol: Optional[str] = None,
+        benchmark_prices_aligned: Optional[List[Optional[float]]] = None,
+    ):
         """Plot portfolio and category series in selected currency, plus cumulative returns."""
         if len(snapshots) < 2:
             return
 
-        # FX rate cache
+        # FX rate cache and last-known fallback per pair
         fx_cache: Dict[tuple, Optional[Decimal]] = {}
+        fx_last_rate: Dict[tuple, Optional[Decimal]] = {}
 
         def get_rate(day: date, from_code: str, to_code: str) -> Optional[Decimal]:
             if from_code == to_code:
@@ -1241,6 +1529,7 @@ class PortfolioTrackerUI:
             if key in fx_cache:
                 return fx_cache[key]
             from src.portfolio.models import Currency as Cur
+
             try:
                 rate = portfolio_manager.data_manager.get_historical_fx_rate_on(
                     day, Cur(from_code), Cur(to_code)
@@ -1248,11 +1537,24 @@ class PortfolioTrackerUI:
             except Exception:
                 rate = None
             fx_cache[key] = rate
+            pair_key = (from_code, to_code)
+            if rate is not None:
+                fx_last_rate[pair_key] = rate
+            else:
+                # Fallback to last known rate for this pair if available
+                last = fx_last_rate.get(pair_key)
+                if last is not None:
+                    rate = last
+                    fx_cache[key] = rate
             return rate
 
         # Category classifier (reuse UI logic)
         def classify(instrument) -> str:
-            itype = instrument.instrument_type.value if hasattr(instrument.instrument_type, "value") else str(instrument.instrument_type)
+            itype = (
+                instrument.instrument_type.value
+                if hasattr(instrument.instrument_type, "value")
+                else str(instrument.instrument_type)
+            )
             itype = itype.lower()
             name = (instrument.name or "").lower()
             symbol = (instrument.symbol or "").upper()
@@ -1264,7 +1566,11 @@ class PortfolioTrackerUI:
                 return "Bonds"
             if itype == "crypto":
                 return "Alternatives"
-            if any(h in name for h in ["gold", "bullion"]) or symbol in {"GLD", "IAU", "PHYS"}:
+            if any(h in name for h in ["gold", "bullion"]) or symbol in {
+                "GLD",
+                "IAU",
+                "PHYS",
+            }:
                 return "Alternatives"
             if itype in {"stock", "etf"}:
                 return "Equities"
@@ -1273,7 +1579,11 @@ class PortfolioTrackerUI:
         dates: List[date] = [s.date for s in snapshots]
         # Portfolio line in display currency
         portfolio_values: List[float] = []
-        base_code = snapshots[0].base_currency.value if hasattr(snapshots[0].base_currency, "value") else str(snapshots[0].base_currency)
+        base_code = (
+            snapshots[0].base_currency.value
+            if hasattr(snapshots[0].base_currency, "value")
+            else str(snapshots[0].base_currency)
+        )
         for s in snapshots:
             val = Decimal(str(s.total_value))
             rate = get_rate(s.date, base_code, display_currency_code)
@@ -1282,7 +1592,13 @@ class PortfolioTrackerUI:
             portfolio_values.append(float(val))
 
         # Category lines in display currency
-        categories = ["Short Term", "Bonds", "Equities", "Alternatives", "Miscellaneous"]
+        categories = [
+            "Short Term",
+            "Bonds",
+            "Equities",
+            "Alternatives",
+            "Miscellaneous",
+        ]
         cat_series: Dict[str, List[float]] = {c: [] for c in categories}
 
         for s in snapshots:
@@ -1293,7 +1609,11 @@ class PortfolioTrackerUI:
                     continue
                 instr = pos.instrument
                 cat = classify(instr)
-                from_code = instr.currency.value if hasattr(instr.currency, "value") else str(instr.currency)
+                from_code = (
+                    instr.currency.value
+                    if hasattr(instr.currency, "value")
+                    else str(instr.currency)
+                )
                 val = Decimal(str(pos.market_value))
                 # convert directly to display currency
                 rate = get_rate(s.date, from_code, display_currency_code)
@@ -1307,7 +1627,13 @@ class PortfolioTrackerUI:
         # Plot portfolio and categories
         fig = go.Figure()
         fig.add_trace(
-            go.Scatter(x=dates, y=portfolio_values, mode="lines", name="Portfolio", line=dict(width=2))
+            go.Scatter(
+                x=dates,
+                y=portfolio_values,
+                mode="lines",
+                name="Portfolio",
+                line=dict(width=2),
+            )
         )
         color_map = {
             "Short Term": "#1f77b4",
@@ -1318,8 +1644,37 @@ class PortfolioTrackerUI:
         }
         for c in categories:
             fig.add_trace(
-                go.Scatter(x=dates, y=cat_series[c], mode="lines", name=c, line=dict(color=color_map.get(c)))
+                go.Scatter(
+                    x=dates,
+                    y=cat_series[c],
+                    mode="lines",
+                    name=c,
+                    line=dict(color=color_map.get(c)),
+                )
             )
+
+        # Add benchmark to value chart (scaled to start portfolio value for comparability)
+        if benchmark_symbol and benchmark_prices_aligned:
+            # Create scaled series: benchmark normalized to its first non-None, then scaled to portfolio initial value
+            first_bench = next(
+                (p for p in benchmark_prices_aligned if p is not None), None
+            )
+            if first_bench and portfolio_values:
+                scaled = []
+                for p in benchmark_prices_aligned:
+                    if p is None:
+                        scaled.append(None)
+                    else:
+                        scaled.append(portfolio_values[0] * (p / first_bench))
+                fig.add_trace(
+                    go.Scatter(
+                        x=dates,
+                        y=scaled,
+                        mode="lines",
+                        name=f"{benchmark_symbol} (scaled)",
+                        line=dict(color="#555", dash="dash"),
+                    )
+                )
 
         fig.update_layout(
             title=f"Performance Over Time (in {display_currency_code})",
@@ -1332,20 +1687,66 @@ class PortfolioTrackerUI:
         st.plotly_chart(fig, use_container_width=True)
 
         # Cumulative returns for portfolio and categories
-        def to_cum_returns(values: List[float]) -> List[float]:
-            if not values or values[0] == 0:
-                return [0.0 for _ in values]
-            base = values[0]
-            return [((v / base) - 1) * 100.0 for v in values]
+        def to_cum_returns(values: List[float]) -> List[Optional[float]]:
+            if not values:
+                return []
+            # Find first non-zero starting point
+            start_idx = None
+            for i, v in enumerate(values):
+                if abs(v) > 1e-12:
+                    start_idx = i
+                    break
+            if start_idx is None:
+                return [None for _ in values]
+            base = values[start_idx]
+            if abs(base) <= 1e-12:
+                return [None for _ in values]
+            out: List[Optional[float]] = [None] * start_idx
+            for v in values[start_idx:]:
+                out.append(((v / base) - 1.0) * 100.0)
+            return out
 
         fig2 = go.Figure()
         fig2.add_trace(
-            go.Scatter(x=dates, y=to_cum_returns(portfolio_values), mode="lines", name="Portfolio", line=dict(width=2, color="#000"))
+            go.Scatter(
+                x=dates,
+                y=to_cum_returns(portfolio_values),
+                mode="lines",
+                name="Portfolio",
+                line=dict(width=2, color="#000"),
+            )
         )
         for c in categories:
             fig2.add_trace(
-                go.Scatter(x=dates, y=to_cum_returns(cat_series[c]), mode="lines", name=c, line=dict(color=color_map.get(c)))
+                go.Scatter(
+                    x=dates,
+                    y=to_cum_returns(cat_series[c]),
+                    mode="lines",
+                    name=c,
+                    line=dict(color=color_map.get(c)),
+                )
             )
+        # Add benchmark cumulative returns
+        if benchmark_symbol and benchmark_prices_aligned:
+            first_bench = next(
+                (p for p in benchmark_prices_aligned if p is not None), None
+            )
+            if first_bench:
+                bench_cum = []
+                for p in benchmark_prices_aligned:
+                    if p is None:
+                        bench_cum.append(None)
+                    else:
+                        bench_cum.append(((p / first_bench) - 1.0) * 100.0)
+                fig2.add_trace(
+                    go.Scatter(
+                        x=dates,
+                        y=bench_cum,
+                        mode="lines",
+                        name=f"{benchmark_symbol} (cum %)",
+                        line=dict(color="#888", dash="dot"),
+                    )
+                )
         fig2.update_layout(
             title=f"Cumulative Returns (in {display_currency_code})",
             xaxis_title="Date",
@@ -1359,7 +1760,6 @@ class PortfolioTrackerUI:
     def render_settings(self):
         """Render settings and configuration."""
         st.header("⚙️ Settings")
-
 
         st.subheader("📊 Data Providers")
         st.write("Current data providers:")

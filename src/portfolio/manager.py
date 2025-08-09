@@ -266,7 +266,9 @@ class PortfolioManager:
         self.storage.save_portfolio(self.current_portfolio)
         return results
 
-    def _get_exchange_rate(self, from_currency: Currency, to_currency: Currency) -> Optional[Decimal]:
+    def _get_exchange_rate(
+        self, from_currency: Currency, to_currency: Currency
+    ) -> Optional[Decimal]:
         """Get exchange rate for currency conversion on-demand."""
         if from_currency == to_currency:
             return Decimal("1")
@@ -280,7 +282,9 @@ class PortfolioManager:
             return Decimal("0")
 
         # Create a function that fetches exchange rates on-demand
-        def get_rate(from_currency: Currency, to_currency: Currency) -> Optional[Decimal]:
+        def get_rate(
+            from_currency: Currency, to_currency: Currency
+        ) -> Optional[Decimal]:
             return self._get_exchange_rate(from_currency, to_currency)
 
         return self.current_portfolio.get_total_value_with_rate_function(get_rate)
@@ -305,7 +309,9 @@ class PortfolioManager:
             if currency == self.current_portfolio.base_currency:
                 cash_balance += amount
             else:
-                rate = self._get_exchange_rate(currency, self.current_portfolio.base_currency)
+                rate = self._get_exchange_rate(
+                    currency, self.current_portfolio.base_currency
+                )
                 if rate:
                     cash_balance += amount * rate
 
@@ -385,10 +391,15 @@ class PortfolioManager:
         # Build a union of symbols that may exist across this period
         all_symbols = set()
         for txn in self.current_portfolio.transactions:
-            if txn.instrument.symbol != "CASH" and start_date <= txn.timestamp.date() <= end_date:
+            if (
+                txn.instrument.symbol != "CASH"
+                and start_date <= txn.timestamp.date() <= end_date
+            ):
                 all_symbols.add(txn.instrument.symbol)
 
-        price_map = self._build_historical_price_map(sorted(all_symbols), start_date, end_date)
+        price_map = self._build_historical_price_map(
+            sorted(all_symbols), start_date, end_date
+        )
 
         snapshots = []
         current_date = start_date
@@ -396,7 +407,9 @@ class PortfolioManager:
         while current_date <= end_date:
             try:
                 # Create a temporary portfolio state for this date
-                temp_portfolio = self._get_portfolio_state_for_date(current_date, price_map)
+                temp_portfolio = self._get_portfolio_state_for_date(
+                    current_date, price_map
+                )
 
                 # Temporarily set current portfolio to the historical state
                 original_portfolio = self.current_portfolio
@@ -432,7 +445,9 @@ class PortfolioManager:
             if txn.instrument.symbol != "CASH" and txn.timestamp.date() <= end_date:
                 all_symbols.add(txn.instrument.symbol)
 
-        price_map = self._build_historical_price_map(sorted(all_symbols), start_date, end_date)
+        price_map = self._build_historical_price_map(
+            sorted(all_symbols), start_date, end_date
+        )
 
         snapshots = []
         current_date = start_date
@@ -440,7 +455,9 @@ class PortfolioManager:
         while current_date <= end_date:
             try:
                 # Create a temporary portfolio state for this date
-                temp_portfolio = self._get_portfolio_state_for_date(current_date, price_map)
+                temp_portfolio = self._get_portfolio_state_for_date(
+                    current_date, price_map
+                )
 
                 # Temporarily set current portfolio to the historical state
                 original_portfolio = self.current_portfolio
@@ -502,7 +519,9 @@ class PortfolioManager:
         # Swap in temp, create snapshots without saving, restore original
         self.current_portfolio = temp_portfolio
         try:
-            simulated = self.create_snapshots_for_range(start_date, end_date, save=False)
+            simulated = self.create_snapshots_for_range(
+                start_date, end_date, save=False
+            )
         finally:
             self.current_portfolio = original_portfolio
 
@@ -545,7 +564,11 @@ class PortfolioManager:
             },
         }
 
-    def _get_portfolio_state_for_date(self, target_date: date, price_map: Optional[Dict[str, Dict[date, Decimal]]] = None) -> Portfolio:
+    def _get_portfolio_state_for_date(
+        self,
+        target_date: date,
+        price_map: Optional[Dict[str, Dict[date, Decimal]]] = None,
+    ) -> Portfolio:
         """Get portfolio state as it was on a specific date.
 
         If price_map is provided, use it to set position prices deterministically for the target date.
@@ -602,7 +625,9 @@ class PortfolioManager:
         price_map: Dict[str, Dict[date, Decimal]] = {}
         for symbol in symbols:
             try:
-                series = self.data_manager.get_historical_prices(symbol, start_date, end_date)
+                series = self.data_manager.get_historical_prices(
+                    symbol, start_date, end_date
+                )
                 daily: Dict[date, Decimal] = {}
                 for pd_item in series:
                     px = (
@@ -632,19 +657,26 @@ class PortfolioManager:
         return price_map
 
     def _apply_price_map_for_date(
-        self, portfolio: Portfolio, price_map: Dict[str, Dict[date, Decimal]], target_date: date
+        self,
+        portfolio: Portfolio,
+        price_map: Dict[str, Dict[date, Decimal]],
+        target_date: date,
     ) -> None:
         """Apply precomputed historical prices to a portfolio for a given date."""
         for position in portfolio.positions.values():
             symbol = position.instrument.symbol
             if symbol in price_map and target_date in price_map[symbol]:
                 position.current_price = price_map[symbol][target_date]
-                position.last_updated = datetime.combine(target_date, datetime.min.time())
+                position.last_updated = datetime.combine(
+                    target_date, datetime.min.time()
+                )
             else:
                 # Fallback to on-demand per-date logic
                 self._update_portfolio_prices_for_date(portfolio, target_date)
 
-    def _update_portfolio_prices_for_date(self, portfolio: Portfolio, target_date: date) -> None:
+    def _update_portfolio_prices_for_date(
+        self, portfolio: Portfolio, target_date: date
+    ) -> None:
         """Update prices for all positions using historical data for a specific date.
 
         Uses the close price for target_date when available. Falls back to the most
@@ -656,7 +688,9 @@ class PortfolioManager:
             symbol = position.instrument.symbol
             try:
                 # Try exact date first
-                prices = self.data_manager.get_historical_prices(symbol, target_date, target_date)
+                prices = self.data_manager.get_historical_prices(
+                    symbol, target_date, target_date
+                )
                 selected_price: Optional[Decimal] = None
 
                 if prices:
@@ -672,7 +706,9 @@ class PortfolioManager:
                 # If nothing for that exact date (e.g., weekend), look back a few days
                 if selected_price is None:
                     lookback_start = target_date - timedelta(days=3)
-                    prices = self.data_manager.get_historical_prices(symbol, lookback_start, target_date)
+                    prices = self.data_manager.get_historical_prices(
+                        symbol, lookback_start, target_date
+                    )
                     # choose the last available (closest to target_date)
                     if prices:
                         last = prices[-1]
@@ -690,9 +726,13 @@ class PortfolioManager:
                 if selected_price is not None:
                     position.current_price = selected_price
                     # stamp last_updated as target_date at end of day for clarity
-                    position.last_updated = datetime.combine(target_date, datetime.min.time())
+                    position.last_updated = datetime.combine(
+                        target_date, datetime.min.time()
+                    )
             except Exception as e:
-                logging.warning(f"Failed to set historical price for {symbol} on {target_date}: {e}")
+                logging.warning(
+                    f"Failed to set historical price for {symbol} on {target_date}: {e}"
+                )
 
     def get_position_summary(self) -> List[Dict]:
         """Get summary of all positions."""
@@ -796,7 +836,9 @@ class PortfolioManager:
             "days_analyzed": len(snapshots),
         }
 
-    def get_external_cash_flows_by_day(self, start_date: date, end_date: date) -> Dict[date, Decimal]:
+    def get_external_cash_flows_by_day(
+        self, start_date: date, end_date: date
+    ) -> Dict[date, Decimal]:
         """Compute net external cash flows (deposits/withdrawals) per day in base currency.
 
         Deposits are positive contributions; withdrawals are negative. Other transaction
@@ -813,7 +855,10 @@ class PortfolioManager:
             txn_date = txn.timestamp.date()
             if txn_date < start_date or txn_date > end_date:
                 continue
-            if txn.transaction_type not in [TransactionType.DEPOSIT, TransactionType.WITHDRAWAL]:
+            if txn.transaction_type not in [
+                TransactionType.DEPOSIT,
+                TransactionType.WITHDRAWAL,
+            ]:
                 continue
 
             # Amount in txn currency
@@ -823,7 +868,9 @@ class PortfolioManager:
             if txn.currency == base:
                 amount_base = amount
             else:
-                rate = self.data_manager.get_historical_fx_rate_on(txn_date, txn.currency, base)
+                rate = self.data_manager.get_historical_fx_rate_on(
+                    txn_date, txn.currency, base
+                )
                 amount_base = amount * rate if rate else amount
 
             if txn.transaction_type == TransactionType.WITHDRAWAL:
