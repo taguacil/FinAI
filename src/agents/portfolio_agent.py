@@ -140,11 +140,24 @@ class PortfolioAgent:
         """Create web search tool for financial information."""
 
         def search_web(query: str) -> str:
-            """Search the web for financial information."""
+            """Search the web for financial information using Tavily."""
             try:
-                # This is a placeholder - in real implementation, you'd use a web search API
-                # like Tavily, SerpAPI, or Google Custom Search
-                return f"🔍 Web search for '{query}' - This would contain real-time financial news and market data. In a production environment, this would use a real web search API."
+                from langchain_community.tools.tavily_search import TavilySearchResults
+                import os
+                tavily_key = os.getenv("TAVILY_API_KEY", "")
+                if not tavily_key:
+                    return "❌ Tavily API key not configured. Set TAVILY_API_KEY in your environment."
+                tool = TavilySearchResults(max_results=5)
+                results = tool.run(query)
+                if not results:
+                    return "No results found."
+                lines = ["🔍 Tavily Web Search:"]
+                for r in results:
+                    title = r.get("title") or r.get("url")
+                    snippet = r.get("content") or r.get("snippet") or ""
+                    url = r.get("url") or ""
+                    lines.append(f"• {title}\n  {snippet}\n  {url}")
+                return "\n".join(lines)
             except Exception as e:
                 return f"❌ Error searching web: {str(e)}"
 

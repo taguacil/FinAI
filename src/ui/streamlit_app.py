@@ -7,6 +7,7 @@ import sys
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Dict, Optional, List
+from pypdf import PdfReader
 
 import pandas as pd
 import plotly.express as px
@@ -112,28 +113,48 @@ class PortfolioTrackerUI:
         """Render the sidebar with portfolio management."""
         st.sidebar.header("📁 Portfolio Management")
 
-        # Portfolio selection
-        portfolios = portfolio_manager.list_portfolios()
+        # Portfolio selection (show by name instead of ID)
+        portfolio_ids = portfolio_manager.list_portfolios()
+        if portfolio_ids:
+            id_to_name: Dict[str, str] = {}
+            options: List[str] = ["None"]
+            try:
+                for pid in portfolio_ids:
+                    p = portfolio_manager.storage.load_portfolio(pid)
+                    display_name = p.name if p else pid
+                    id_to_name[pid] = display_name
+                    options.append(display_name)
+            except Exception:
+                # Fallback to IDs only if loading fails
+                id_to_name = {pid: pid for pid in portfolio_ids}
+                options = ["None"] + portfolio_ids
 
-        if portfolios:
-            selected = st.sidebar.selectbox(
-                "Select Portfolio:",
-                ["None"] + portfolios,
-                index=(
-                    0
-                    if not st.session_state.selected_portfolio
-                    else portfolios.index(st.session_state.selected_portfolio) + 1
-                ),
-            )
+            # Compute default index based on selected portfolio id
+            default_index = 0
+            if st.session_state.selected_portfolio:
+                sel_id = st.session_state.selected_portfolio
+                sel_name = id_to_name.get(sel_id)
+                if sel_name and sel_name in options:
+                    default_index = options.index(sel_name)
 
-            if selected != "None" and selected != st.session_state.selected_portfolio:
-                portfolio = portfolio_manager.load_portfolio(selected)
-                if portfolio:
-                    st.session_state.portfolio_loaded = True
-                    st.session_state.selected_portfolio = selected
-                    st.sidebar.success(f"Loaded: {portfolio.name}")
-                else:
-                    st.sidebar.error("Failed to load portfolio")
+            chosen_name = st.sidebar.selectbox("Select Portfolio:", options, index=default_index)
+
+            if chosen_name != "None":
+                # Map back to id
+                # Find the first id with this name (names are usually unique)
+                chosen_id = None
+                for pid, nm in id_to_name.items():
+                    if nm == chosen_name:
+                        chosen_id = pid
+                        break
+                if chosen_id and chosen_id != st.session_state.selected_portfolio:
+                    portfolio = portfolio_manager.load_portfolio(chosen_id)
+                    if portfolio:
+                        st.session_state.portfolio_loaded = True
+                        st.session_state.selected_portfolio = chosen_id
+                        st.sidebar.success(f"Loaded: {portfolio.name}")
+                    else:
+                        st.sidebar.error("Failed to load portfolio")
 
         # Create new portfolio
         st.sidebar.subheader("Create New Portfolio")
@@ -234,82 +255,117 @@ class PortfolioTrackerUI:
 
             st.rerun()
 
-        # Model selection + Quick action buttons
+        # Model selection + PDF + Quick action buttons
         st.subheader("Quick Actions")
-        col0, col1, col2, col3 = st.columns([2, 1, 1, 1])
+        col_pdf, col0, col1, col2, col3 = st.columns([2, 2, 1, 1, 1])
+
+        # PDF Uploader
+        with col_pdf:
+            uploaded_pdf = st.file_uploader("Attach PDF (datasheet)", type=["pdf"], accept_multiple_files=False)
+            if uploaded_pdf is not None:
+                st.caption(f"Selected: {uploaded_pdf.name} ({uploaded_pdf.size/1024:.1f} KB)")
+                pdf_bytes = uploaded_pdf.read()
+                if st.button("Attach PDF to Chat"):
+                    try:
+                        import io
+                        reader = PdfReader(io.BytesIO(pdf_bytes))
+                        texts = []
+                        for page in reader.pages:
+                            try:
+                                t = page.extract_text() or ""
+                                if t:
+                                    texts.append(t)
+                            except Exception:
+                                continue
+                        content = "\n\n".join(texts).strip()
+                        if not content:
+                            st.warning("No text extracted from the PDF.")
+                        else:
+                            if len(content) > 100_000:
+                                content = content[:100_000] + "\n\n...[truncated]"
+                            st.session_state.chat_history.append({
+                                "role": "user",
+                                "content": f"📄 Attached PDF: {uploaded_pdf.name}\n\n{content}"
+                            })
+                            st.success("PDF content attached to chat.")
+                            st.rerun()
+                    except Exception as e:
+                        st.error(f"Failed to read PDF: {e}")
+                if st.button("Analyze PDF Now"):
+                    try:
+                        import io
+                        reader = PdfReader(io.BytesIO(pdf_bytes))
+                        texts = []
+                        for page in reader.pages:
+                            try:
+                                t = page.extract_text() or ""
+                                if t:
+                                    texts.append(t)
+                            except Exception:
+                                continue
+                        content = "\n\n".join(texts).strip()
+                        if not content:
+                            st.warning("No text extracted from the PDF.")
+                        else:
+                            if len(content) > 80_000:
+                                content = content[:80_000] + "\n\n...[truncated]"
+                            prompt = (
+                                f"Please analyze the attached PDF datasheet '{uploaded_pdf.name}'. "
+                                f"Summarize key points, risks, and any financial metrics or terms.\n\n"
+                                f"Extracted text follows:\n{content}"
+                            )
+                            st.session_state.chat_history.append({"role": "user", "content": prompt})
+                            with st.spinner("Analyzing PDF..."):
+                                response = agent.chat(prompt)
+                            st.session_state.chat_history.append({"role": "assistant", "content": response})
+                            st.rerun()
+                    except Exception as e:
+                        st.error(f"Failed to analyze PDF: {e}")
 
         with col0:
             st.markdown("**AI Model**")
-            provider = st.selectbox("Provider", ["Azure OpenAI", "Anthropic", "Google Vertex AI"], index=0)
-            if provider == "Azure OpenAI":
-                model_choice = st.selectbox(
-                    "Model",
-                    [
-                        ("Azure GPT-4.1", ("https://kallamai.openai.azure.com/", "gpt-4.1")),
-                        ("Azure GPT-4.1 Mini", ("https://kallamai.openai.azure.com/", "gpt-4.1-mini")),
-                        ("Azure o4-mini", ("https://kallamai.openai.azure.com/", "o4-mini")),
-                        ("Azure GPT-5 Mini", ("https://kallamai.openai.azure.com/", "gpt-5-mini")),
-                    ],
-                    format_func=lambda x: x[0],
-                )
-                if st.button("Apply Model"):
-                    try:
-                        endpoint, model = model_choice[1]
+            # Single dropdown with all supported models and their providers
+            all_models = [
+                ("Azure GPT-4.1", {"provider": "azure-openai", "endpoint": "https://kallamai.openai.azure.com/", "model": "gpt-4.1"}),
+                ("Azure GPT-4.1 Mini", {"provider": "azure-openai", "endpoint": "https://kallamai.openai.azure.com/", "model": "gpt-4.1-mini"}),
+                ("Azure o4-mini", {"provider": "azure-openai", "endpoint": "https://kallamai.openai.azure.com/", "model": "o4-mini"}),
+                ("Azure GPT-5 Mini", {"provider": "azure-openai", "endpoint": "https://kallamai.openai.azure.com/", "model": "gpt-5-mini"}),
+                ("Claude Sonnet 4 (thinking)", {"provider": "anthropic", "model": "claude-sonnet-4-20250514"}),
+                ("Gemini 2.0 Flash Lite", {"provider": "vertex-ai", "model": "gemini-2.0-flash-lite-001"}),
+                ("Gemini 2.5 Pro (thinking)", {"provider": "vertex-ai", "model": "gemini-2.5-pro"}),
+            ]
+            model_choice = st.selectbox("Model", all_models, format_func=lambda x: x[0])
+            if st.button("Apply Model"):
+                try:
+                    meta = model_choice[1]
+                    provider_key = meta.get("provider")
+                    if provider_key == "azure-openai":
                         azure_key = os.getenv("AZURE_OPENAI_API_KEY", "")
                         agent.set_llm_config(
                             provider="azure-openai",
-                            azure_endpoint=endpoint,
+                            azure_endpoint=meta.get("endpoint"),
                             azure_api_key=azure_key,
-                            azure_model=model,
+                            azure_model=meta.get("model"),
                         )
-                        st.success(f"Azure model set to {model}")
-                    except Exception as e:
-                        st.error(f"Failed to set Azure model: {e}")
-            elif provider == "Anthropic":
-                model_choice = st.selectbox(
-                    "Model",
-                    [
-                        ("Claude Sonnet 4 (thinking)", "claude-sonnet-4-20250514"),
-                    ],
-                    format_func=lambda x: x[0],
-                )
-                if st.button("Apply Model"):
-                    try:
-                        model = model_choice[1]
+                    elif provider_key == "anthropic":
                         anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
                         agent.set_llm_config(
                             provider="anthropic",
                             anthropic_api_key=anthropic_key,
-                            anthropic_model=model,
+                            anthropic_model=meta.get("model"),
                         )
-                        st.success(f"Anthropic model set to {model}")
-                    except Exception as e:
-                        st.error(f"Failed to set Anthropic model: {e}")
-            else:
-                # Google Vertex AI
-                model_choice = st.selectbox(
-                    "Model",
-                    [
-                        ("Gemini 2.0 Flash Lite", "gemini-2.0-flash-lite-001"),
-                        ("Gemini 2.5 Pro (thinking)", "gemini-2.5-pro"),
-                    ],
-                    format_func=lambda x: x[0],
-                )
-                if st.button("Apply Model"):
-                    try:
-                        model = model_choice[1]
+                    else:
                         project = os.getenv("GOOGLE_VERTEX_PROJECT", "mystic-fountain-415918")
                         location = os.getenv("GOOGLE_VERTEX_LOCATION", "us-central1")
-                        # Credentials supplied via GOOGLE_APPLICATION_CREDENTIALS
                         agent.set_llm_config(
                             provider="vertex-ai",
                             vertex_project=project,
                             vertex_location=location,
-                            vertex_model=model,
+                            vertex_model=meta.get("model"),
                         )
-                        st.success(f"Vertex AI model set to {model}")
-                    except Exception as e:
-                        st.error(f"Failed to set Vertex AI model: {e}")
+                    st.success(f"Model set to {model_choice[0]}")
+                except Exception as e:
+                    st.error(f"Failed to set model: {e}")
 
         with col1:
             if st.button("📊 Portfolio Summary"):
@@ -352,6 +408,37 @@ class PortfolioTrackerUI:
 
         total_value = portfolio_manager.get_portfolio_value()
         positions = portfolio_manager.get_position_summary()
+
+        # Prepare YTD reference prices from local snapshots (no network)
+        ytd_start = date(date.today().year, 1, 1)
+        try:
+            ytd_snaps = portfolio_manager.storage.load_snapshots(
+                portfolio.id, ytd_start, date.today()
+            )
+            # Reference price: first available snapshot in YTD where the symbol appears with a price
+            ref_prices_by_symbol: Dict[str, Decimal] = {}
+            for snap in ytd_snaps:
+                for sym, snap_pos in snap.positions.items():
+                    if sym not in ref_prices_by_symbol and snap_pos.current_price is not None:
+                        ref_prices_by_symbol[sym] = snap_pos.current_price
+
+            # Current price: last available snapshot (scan from most recent backwards to fill gaps)
+            curr_prices_by_symbol: Dict[str, Decimal] = {}
+            for snap in reversed(ytd_snaps):
+                for sym, snap_pos in snap.positions.items():
+                    if sym not in curr_prices_by_symbol and snap_pos.current_price is not None:
+                        curr_prices_by_symbol[sym] = snap_pos.current_price
+
+            # Fallback to latest snapshot overall if YTD list is empty
+            if not ytd_snaps:
+                latest_snap = portfolio_manager.storage.get_latest_snapshot(portfolio.id)
+                if latest_snap:
+                    for sym, snap_pos in latest_snap.positions.items():
+                        if snap_pos.current_price is not None:
+                            curr_prices_by_symbol[sym] = snap_pos.current_price
+        except Exception:
+            ref_prices_by_symbol = {}
+            curr_prices_by_symbol = {}
 
         # Overview uses only locally stored data (no network fetches)
         fetch_live = False
@@ -513,7 +600,27 @@ class PortfolioTrackerUI:
                 # Category classification
                 category = self._classify_position(pos, instrument)
 
-                # YTD metrics are not computed in overview to avoid network calls
+                # YTD market-only (local snapshots): compare current price to first YTD snapshot price
+                ytd_market_pnl_native = None
+                ytd_market_pct = None
+                try:
+                    if symbol in ref_prices_by_symbol:
+                        ref_price = Decimal(str(ref_prices_by_symbol[symbol]))
+                        qty_dec = Decimal(str(pos.get("quantity") or 0))
+                        # Prefer latest snapshot price if available; fallback to UI position price
+                        curr_px_val = (
+                            curr_prices_by_symbol.get(symbol)
+                            if symbol in curr_prices_by_symbol
+                            else pos.get("current_price")
+                        )
+                        curr_px = Decimal(str(curr_px_val or 0))
+                        if qty_dec > 0 and ref_price and curr_px:
+                            ytd_market_pnl_native = (curr_px - ref_price) * qty_dec
+                            base_val_start_native = ref_price * qty_dec
+                            if base_val_start_native != 0:
+                                ytd_market_pct = (ytd_market_pnl_native / base_val_start_native) * 100
+                except Exception:
+                    pass
 
                 # Total buy price (cost basis) in native and base
                 total_buy_native = pos.get("cost_basis")
@@ -546,6 +653,8 @@ class PortfolioTrackerUI:
                         "market_value_base": mv_base,
                         "unrealized_pnl_base": unreal_val_base,
                         "category": category,
+                        "ytd_market_pnl": ytd_market_pnl_native,
+                        "ytd_market_pnl_percent": ytd_market_pct,
                         "total_buy_price": total_buy_native,
                         "total_buy_price_base": total_buy_base,
                         "latest_buy_date": latest_buy_date,
@@ -721,14 +830,11 @@ class PortfolioTrackerUI:
         mv_base = item.get("market_value_base")
         pnl_base = item.get("unrealized_pnl_base")
         pnl_pct = item.get("unrealized_pnl_percent")
-        ytd_base = item.get("ytd_unrealized_pnl")
-        ytd_pct = item.get("ytd_unrealized_pnl_percent")
-        ytd_mkt_base = item.get("ytd_market_pnl")
+        ytd_mkt_native = item.get("ytd_market_pnl")
         ytd_mkt_pct = item.get("ytd_market_pnl_percent")
-        ytd_fx_base = item.get("ytd_fx_pnl")
-        ytd_fx_pct = item.get("ytd_fx_pnl_percent")
         total_buy = item.get("total_buy_price")
         total_buy_base = item.get("total_buy_price_base")
+        avg_cost = item.get("average_cost")
 
         def fmt_money(val):
             return f"{float(val):,.2f}" if val is not None else "-"
@@ -752,13 +858,23 @@ class PortfolioTrackerUI:
             qty_price_html,
             f"<div><span style='color:#666;'>Market Value:</span> <strong>{fmt_money(mv_base)} {base_currency_code}</strong></div>",
             f"<div><span style='color:#666;'>Unrealized PnL:</span> {colored(pnl_base)} {base_currency_code} ({fmt_signed(pnl_pct)}%)</div>",
-            f"<div><span style='color:#666;'>YTD PnL:</span> {colored(ytd_base)} {base_currency_code} ({colored(ytd_pct)}%)</div>",
-            f"<div style='font-size:13px; margin-top:4px;'><em>YTD Market:</em> {colored(ytd_mkt_base)} {base_currency_code} ({colored(ytd_mkt_pct)}%)</div>",
-            f"<div style='font-size:13px;'><em>YTD FX:</em> {colored(ytd_fx_base)} {base_currency_code} ({colored(ytd_fx_pct)}%)</div>",
         ]
+        # YTD Market from snapshots (native currency) — always show, N/A if missing
+        if ytd_mkt_native is not None:
+            ytd_line = (
+                f"<div style='font-size:13px; margin-top:4px;'><em>YTD Market:</em> {colored(ytd_mkt_native)} {currency} ({fmt_signed(ytd_mkt_pct)}%)</div>"
+            )
+        else:
+            ytd_line = (
+                f"<div style='font-size:13px; margin-top:4px;'><em>YTD Market:</em> N/A</div>"
+            )
+        lines.append(ytd_line)
         if total_buy is not None:
+            qty_str = fmt_money(qty) if qty is not None else "-"
+            avg_str = fmt_money(avg_cost) if avg_cost is not None else "-"
             lines.append(
-                f"<div style='margin-top:4px;'><span style='color:#666;'>Total Buy:</span> {fmt_money(total_buy_base)} {base_currency_code}"
+                f"<div style='margin-top:4px;'><span style='color:#666;'>Total Buy:</span> {qty_str} @ {avg_str} {currency}"
+                f" = {fmt_money(total_buy_base)} {base_currency_code}"
                 f" <span style='color:#999;'>(native: {fmt_money(total_buy)} {currency})</span></div>"
             )
         # Purchase date
@@ -1244,22 +1360,6 @@ class PortfolioTrackerUI:
         """Render settings and configuration."""
         st.header("⚙️ Settings")
 
-        st.subheader("🔑 API Keys")
-        st.info(
-            "Configure your API keys for data providers. Leave as placeholder for demo mode."
-        )
-
-        openai_key = st.text_input(
-            "OpenAI API Key", type="password", value="OPENAI_API_KEY_PLACEHOLDER"
-        )
-        alpha_vantage_key = st.text_input(
-            "Alpha Vantage API Key",
-            type="password",
-            value="ALPHA_VANTAGE_API_KEY_PLACEHOLDER",
-        )
-
-        if st.button("Update API Keys"):
-            st.success("API keys updated (demo mode)")
 
         st.subheader("📊 Data Providers")
         st.write("Current data providers:")

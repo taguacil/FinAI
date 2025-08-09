@@ -9,6 +9,7 @@ from typing import List, Optional
 from langchain.tools import BaseTool
 from pydantic import BaseModel, Field
 from pypdf import PdfReader
+import math
 
 from ..data_providers.manager import DataProviderManager
 from ..portfolio.manager import PortfolioManager
@@ -552,11 +553,35 @@ def create_portfolio_tools(
         GetTransactionsTool(portfolio_manager),
         SimulateWhatIfTool(portfolio_manager),
         IngestPdfTool(),
+        CalculatorTool(),
         SearchInstrumentTool(data_manager),
         GetCurrentPriceTool(data_manager),
         GetPortfolioMetricsTool(portfolio_manager, metrics_calculator),
         GetTransactionHistoryTool(portfolio_manager),
     ]
+
+
+class CalculatorTool(BaseTool):
+    """A safe calculator for evaluating mathematical expressions."""
+
+    name: str = "calculator"
+    description: str = (
+        "Evaluate a mathematical expression. Supports +, -, *, /, **, %, parentheses, and math functions (e.g., sin, cos, log).\n"
+        "Examples: '2*(3+4)', 'sin(pi/2)', 'log(100,10)'."
+    )
+
+    def _run(self, expression: str) -> str:
+        try:
+            # Allowed names from math
+            allowed_names = {k: getattr(math, k) for k in dir(math) if not k.startswith("__")}
+            # Common constants
+            allowed_names.update({"pi": math.pi, "e": math.e})
+
+            # Disallow builtins
+            result = eval(expression, {"__builtins__": {}}, allowed_names)
+            return f"🧮 {expression} = {result}"
+        except Exception as e:
+            return f"❌ Error evaluating expression: {str(e)}"
 
 
 class IngestPdfTool(BaseTool):

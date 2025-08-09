@@ -47,10 +47,12 @@ class FinancialMetricsCalculator:
         self, returns: List[float], annualized: bool = True
     ) -> float:
         """Calculate portfolio volatility."""
-        if len(returns) < 2:
+        # Filter out exact-zero returns (e.g., weekends/holidays due to forward-filled prices)
+        filtered = [r for r in returns if abs(r) > 1e-12]
+        if len(filtered) < 2:
             return 0.0
 
-        volatility = np.std(returns, ddof=1)
+        volatility = np.std(filtered, ddof=1)
 
         if annualized:
             # Annualize assuming 252 trading days
