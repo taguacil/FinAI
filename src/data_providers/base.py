@@ -2,20 +2,23 @@
 Base interface for financial data providers.
 """
 
-import time
 import logging
+import time
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
-from typing import List, Optional, Callable
-from dataclasses import dataclass
 from functools import wraps
+from typing import Callable, List, Optional
 
 from ..portfolio.models import Currency, InstrumentType
 
 
-def retry_with_backoff(max_retries: int = 3, base_delay: float = 1.0, max_delay: float = 60.0):
+def retry_with_backoff(
+    max_retries: int = 3, base_delay: float = 1.0, max_delay: float = 60.0
+):
     """Decorator for retrying functions with exponential backoff."""
+
     def decorator(func: Callable):
         @wraps(func)
         def wrapper(*args, **kwargs):
@@ -26,20 +29,25 @@ def retry_with_backoff(max_retries: int = 3, base_delay: float = 1.0, max_delay:
                     if attempt == max_retries - 1:
                         raise e
 
-                    delay = min(base_delay * (2 ** attempt), max_delay)
-                    logging.warning(f"API call failed (attempt {attempt + 1}/{max_retries}), retrying in {delay}s: {e}")
+                    delay = min(base_delay * (2**attempt), max_delay)
+                    logging.warning(
+                        f"API call failed (attempt {attempt + 1}/{max_retries}), retrying in {delay}s: {e}"
+                    )
                     time.sleep(delay)
                 except Exception as e:
                     # Don't retry on other exceptions
                     raise e
             return None
+
         return wrapper
+
     return decorator
 
 
 @dataclass
 class PriceData:
     """Represents price data for a financial instrument."""
+
     symbol: str
     date: date
     open_price: Optional[Decimal] = None
@@ -53,6 +61,7 @@ class PriceData:
 @dataclass
 class InstrumentInfo:
     """Represents detailed information about a financial instrument."""
+
     symbol: str
     name: str
     instrument_type: InstrumentType
@@ -89,7 +98,9 @@ class BaseDataProvider(ABC):
 
     @retry_with_backoff(max_retries=3)
     @abstractmethod
-    def get_historical_prices(self, symbol: str, start_date: date, end_date: date) -> List[PriceData]:
+    def get_historical_prices(
+        self, symbol: str, start_date: date, end_date: date
+    ) -> List[PriceData]:
         """Get historical price data for a financial instrument."""
         pass
 
@@ -107,7 +118,9 @@ class BaseDataProvider(ABC):
 
     @retry_with_backoff(max_retries=3)
     @abstractmethod
-    def get_exchange_rate(self, from_currency: Currency, to_currency: Currency) -> Optional[Decimal]:
+    def get_exchange_rate(
+        self, from_currency: Currency, to_currency: Currency
+    ) -> Optional[Decimal]:
         """Get current exchange rate between two currencies."""
         pass
 
@@ -127,24 +140,29 @@ class BaseDataProvider(ABC):
 
 class DataProviderError(Exception):
     """Base exception for data provider errors."""
+
     pass
 
 
 class RateLimitError(DataProviderError):
     """Raised when rate limit is exceeded."""
+
     pass
 
 
 class InvalidSymbolError(DataProviderError):
     """Raised when an invalid symbol is requested."""
+
     pass
 
 
 class ConnectionError(DataProviderError):
     """Raised when connection to data provider fails."""
+
     pass
 
 
 class TimeoutError(DataProviderError):
     """Raised when request times out."""
+
     pass

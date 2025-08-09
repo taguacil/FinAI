@@ -2,17 +2,18 @@
 Portfolio data models for tracking financial instruments and transactions.
 """
 
-from datetime import datetime
 from datetime import date as date_type
-from enum import Enum
-from typing import Dict, List, Optional
+from datetime import datetime
 from decimal import Decimal
+from enum import Enum
+from typing import Callable, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
 
 class InstrumentType(str, Enum):
     """Types of financial instruments."""
+
     STOCK = "stock"
     BOND = "bond"
     CRYPTO = "crypto"
@@ -25,6 +26,7 @@ class InstrumentType(str, Enum):
 
 class TransactionType(str, Enum):
     """Types of portfolio transactions."""
+
     BUY = "buy"
     SELL = "sell"
     DIVIDEND = "dividend"
@@ -37,6 +39,7 @@ class TransactionType(str, Enum):
 
 class Currency(str, Enum):
     """Supported currencies."""
+
     USD = "USD"
     EUR = "EUR"
     GBP = "GBP"
@@ -51,12 +54,27 @@ class Currency(str, Enum):
 class FinancialInstrument(BaseModel):
     """Represents a financial instrument (stock, bond, crypto, etc.)."""
 
-    symbol: str = Field(..., description="Trading symbol (e.g., AAPL, TSLA)", min_length=1, max_length=50)
-    isin: Optional[str] = Field(None, description="International Securities Identification Number", max_length=12)
-    name: str = Field(..., description="Full name of the instrument", min_length=1, max_length=200)
-    instrument_type: InstrumentType = Field(..., description="Type of financial instrument")
+    symbol: str = Field(
+        ...,
+        description="Trading symbol (e.g., AAPL, TSLA)",
+        min_length=1,
+        max_length=50,
+    )
+    isin: Optional[str] = Field(
+        None,
+        description="International Securities Identification Number",
+        max_length=12,
+    )
+    name: str = Field(
+        ..., description="Full name of the instrument", min_length=1, max_length=200
+    )
+    instrument_type: InstrumentType = Field(
+        ..., description="Type of financial instrument"
+    )
     currency: Currency = Field(..., description="Trading currency")
-    exchange: Optional[str] = Field(None, description="Exchange where traded", max_length=100)
+    exchange: Optional[str] = Field(
+        None, description="Exchange where traded", max_length=100
+    )
 
     class Config:
         use_enum_values = False
@@ -65,7 +83,9 @@ class FinancialInstrument(BaseModel):
 class Transaction(BaseModel):
     """Represents a single portfolio transaction."""
 
-    id: str = Field(..., description="Unique transaction identifier", min_length=1, max_length=100)
+    id: str = Field(
+        ..., description="Unique transaction identifier", min_length=1, max_length=100
+    )
     timestamp: datetime = Field(..., description="When the transaction occurred")
     instrument: FinancialInstrument = Field(..., description="The financial instrument")
     transaction_type: TransactionType = Field(..., description="Type of transaction")
@@ -96,7 +116,9 @@ class Position(BaseModel):
     quantity: Decimal = Field(..., description="Current quantity held")
     average_cost: Decimal = Field(..., description="Average cost basis per unit")
     current_price: Optional[Decimal] = Field(None, description="Current market price")
-    last_updated: Optional[datetime] = Field(None, description="When price was last updated")
+    last_updated: Optional[datetime] = Field(
+        None, description="When price was last updated"
+    )
 
     @property
     def market_value(self) -> Optional[Decimal]:
@@ -126,13 +148,32 @@ class Position(BaseModel):
 
 
 class PortfolioSnapshot(BaseModel):
-    """Represents a portfolio state at a specific point in time."""
+    """Represents a comprehensive portfolio state at a specific point in time."""
 
     date: date_type = Field(..., description="Date of the snapshot")
     total_value: Decimal = Field(..., description="Total portfolio value")
     cash_balance: Decimal = Field(..., description="Cash balance")
     positions_value: Decimal = Field(..., description="Total value of positions")
     base_currency: Currency = Field(..., description="Base currency for calculations")
+
+    # Detailed position information
+    positions: Dict[str, Position] = Field(
+        default_factory=dict, description="All positions at snapshot time"
+    )
+    cash_balances: Dict[Currency, Decimal] = Field(
+        default_factory=dict, description="Cash balances by currency"
+    )
+
+    # Performance metrics
+    total_cost_basis: Decimal = Field(
+        ..., description="Total cost basis of all positions"
+    )
+    total_unrealized_pnl: Decimal = Field(
+        ..., description="Total unrealized profit/loss"
+    )
+    total_unrealized_pnl_percent: Decimal = Field(
+        ..., description="Total unrealized P&L percentage"
+    )
 
     class Config:
         use_enum_values = False
@@ -146,7 +187,9 @@ class Portfolio(BaseModel):
     base_currency: Currency = Field(default=Currency.USD, description="Base currency")
     created_at: datetime = Field(default_factory=datetime.now)
     transactions: List[Transaction] = Field(default_factory=list)
-    positions: Dict[str, Position] = Field(default_factory=dict)  # Key: instrument symbol
+    positions: Dict[str, Position] = Field(
+        default_factory=dict
+    )  # Key: instrument symbol
     cash_balances: Dict[Currency, Decimal] = Field(default_factory=dict)
 
     def add_transaction(self, transaction: Transaction) -> None:
@@ -155,7 +198,7 @@ class Portfolio(BaseModel):
         self._update_position_from_transaction(transaction)
 
     def _update_position_from_transaction(self, transaction: Transaction) -> None:
-        """Update position based on a new transaction."""
+        """Update position and cash balances based on a new transaction."""
         symbol = transaction.instrument.symbol
 
         if transaction.transaction_type == TransactionType.BUY:
@@ -164,15 +207,23 @@ class Portfolio(BaseModel):
                 pos = self.positions[symbol]
                 total_cost = (pos.quantity * pos.average_cost) + transaction.total_value
                 total_quantity = pos.quantity + transaction.quantity
-                pos.average_cost = total_cost / total_quantity if total_quantity > 0 else Decimal("0")
+                pos.average_cost = (
+                    total_cost / total_quantity if total_quantity > 0 else Decimal("0")
+                )
                 pos.quantity = total_quantity
             else:
                 # Create new position
                 self.positions[symbol] = Position(
                     instrument=transaction.instrument,
                     quantity=transaction.quantity,
-                    average_cost=transaction.price
+                    average_cost=transaction.price,
                 )
+
+            # Decrease cash by the total cost of the buy (including fees)
+            currency = transaction.currency
+            if currency not in self.cash_balances:
+                self.cash_balances[currency] = Decimal("0")
+            self.cash_balances[currency] -= transaction.total_value
 
         elif transaction.transaction_type == TransactionType.SELL:
             if symbol in self.positions:
@@ -181,7 +232,16 @@ class Portfolio(BaseModel):
                 if pos.quantity <= 0:
                     del self.positions[symbol]
 
-        elif transaction.transaction_type in [TransactionType.DEPOSIT, TransactionType.WITHDRAWAL]:
+            # Increase cash by proceeds from the sale (net of fees)
+            currency = transaction.currency
+            if currency not in self.cash_balances:
+                self.cash_balances[currency] = Decimal("0")
+            self.cash_balances[currency] += transaction.total_value
+
+        elif transaction.transaction_type in [
+            TransactionType.DEPOSIT,
+            TransactionType.WITHDRAWAL,
+        ]:
             # Handle cash transactions
             currency = transaction.currency
             if currency not in self.cash_balances:
@@ -192,15 +252,31 @@ class Portfolio(BaseModel):
             else:
                 self.cash_balances[currency] -= transaction.total_value
 
-    def get_total_value(self, exchange_rates: Optional[Dict[str, Decimal]] = None) -> Decimal:
+        elif transaction.transaction_type in [
+            TransactionType.DIVIDEND,
+            TransactionType.INTEREST,
+        ]:
+            # Income adds to cash in the transaction currency
+            currency = transaction.currency
+            if currency not in self.cash_balances:
+                self.cash_balances[currency] = Decimal("0")
+            self.cash_balances[currency] += transaction.total_value
+
+    def get_total_value(
+        self, exchange_rates: Optional[Dict[str, Decimal]] = None
+    ) -> Decimal:
         """Calculate total portfolio value in base currency."""
         total = Decimal("0")
 
         # Add cash balances
         for currency, amount in self.cash_balances.items():
             # Handle both Currency enum and string keys
-            currency_code = currency.value if hasattr(currency, 'value') else currency
-            base_currency_code = self.base_currency.value if hasattr(self.base_currency, 'value') else self.base_currency
+            currency_code = currency.value if hasattr(currency, "value") else currency
+            base_currency_code = (
+                self.base_currency.value
+                if hasattr(self.base_currency, "value")
+                else self.base_currency
+            )
 
             if currency_code == base_currency_code:
                 total += amount
@@ -210,19 +286,57 @@ class Portfolio(BaseModel):
         # Add position values
         for position in self.positions.values():
             if position.market_value:
-                position_currency_code = position.instrument.currency.value if hasattr(position.instrument.currency, 'value') else position.instrument.currency
+                position_currency_code = (
+                    position.instrument.currency.value
+                    if hasattr(position.instrument.currency, "value")
+                    else position.instrument.currency
+                )
 
                 if position_currency_code == base_currency_code:
                     total += position.market_value
                 elif exchange_rates and position_currency_code in exchange_rates:
-                    total += position.market_value * exchange_rates[position_currency_code]
+                    total += (
+                        position.market_value * exchange_rates[position_currency_code]
+                    )
+
+        return total
+
+    def get_total_value_with_rate_function(
+        self, rate_function: Callable[[Currency, Currency], Optional[Decimal]]
+    ) -> Decimal:
+        """Calculate total portfolio value using a rate function for on-demand currency conversion."""
+        total = Decimal("0")
+
+        # Add cash balances
+        for currency, amount in self.cash_balances.items():
+            if currency == self.base_currency:
+                total += amount
+            else:
+                rate = rate_function(currency, self.base_currency)
+                if rate:
+                    total += amount * rate
+
+        # Add position values
+        for position in self.positions.values():
+            if position.market_value:
+                if position.instrument.currency == self.base_currency:
+                    total += position.market_value
+                else:
+                    rate = rate_function(
+                        position.instrument.currency, self.base_currency
+                    )
+                    if rate:
+                        total += position.market_value * rate
 
         return total
 
     def get_positions_by_type(self, instrument_type: InstrumentType) -> List[Position]:
         """Get all positions of a specific instrument type."""
-        return [pos for pos in self.positions.values()
-                if pos.instrument.instrument_type == instrument_type]
+        return [
+            pos
+            for pos in self.positions.values()
+            if pos.instrument.instrument_type == instrument_type
+        ]
 
     class Config:
         use_enum_values = False

@@ -3,15 +3,15 @@ Initialization system for the Portfolio Tracker application.
 """
 
 import logging
-from datetime import datetime, date, timedelta
-from typing import Optional, Dict
+from datetime import date, datetime, timedelta
 from pathlib import Path
+from typing import Dict, Optional
 
-from ..portfolio.manager import PortfolioManager
-from ..portfolio.storage import FileBasedStorage
 from ..data_providers.manager import DataProviderManager
-from ..utils.metrics import FinancialMetricsCalculator
+from ..portfolio.manager import PortfolioManager
 from ..portfolio.models import Currency
+from ..portfolio.storage import FileBasedStorage
+from ..utils.metrics import FinancialMetricsCalculator
 
 
 class PortfolioInitializer:
@@ -35,15 +35,14 @@ class PortfolioInitializer:
         log_dir = self.data_dir / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
 
-        log_file = log_dir / f"portfolio_tracker_{datetime.now().strftime('%Y%m%d')}.log"
+        log_file = (
+            log_dir / f"portfolio_tracker_{datetime.now().strftime('%Y%m%d')}.log"
+        )
 
         logging.basicConfig(
             level=logging.INFO,
-            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-            handlers=[
-                logging.FileHandler(log_file),
-                logging.StreamHandler()
-            ]
+            format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+            handlers=[logging.FileHandler(log_file), logging.StreamHandler()],
         )
 
     def initialize_system(self) -> Dict[str, bool]:
@@ -53,19 +52,19 @@ class PortfolioInitializer:
         logging.info("Starting system initialization...")
 
         # Check data directories
-        results['data_directories'] = self._create_data_directories()
+        results["data_directories"] = self._create_data_directories()
 
         # Check data providers
-        results['data_providers'] = self._check_data_providers()
+        results["data_providers"] = self._check_data_providers()
 
         # Load existing portfolios
-        results['portfolios_loaded'] = self._load_existing_portfolios()
+        results["portfolios_loaded"] = self._load_existing_portfolios()
 
         # Update portfolio prices if any portfolios exist
-        results['prices_updated'] = self._update_all_portfolio_prices()
+        results["prices_updated"] = self._update_all_portfolio_prices()
 
         # Create snapshots for today
-        results['snapshots_created'] = self._create_daily_snapshots()
+        results["snapshots_created"] = self._create_daily_snapshots()
 
         logging.info(f"System initialization completed: {results}")
         return results
@@ -79,7 +78,7 @@ class PortfolioInitializer:
                 self.data_dir / "snapshots",
                 self.data_dir / "backups",
                 self.data_dir / "exports",
-                self.data_dir / "logs"
+                self.data_dir / "logs",
             ]
 
             for directory in directories:
@@ -97,7 +96,9 @@ class PortfolioInitializer:
         try:
             provider_status = self.data_manager.get_provider_status()
 
-            working_providers = [name for name, status in provider_status.items() if status]
+            working_providers = [
+                name for name, status in provider_status.items() if status
+            ]
 
             if working_providers:
                 logging.info(f"Working data providers: {working_providers}")
@@ -125,7 +126,9 @@ class PortfolioInitializer:
                     portfolio = self.storage.load_portfolio(portfolio_id)
                     if portfolio:
                         loaded_count += 1
-                        logging.debug(f"Loaded portfolio: {portfolio.name} ({portfolio_id})")
+                        logging.debug(
+                            f"Loaded portfolio: {portfolio.name} ({portfolio_id})"
+                        )
                 except Exception as e:
                     logging.error(f"Failed to load portfolio {portfolio_id}: {e}")
 
@@ -137,33 +140,32 @@ class PortfolioInitializer:
             return False
 
     def _update_all_portfolio_prices(self) -> bool:
-        """Update prices for all portfolios."""
+        """Load existing portfolio data without updating prices."""
         try:
             portfolio_ids = self.storage.list_portfolios()
 
             if not portfolio_ids:
+                logging.info("No portfolios found to load")
                 return True
 
-            updated_count = 0
+            loaded_count = 0
             for portfolio_id in portfolio_ids:
                 try:
                     portfolio = self.portfolio_manager.load_portfolio(portfolio_id)
-                    if portfolio and portfolio.positions:
-                        results = self.portfolio_manager.update_current_prices()
-                        success_count = sum(results.values()) if results else 0
-
-                        if success_count > 0:
-                            updated_count += 1
-                            logging.debug(f"Updated {success_count} prices for portfolio {portfolio.name}")
+                    if portfolio:
+                        loaded_count += 1
+                        logging.debug(
+                            f"Loaded portfolio {portfolio.name} with {len(portfolio.positions)} positions"
+                        )
 
                 except Exception as e:
-                    logging.error(f"Failed to update prices for portfolio {portfolio_id}: {e}")
+                    logging.error(f"Failed to load portfolio {portfolio_id}: {e}")
 
-            logging.info(f"Updated prices for {updated_count} portfolios")
-            return updated_count > 0
+            logging.info(f"Loaded {loaded_count} portfolios")
+            return loaded_count > 0
 
         except Exception as e:
-            logging.error(f"Failed to update portfolio prices: {e}")
+            logging.error(f"Failed to load portfolios: {e}")
             return False
 
     def _create_daily_snapshots(self) -> bool:
@@ -180,10 +182,14 @@ class PortfolioInitializer:
             for portfolio_id in portfolio_ids:
                 try:
                     # Check if snapshot already exists for today
-                    existing_snapshots = self.storage.load_snapshots(portfolio_id, today, today)
+                    existing_snapshots = self.storage.load_snapshots(
+                        portfolio_id, today, today
+                    )
 
                     if existing_snapshots:
-                        logging.debug(f"Snapshot already exists for portfolio {portfolio_id} on {today}")
+                        logging.debug(
+                            f"Snapshot already exists for portfolio {portfolio_id} on {today}"
+                        )
                         continue
 
                     # Load portfolio and create snapshot
@@ -191,10 +197,14 @@ class PortfolioInitializer:
                     if portfolio:
                         snapshot = self.portfolio_manager.create_snapshot(today)
                         created_count += 1
-                        logging.debug(f"Created snapshot for portfolio {portfolio.name}")
+                        logging.debug(
+                            f"Created snapshot for portfolio {portfolio.name}"
+                        )
 
                 except Exception as e:
-                    logging.error(f"Failed to create snapshot for portfolio {portfolio_id}: {e}")
+                    logging.error(
+                        f"Failed to create snapshot for portfolio {portfolio_id}: {e}"
+                    )
 
             logging.info(f"Created {created_count} daily snapshots")
             return created_count >= 0  # Return True even if no snapshots needed
@@ -204,50 +214,47 @@ class PortfolioInitializer:
             return False
 
     def update_portfolio_since_last_run(self, portfolio_id: str) -> Dict[str, any]:
-        """Update a specific portfolio since the last run."""
+        """Load existing portfolio data without updating prices."""
         try:
             portfolio = self.portfolio_manager.load_portfolio(portfolio_id)
             if not portfolio:
-                return {'error': 'Portfolio not found'}
+                return {"error": "Portfolio not found"}
 
             results = {
-                'portfolio_name': portfolio.name,
-                'prices_updated': False,
-                'snapshots_created': 0,
-                'last_snapshot_date': None
+                "portfolio_name": portfolio.name,
+                "prices_updated": False,
+                "snapshots_created": 0,
+                "last_snapshot_date": None,
             }
 
-            # Update current prices
-            if portfolio.positions:
-                price_results = self.portfolio_manager.update_current_prices()
-                results['prices_updated'] = any(price_results.values()) if price_results else False
-                logging.info(f"Updated prices for portfolio {portfolio.name}")
+            # Note: Prices are not automatically updated - use UI update button instead
+            logging.info(f"Loaded portfolio {portfolio.name} with existing data")
 
             # Find the last snapshot date
             snapshots = self.storage.load_snapshots(portfolio_id)
-            last_snapshot_date = snapshots[-1].date if snapshots else portfolio.created_at.date()
-            results['last_snapshot_date'] = last_snapshot_date
+            last_snapshot_date = (
+                snapshots[-1].date if snapshots else portfolio.created_at.date()
+            )
+            results["last_snapshot_date"] = last_snapshot_date
 
-            # Create snapshots for missing days
+            # Create snapshots for missing days using historical prices
             today = date.today()
-            current_date = last_snapshot_date + timedelta(days=1)
-
-            while current_date <= today:
-                try:
-                    snapshot = self.portfolio_manager.create_snapshot(current_date)
-                    results['snapshots_created'] += 1
-                    logging.debug(f"Created snapshot for {current_date}")
-                except Exception as e:
-                    logging.error(f"Failed to create snapshot for {current_date}: {e}")
-
-                current_date += timedelta(days=1)
+            start_date = last_snapshot_date + timedelta(days=1)
+            if start_date <= today:
+                snaps = self.portfolio_manager.create_snapshots_for_range(
+                    start_date, today
+                )
+                results["snapshots_created"] = len(snaps)
+                logging.info(
+                    f"Created {len(snaps)} snapshots from {start_date} to {today}"
+                )
 
             logging.info(f"Portfolio update completed for {portfolio.name}: {results}")
             return results
 
         except Exception as e:
             logging.error(f"Failed to update portfolio {portfolio_id}: {e}")
-            return {'error': str(e)}
+            return {"error": str(e)}
 
     def create_sample_portfolio(self, name: str = "Sample Portfolio") -> Optional[str]:
         """Create a sample portfolio with some demo data."""
@@ -255,20 +262,26 @@ class PortfolioInitializer:
             # Create portfolio
             portfolio = self.portfolio_manager.create_portfolio(name, Currency.USD)
 
-            # Add sample cash deposit
+            # Add sample cash deposit (external)
             self.portfolio_manager.deposit_cash(
-                amount=10000,
-                timestamp=datetime.now() - timedelta(days=30),
-                notes="Initial deposit"
+                amount=100000,
+                timestamp=datetime.now() - timedelta(days=60),
+                notes="Initial deposit",
             )
 
-            # Add sample stock purchases
+            # Add diversified purchases across categories (days_ago staggered)
+            # Short Term (T-bills ETF)
             sample_transactions = [
-                ("AAPL", 50, 150.00, 25),
-                ("GOOGL", 10, 2500.00, 20),
-                ("MSFT", 30, 300.00, 15),
-                ("TSLA", 15, 200.00, 10),
-                ("SPY", 20, 400.00, 5)
+                ("BIL", 200, 100.00, 45),  # Short-term treasury ETF
+                # Bonds
+                ("TLT", 50, 90.00, 40),
+                # Equities
+                ("AAPL", 30, 150.00, 30),
+                ("MSFT", 20, 300.00, 28),
+                ("GOOGL", 10, 2500.00, 25),
+                # Alternatives
+                ("GLD", 15, 180.00, 22),
+                ("BTC-USD", 0.5, 60000.00, 20),
             ]
 
             for symbol, quantity, price, days_ago in sample_transactions:
@@ -278,24 +291,28 @@ class PortfolioInitializer:
                         quantity=quantity,
                         price=price,
                         timestamp=datetime.now() - timedelta(days=days_ago),
-                        notes=f"Sample purchase of {symbol}"
+                        notes=f"Sample purchase of {symbol}",
                     )
                     logging.debug(f"Added sample transaction: {quantity} {symbol}")
                 except Exception as e:
                     logging.error(f"Failed to add sample transaction {symbol}: {e}")
 
-            # Update current prices
-            self.portfolio_manager.update_current_prices()
+            # Update current market prices
+            logging.info("Updating current market prices for sample portfolio...")
+            price_update_results = self.portfolio_manager.update_current_prices()
+            logging.info(f"Price update results: {price_update_results}")
 
-            # Create snapshots for the past 30 days
-            for days_back in range(30, -1, -1):
-                snapshot_date = date.today() - timedelta(days=days_back)
-                try:
-                    self.portfolio_manager.create_snapshot(snapshot_date)
-                except Exception as e:
-                    logging.error(f"Failed to create sample snapshot for {snapshot_date}: {e}")
-
-            logging.info(f"Created sample portfolio: {name} ({portfolio.id})")
+            # Create comprehensive snapshots for the past 60 days using historical prices
+            logging.info("Creating historical snapshots for sample portfolio...")
+            end_date = date.today()
+            start_date = end_date - timedelta(days=60)
+            snaps = self.portfolio_manager.create_snapshots_for_range(
+                start_date, end_date
+            )
+            snapshots_created = len(snaps)
+            logging.info(
+                f"Created {snapshots_created} snapshots for sample portfolio: {name} ({portfolio.id})"
+            )
             return portfolio.id
 
         except Exception as e:
@@ -307,9 +324,9 @@ class PortfolioInitializer:
         try:
             cutoff_date = date.today() - timedelta(days=days_to_keep)
             results = {
-                'old_snapshots_removed': 0,
-                'old_backups_removed': 0,
-                'old_logs_removed': 0
+                "old_snapshots_removed": 0,
+                "old_backups_removed": 0,
+                "old_logs_removed": 0,
             }
 
             # Clean old snapshots
@@ -322,7 +339,7 @@ class PortfolioInitializer:
                                 snapshot_date = date.fromisoformat(snapshot_file.stem)
                                 if snapshot_date < cutoff_date:
                                     snapshot_file.unlink()
-                                    results['old_snapshots_removed'] += 1
+                                    results["old_snapshots_removed"] += 1
                             except (ValueError, OSError):
                                 continue
 
@@ -333,7 +350,7 @@ class PortfolioInitializer:
                     try:
                         if backup_file.stat().st_mtime < cutoff_date.timestamp():
                             backup_file.unlink()
-                            results['old_backups_removed'] += 1
+                            results["old_backups_removed"] += 1
                     except OSError:
                         continue
 
@@ -344,7 +361,7 @@ class PortfolioInitializer:
                     try:
                         if log_file.stat().st_mtime < cutoff_date.timestamp():
                             log_file.unlink()
-                            results['old_logs_removed'] += 1
+                            results["old_logs_removed"] += 1
                     except OSError:
                         continue
 
@@ -353,7 +370,7 @@ class PortfolioInitializer:
 
         except Exception as e:
             logging.error(f"Failed to cleanup old data: {e}")
-            return {'error': str(e)}
+            return {"error": str(e)}
 
     def get_system_status(self) -> Dict[str, any]:
         """Get comprehensive system status."""
@@ -361,16 +378,13 @@ class PortfolioInitializer:
             portfolio_ids = self.storage.list_portfolios()
 
             status = {
-                'timestamp': datetime.now().isoformat(),
-                'data_providers': self.data_manager.get_provider_status(),
-                'portfolios': {
-                    'total_count': len(portfolio_ids),
-                    'portfolio_list': []
+                "timestamp": datetime.now().isoformat(),
+                "data_providers": self.data_manager.get_provider_status(),
+                "portfolios": {"total_count": len(portfolio_ids), "portfolio_list": []},
+                "storage": {
+                    "data_directory": str(self.data_dir),
+                    "directories_exist": self.data_dir.exists(),
                 },
-                'storage': {
-                    'data_directory': str(self.data_dir),
-                    'directories_exist': self.data_dir.exists()
-                }
             }
 
             # Get details for each portfolio
@@ -379,19 +393,67 @@ class PortfolioInitializer:
                     portfolio = self.storage.load_portfolio(portfolio_id)
                     if portfolio:
                         snapshots = self.storage.load_snapshots(portfolio_id)
-                        status['portfolios']['portfolio_list'].append({
-                            'id': portfolio_id,
-                            'name': portfolio.name,
-                            'created': portfolio.created_at.isoformat(),
-                            'positions': len(portfolio.positions),
-                            'snapshots': len(snapshots),
-                            'last_snapshot': snapshots[-1].date.isoformat() if snapshots else None
-                        })
+                        status["portfolios"]["portfolio_list"].append(
+                            {
+                                "id": portfolio_id,
+                                "name": portfolio.name,
+                                "created": portfolio.created_at.isoformat(),
+                                "positions": len(portfolio.positions),
+                                "snapshots": len(snapshots),
+                                "last_snapshot": (
+                                    snapshots[-1].date.isoformat()
+                                    if snapshots
+                                    else None
+                                ),
+                            }
+                        )
                 except Exception as e:
-                    logging.error(f"Error getting status for portfolio {portfolio_id}: {e}")
+                    logging.error(
+                        f"Error getting status for portfolio {portfolio_id}: {e}"
+                    )
 
             return status
 
         except Exception as e:
             logging.error(f"Failed to get system status: {e}")
-            return {'error': str(e)}
+            return {"error": str(e)}
+
+    def update_portfolio_snapshots(
+        self, portfolio_id: str, days: int = 60
+    ) -> Dict[str, any]:
+        """Update snapshots for a specific portfolio."""
+        try:
+            # Load the portfolio
+            portfolio = self.storage.load_portfolio(portfolio_id)
+            if not portfolio:
+                return {"error": f"Portfolio {portfolio_id} not found"}
+
+            # Load portfolio into manager
+            self.portfolio_manager.load_portfolio(portfolio_id)
+
+            # Update current prices
+            logging.info(f"Updating prices for portfolio {portfolio_id}")
+            price_results = self.portfolio_manager.update_current_prices()
+
+            # Create snapshots for the specified number of days using historical prices
+            end_date = date.today()
+            start_date = end_date - timedelta(days=days)
+            snaps = self.portfolio_manager.create_snapshots_for_range(
+                start_date, end_date
+            )
+            snapshots_created = len(snaps)
+            failed_snapshots = 0
+
+            return {
+                "success": True,
+                "portfolio_id": portfolio_id,
+                "portfolio_name": portfolio.name,
+                "snapshots_created": snapshots_created,
+                "failed_snapshots": failed_snapshots,
+                "price_update_results": price_results,
+                "current_value": float(self.portfolio_manager.get_portfolio_value()),
+            }
+
+        except Exception as e:
+            logging.error(f"Error updating snapshots for portfolio {portfolio_id}: {e}")
+            return {"error": str(e)}

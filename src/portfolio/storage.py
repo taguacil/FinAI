@@ -3,7 +3,7 @@ Portfolio storage system for persisting data to filesystem.
 """
 
 import json
-from datetime import datetime, date
+from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import List, Optional
@@ -19,7 +19,7 @@ class PortfolioEncoder(json.JSONEncoder):
             return float(obj)
         elif isinstance(obj, (datetime, date)):
             return obj.isoformat()
-        elif hasattr(obj, 'dict'):  # Pydantic models
+        elif hasattr(obj, "dict"):  # Pydantic models
             return obj.dict()
         return super().default(obj)
 
@@ -32,8 +32,14 @@ class PortfolioDecoder:
         """Convert float values back to Decimal for precision."""
         for key, value in dct.items():
             if isinstance(value, float) and key in [
-                'quantity', 'price', 'fees', 'average_cost', 'current_price',
-                'total_value', 'cash_balance', 'positions_value'
+                "quantity",
+                "price",
+                "fees",
+                "average_cost",
+                "current_price",
+                "total_value",
+                "cash_balance",
+                "positions_value",
             ]:
                 dct[key] = Decimal(str(value))
         return dct
@@ -58,20 +64,20 @@ class FileBasedStorage:
             filepath = self.portfolios_dir / f"{portfolio.id}.json"
 
             # Validate portfolio ID to prevent path traversal
-            if not portfolio.id.replace('-', '').replace('_', '').isalnum():
+            if not portfolio.id.replace("-", "").replace("_", "").isalnum():
                 raise ValueError(f"Invalid portfolio ID: {portfolio.id}")
 
             # Create backup if file exists
             if filepath.exists():
-                backup_path = filepath.with_suffix('.json.backup')
+                backup_path = filepath.with_suffix(".json.backup")
                 filepath.rename(backup_path)
 
-            with open(filepath, 'w') as f:
+            with open(filepath, "w") as f:
                 json.dump(portfolio.dict(), f, cls=PortfolioEncoder, indent=2)
 
         except Exception as e:
             # Restore backup if save failed
-            backup_path = filepath.with_suffix('.json.backup')
+            backup_path = filepath.with_suffix(".json.backup")
             if backup_path.exists():
                 backup_path.rename(filepath)
             raise RuntimeError(f"Failed to save portfolio {portfolio.id}: {e}") from e
@@ -84,7 +90,7 @@ class FileBasedStorage:
             return None
 
         try:
-            with open(filepath, 'r') as f:
+            with open(filepath, "r") as f:
                 data = json.load(f, object_hook=PortfolioDecoder.decimal_hook)
 
             return Portfolio(**data)
@@ -106,52 +112,117 @@ class FileBasedStorage:
         return False
 
     def save_snapshot(self, portfolio_id: str, snapshot: PortfolioSnapshot) -> None:
-        """Save portfolio snapshot to file."""
+        """Save portfolio snapshot into a consolidated file per portfolio.
+
+        New structure: data/snapshots/{portfolio_id}.json containing an array of
+        daily snapshots. If a snapshot for the date exists, it is replaced.
+        """
         try:
-            # Validate portfolio ID
-            if not portfolio_id.replace('-', '').replace('_', '').isalnum():
+            if not portfolio_id.replace("-", "").replace("_", "").isalnum():
                 raise ValueError(f"Invalid portfolio ID: {portfolio_id}")
 
-            portfolio_snapshots_dir = self.snapshots_dir / portfolio_id
-            portfolio_snapshots_dir.mkdir(exist_ok=True)
+            consolidated_path = self.snapshots_dir / f"{portfolio_id}.json"
 
-            filepath = portfolio_snapshots_dir / f"{snapshot.date.isoformat()}.json"
+            snapshots_data = []
+            if consolidated_path.exists():
+                with open(consolidated_path, "r") as f:
+                    snapshots_data = json.load(
+                        f, object_hook=PortfolioDecoder.decimal_hook
+                    )
 
-            with open(filepath, 'w') as f:
-                json.dump(snapshot.dict(), f, cls=PortfolioEncoder, indent=2)
+                # Ensure snapshots_data is a list
+                if isinstance(snapshots_data, dict):
+                    # Migrate old single-snapshot structure if encountered
+                    snapshots_data = [snapshots_data]
+
+            # Remove any existing snapshot for this date
+            snapshot_date_str = snapshot.date.isoformat()
+            snapshots_data = [
+                s for s in snapshots_data if s.get("date") != snapshot_date_str
+            ]
+
+            # Append new snapshot (ensure date is a string for consistent sorting)
+            new_item = snapshot.dict()
+            new_item["date"] = snapshot_date_str
+            snapshots_data.append(new_item)
+
+            # Sort by date
+            snapshots_data.sort(key=lambda s: s.get("date"))
+
+            with open(consolidated_path, "w") as f:
+                json.dump(snapshots_data, f, cls=PortfolioEncoder, indent=2)
 
         except Exception as e:
-            raise RuntimeError(f"Failed to save snapshot for portfolio {portfolio_id}: {e}") from e
+            raise RuntimeError(
+                f"Failed to save snapshot for portfolio {portfolio_id}: {e}"
+            ) from e
 
-    def load_snapshots(self, portfolio_id: str,
-                      start_date: Optional[date] = None,
-                      end_date: Optional[date] = None) -> List[PortfolioSnapshot]:
+    def load_snapshots(
+        self,
+        portfolio_id: str,
+        start_date: Optional[date] = None,
+        end_date: Optional[date] = None,
+    ) -> List[PortfolioSnapshot]:
         """Load portfolio snapshots within date range."""
-        portfolio_snapshots_dir = self.snapshots_dir / portfolio_id
+        consolidated_path = self.snapshots_dir / f"{portfolio_id}.json"
 
-        if not portfolio_snapshots_dir.exists():
+        # If consolidated file doesn't exist, attempt migration from legacy per-day files
+        if not consolidated_path.exists():
+            legacy_dir = self.snapshots_dir / portfolio_id
+            if legacy_dir.exists():
+                try:
+                    legacy_snapshots: List[PortfolioSnapshot] = []
+                    for filepath in legacy_dir.glob("*.json"):
+                        try:
+                            with open(filepath, "r") as f:
+                                data = json.load(
+                                    f, object_hook=PortfolioDecoder.decimal_hook
+                                )
+                            legacy_snapshots.append(PortfolioSnapshot(**data))
+                        except Exception as e:
+                            print(f"Error loading legacy snapshot {filepath}: {e}")
+                            continue
+
+                    # Write consolidated file
+                    legacy_snapshots_sorted = sorted(
+                        legacy_snapshots, key=lambda x: x.date
+                    )
+                    with open(consolidated_path, "w") as f:
+                        json.dump(
+                            [s.dict() for s in legacy_snapshots_sorted],
+                            f,
+                            cls=PortfolioEncoder,
+                            indent=2,
+                        )
+                except Exception as e:
+                    print(f"Error migrating legacy snapshots for {portfolio_id}: {e}")
+                    # Fall through to return from legacy in-memory if migration fails
+                    pass
+
+        if not consolidated_path.exists():
             return []
 
-        snapshots = []
-        for filepath in portfolio_snapshots_dir.glob("*.json"):
-            try:
-                snapshot_date = date.fromisoformat(filepath.stem)
+        try:
+            with open(consolidated_path, "r") as f:
+                snapshots_data = json.load(f, object_hook=PortfolioDecoder.decimal_hook)
 
-                # Filter by date range if specified
-                if start_date and snapshot_date < start_date:
+            snapshots: List[PortfolioSnapshot] = []
+            for item in snapshots_data:
+                try:
+                    snap = PortfolioSnapshot(**item)
+                    if start_date and snap.date < start_date:
+                        continue
+                    if end_date and snap.date > end_date:
+                        continue
+                    snapshots.append(snap)
+                except Exception as e:
+                    print(f"Error parsing snapshot item: {e}")
                     continue
-                if end_date and snapshot_date > end_date:
-                    continue
 
-                with open(filepath, 'r') as f:
-                    data = json.load(f, object_hook=PortfolioDecoder.decimal_hook)
-
-                snapshots.append(PortfolioSnapshot(**data))
-            except Exception as e:
-                print(f"Error loading snapshot {filepath}: {e}")
-                continue
-
-        return sorted(snapshots, key=lambda x: x.date)
+            return sorted(snapshots, key=lambda x: x.date)
+        except Exception as e:
+            print(f"Error loading snapshots for {portfolio_id}: {e}")
+            return []
 
     def get_latest_snapshot(self, portfolio_id: str) -> Optional[PortfolioSnapshot]:
         """Get the most recent snapshot for a portfolio."""
@@ -186,36 +257,48 @@ class FileBasedStorage:
 
         if format.lower() == "csv":
             import csv
+
             filepath = export_dir / f"{portfolio_id}_transactions_{timestamp}.csv"
 
-            with open(filepath, 'w', newline='') as csvfile:
+            with open(filepath, "w", newline="") as csvfile:
                 fieldnames = [
-                    'id', 'timestamp', 'symbol', 'instrument_name', 'transaction_type',
-                    'quantity', 'price', 'fees', 'currency', 'total_value', 'notes'
+                    "id",
+                    "timestamp",
+                    "symbol",
+                    "instrument_name",
+                    "transaction_type",
+                    "quantity",
+                    "price",
+                    "fees",
+                    "currency",
+                    "total_value",
+                    "notes",
                 ]
                 writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
                 writer.writeheader()
 
                 for txn in portfolio.transactions:
-                    writer.writerow({
-                        'id': txn.id,
-                        'timestamp': txn.timestamp.isoformat(),
-                        'symbol': txn.instrument.symbol,
-                        'instrument_name': txn.instrument.name,
-                        'transaction_type': txn.transaction_type,
-                        'quantity': float(txn.quantity),
-                        'price': float(txn.price),
-                        'fees': float(txn.fees),
-                        'currency': txn.currency,
-                        'total_value': float(txn.total_value),
-                        'notes': txn.notes or ''
-                    })
+                    writer.writerow(
+                        {
+                            "id": txn.id,
+                            "timestamp": txn.timestamp.isoformat(),
+                            "symbol": txn.instrument.symbol,
+                            "instrument_name": txn.instrument.name,
+                            "transaction_type": txn.transaction_type,
+                            "quantity": float(txn.quantity),
+                            "price": float(txn.price),
+                            "fees": float(txn.fees),
+                            "currency": txn.currency,
+                            "total_value": float(txn.total_value),
+                            "notes": txn.notes or "",
+                        }
+                    )
 
         else:  # JSON format
             filepath = export_dir / f"{portfolio_id}_transactions_{timestamp}.json"
 
             transactions_data = [txn.dict() for txn in portfolio.transactions]
-            with open(filepath, 'w') as f:
+            with open(filepath, "w") as f:
                 json.dump(transactions_data, f, cls=PortfolioEncoder, indent=2)
 
         return str(filepath)

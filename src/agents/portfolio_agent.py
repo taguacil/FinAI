@@ -5,39 +5,50 @@ Portfolio AI agent using LangGraph for financial advice and portfolio management
 import os
 from typing import Dict, List, Optional
 
-from langchain_openai import ChatOpenAI
-from langchain.tools import Tool
-from langchain_core.messages import HumanMessage, AIMessage
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain.agents import create_openai_tools_agent, AgentExecutor
+from langchain.agents import AgentExecutor, create_openai_tools_agent
 from langchain.memory import ConversationBufferMemory
+from langchain.tools import Tool
+from langchain_anthropic import ChatAnthropic
+from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_google_vertexai import ChatVertexAI
+from langchain_openai import AzureChatOpenAI, ChatOpenAI
 
-from .tools import create_portfolio_tools
-from ..portfolio.manager import PortfolioManager
 from ..data_providers.manager import DataProviderManager
+from ..portfolio.manager import PortfolioManager
 from ..utils.metrics import FinancialMetricsCalculator
+from .tools import create_portfolio_tools
 
 
 class PortfolioAgent:
     """AI agent for portfolio management and financial advice."""
 
-    def __init__(self,
-                 portfolio_manager: PortfolioManager,
-                 data_manager: DataProviderManager,
-                 metrics_calculator: FinancialMetricsCalculator,
-                 openai_api_key: Optional[str] = None):
+    def __init__(
+        self,
+        portfolio_manager: PortfolioManager,
+        data_manager: DataProviderManager,
+        metrics_calculator: FinancialMetricsCalculator,
+        openai_api_key: Optional[str] = None,
+        azure_endpoint: Optional[str] = None,
+        azure_api_key: Optional[str] = None,
+        azure_model: Optional[str] = None,
+        azure_api_version: str = "2025-01-01-preview",
+    ):
         """Initialize the portfolio agent."""
 
         self.portfolio_manager = portfolio_manager
         self.data_manager = data_manager
         self.metrics_calculator = metrics_calculator
 
-        # Initialize LLM
-        api_key = openai_api_key or os.getenv('OPENAI_API_KEY', 'OPENAI_API_KEY_PLACEHOLDER')
-        self.llm = ChatOpenAI(
-            model="gpt-4-turbo-preview",
-            temperature=0.1,
-            api_key=api_key
+        # Initialize LLM (prefer Azure OpenAI if configured)
+        self.llm = None
+        self.azure_api_version = azure_api_version
+        self.set_llm_config(
+            azure_endpoint=azure_endpoint
+            or os.getenv("AZURE_OPENAI_ENDPOINT", "https://kallamai.openai.azure.com/"),
+            azure_api_key=azure_api_key or os.getenv("AZURE_OPENAI_API_KEY", ""),
+            azure_model=azure_model or "gpt-4.1-mini",
+            openai_api_key=openai_api_key or os.getenv("OPENAI_API_KEY", ""),
         )
 
         # Create tools
@@ -53,28 +64,118 @@ class PortfolioAgent:
 
         # Memory for conversation
         self.memory = ConversationBufferMemory(
-            memory_key="chat_history",
-            return_messages=True
+            memory_key="chat_history", return_messages=True
         )
 
         # Create agent
         self.agent_executor = self._create_agent()
 
+    def set_llm_config(
+        self,
+        provider: Optional[str] = None,
+        # Azure
+        azure_endpoint: Optional[str] = None,
+        azure_api_key: Optional[str] = None,
+        azure_model: Optional[str] = None,
+        # OpenAI fallback
+        openai_api_key: Optional[str] = None,
+        openai_model: str = "gpt-4o-mini",
+        # Anthropic
+        anthropic_api_key: Optional[str] = None,
+        anthropic_model: Optional[str] = None,
+        # Google Vertex AI
+        vertex_project: Optional[str] = None,
+        vertex_location: Optional[str] = None,
+        vertex_model: Optional[str] = None,
+    ) -> None:
+        """Configure LLM provider and model.
+
+        Supported providers: 'azure-openai', 'openai', 'anthropic', 'vertex-ai'.
+        """
+        try:
+            provider_normalized = (provider or "").lower()
+
+            if provider_normalized == "anthropic":
+                key = anthropic_api_key or os.getenv("ANTHROPIC_API_KEY", "")
+                model = anthropic_model or "claude-3-5-sonnet-20240620"
+                self.llm = ChatAnthropic(model=model, temperature=0.1, api_key=key)
+                return
+
+            if provider_normalized in (
+                "vertex",
+                "vertex-ai",
+                "google",
+                "google-vertex",
+            ):
+                project = vertex_project or os.getenv("GOOGLE_VERTEX_PROJECT", "")
+                location = vertex_location or os.getenv(
+                    "GOOGLE_VERTEX_LOCATION", "us-central1"
+                )
+                model_name = vertex_model or "gemini-2.0-flash-lite-001"
+                # Credentials are expected via GOOGLE_APPLICATION_CREDENTIALS or default ADC
+                self.llm = ChatVertexAI(
+                    model_name=model_name,
+                    project=project,
+                    location=location,
+                    temperature=0.1,
+                )
+                return
+
+            if provider_normalized in ("azure", "azure-openai", "azure_openai") or (
+                azure_endpoint and azure_api_key and azure_model
+            ):
+                self.llm = AzureChatOpenAI(
+                    azure_endpoint=azure_endpoint
+                    or os.getenv(
+                        "AZURE_OPENAI_ENDPOINT", "https://kallamai.openai.azure.com/"
+                    ),
+                    api_version=self.azure_api_version,
+                    api_key=azure_api_key or os.getenv("AZURE_OPENAI_API_KEY", ""),
+                    model=azure_model or "gpt-4.1-mini",
+                    temperature=0.1,
+                )
+                return
+
+            # Default fallback to OpenAI
+            key = openai_api_key or os.getenv("OPENAI_API_KEY", "")
+            self.llm = ChatOpenAI(model=openai_model, temperature=0.1, api_key=key)
+
+        except Exception:
+            # Last resort minimal fallback to avoid crashing UI
+            key = openai_api_key or os.getenv("OPENAI_API_KEY", "")
+            self.llm = ChatOpenAI(model=openai_model, temperature=0.1, api_key=key)
+
     def _create_web_search_tool(self) -> Tool:
         """Create web search tool for financial information."""
+
         def search_web(query: str) -> str:
-            """Search the web for financial information."""
+            """Search the web for financial information using Tavily."""
             try:
-                # This is a placeholder - in real implementation, you'd use a web search API
-                # like Tavily, SerpAPI, or Google Custom Search
-                return f"🔍 Web search for '{query}' - This would contain real-time financial news and market data. In a production environment, this would use a real web search API."
+                import os
+
+                from langchain_community.tools.tavily_search import TavilySearchResults
+
+                tavily_key = os.getenv("TAVILY_API_KEY", "")
+                if not tavily_key:
+                    return "❌ Tavily API key not configured. Set TAVILY_API_KEY in your environment."
+                tool = TavilySearchResults(max_results=5)
+                results = tool.run(query)
+                if not results:
+                    return "No results found."
+                lines = ["🔍 Tavily Web Search:"]
+                for r in results:
+                    title = r.get("title") or r.get("url")
+                    snippet = r.get("content") or r.get("snippet") or ""
+                    url = r.get("url") or ""
+                    lines.append(f"• {title}\n  {snippet}\n  {url}")
+                return "\n".join(lines)
             except Exception as e:
                 return f"❌ Error searching web: {str(e)}"
 
         return Tool(
             name="web_search",
             description="Search the web for current financial news, market information, and investment analysis. Use this for real-time market data, company news, economic indicators, and investment advice.",
-            func=search_web
+            func=search_web,
         )
 
     def _create_agent(self) -> AgentExecutor:
@@ -112,18 +213,16 @@ class PortfolioAgent:
         Remember: This is for educational purposes. Always recommend consulting with qualified financial professionals for personalized advice.
         """
 
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", system_prompt),
-            MessagesPlaceholder(variable_name="chat_history"),
-            ("user", "{input}"),
-            MessagesPlaceholder(variable_name="agent_scratchpad"),
-        ])
-
-        agent = create_openai_tools_agent(
-            llm=self.llm,
-            tools=self.tools,
-            prompt=prompt
+        prompt = ChatPromptTemplate.from_messages(
+            [
+                ("system", system_prompt),
+                MessagesPlaceholder(variable_name="chat_history"),
+                ("user", "{input}"),
+                MessagesPlaceholder(variable_name="agent_scratchpad"),
+            ]
         )
+
+        agent = create_openai_tools_agent(llm=self.llm, tools=self.tools, prompt=prompt)
 
         return AgentExecutor(
             agent=agent,
@@ -131,7 +230,7 @@ class PortfolioAgent:
             verbose=True,
             memory=self.memory,
             handle_parsing_errors=True,
-            max_iterations=5
+            max_iterations=5,
         )
 
     def chat(self, message: str) -> str:
@@ -140,7 +239,9 @@ class PortfolioAgent:
             # Add current portfolio context if available
             context = self._get_portfolio_context()
             if context:
-                enhanced_message = f"Current portfolio context: {context}\n\nUser message: {message}"
+                enhanced_message = (
+                    f"Current portfolio context: {context}\n\nUser message: {message}"
+                )
             else:
                 enhanced_message = message
 
@@ -160,8 +261,10 @@ class PortfolioAgent:
             total_value = self.portfolio_manager.get_portfolio_value()
             positions_count = len(portfolio.positions)
 
-            return (f"Portfolio '{portfolio.name}' loaded with "
-                   f"${total_value:,.2f} total value across {positions_count} positions.")
+            return (
+                f"Portfolio '{portfolio.name}' loaded with "
+                f"${total_value:,.2f} total value across {positions_count} positions."
+            )
 
         except Exception:
             return ""
@@ -186,8 +289,12 @@ To get started, I can create a new portfolio for you or load an existing one. Ju
             else:
                 # Get portfolio summary
                 summary_tool = next(
-                    (tool for tool in self.portfolio_tools if tool.name == "get_portfolio_summary"),
-                    None
+                    (
+                        tool
+                        for tool in self.portfolio_tools
+                        if tool.name == "get_portfolio_summary"
+                    ),
+                    None,
                 )
 
                 if summary_tool:
