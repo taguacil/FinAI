@@ -262,13 +262,30 @@ print(f"Alpha: {metrics['alpha']*100:.2f}%")
 
 ### Environment Variables
 ```bash
-# Required for AI chat
+# AI Providers (choose one or configure multiple and switch in the UI)
+
+# Azure OpenAI
+AZURE_OPENAI_ENDPOINT=https://kallamai.openai.azure.com/
+AZURE_OPENAI_API_KEY=your_azure_openai_key
+# Optional: override API version (defaults to 2025-01-01-preview in code)
+# AZURE_OPENAI_API_VERSION=2025-01-01-preview
+
+# Anthropic
+ANTHROPIC_API_KEY=your_anthropic_key
+
+# Google Vertex AI
+GOOGLE_VERTEX_PROJECT=mystic-fountain-415918
+GOOGLE_VERTEX_LOCATION=us-central1
+# Service account JSON file for ADC
+GOOGLE_APPLICATION_CREDENTIALS=/absolute/path/to/service_account.json
+
+# OpenAI (fallback only)
 OPENAI_API_KEY=your_openai_key
 
-# Optional for enhanced data
+# Financial data providers
 ALPHA_VANTAGE_API_KEY=your_alpha_vantage_key
 
-# Optional configurations
+# App config
 DATA_DIR=custom/data/path
 LOG_LEVEL=INFO
 ```

@@ -234,9 +234,82 @@ class PortfolioTrackerUI:
 
             st.rerun()
 
-        # Quick action buttons
+        # Model selection + Quick action buttons
         st.subheader("Quick Actions")
-        col1, col2, col3 = st.columns(3)
+        col0, col1, col2, col3 = st.columns([2, 1, 1, 1])
+
+        with col0:
+            st.markdown("**AI Model**")
+            provider = st.selectbox("Provider", ["Azure OpenAI", "Anthropic", "Google Vertex AI"], index=0)
+            if provider == "Azure OpenAI":
+                model_choice = st.selectbox(
+                    "Model",
+                    [
+                        ("Azure GPT-4.1", ("https://kallamai.openai.azure.com/", "gpt-4.1")),
+                        ("Azure GPT-4.1 Mini", ("https://kallamai.openai.azure.com/", "gpt-4.1-mini")),
+                        ("Azure o4-mini", ("https://kallamai.openai.azure.com/", "o4-mini")),
+                        ("Azure GPT-5 Mini", ("https://kallamai.openai.azure.com/", "gpt-5-mini")),
+                    ],
+                    format_func=lambda x: x[0],
+                )
+                if st.button("Apply Model"):
+                    try:
+                        endpoint, model = model_choice[1]
+                        azure_key = os.getenv("AZURE_OPENAI_API_KEY", "")
+                        agent.set_llm_config(
+                            provider="azure-openai",
+                            azure_endpoint=endpoint,
+                            azure_api_key=azure_key,
+                            azure_model=model,
+                        )
+                        st.success(f"Azure model set to {model}")
+                    except Exception as e:
+                        st.error(f"Failed to set Azure model: {e}")
+            elif provider == "Anthropic":
+                model_choice = st.selectbox(
+                    "Model",
+                    [
+                        ("Claude Sonnet 4 (thinking)", "claude-sonnet-4-20250514"),
+                    ],
+                    format_func=lambda x: x[0],
+                )
+                if st.button("Apply Model"):
+                    try:
+                        model = model_choice[1]
+                        anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
+                        agent.set_llm_config(
+                            provider="anthropic",
+                            anthropic_api_key=anthropic_key,
+                            anthropic_model=model,
+                        )
+                        st.success(f"Anthropic model set to {model}")
+                    except Exception as e:
+                        st.error(f"Failed to set Anthropic model: {e}")
+            else:
+                # Google Vertex AI
+                model_choice = st.selectbox(
+                    "Model",
+                    [
+                        ("Gemini 2.0 Flash Lite", "gemini-2.0-flash-lite-001"),
+                        ("Gemini 2.5 Pro (thinking)", "gemini-2.5-pro"),
+                    ],
+                    format_func=lambda x: x[0],
+                )
+                if st.button("Apply Model"):
+                    try:
+                        model = model_choice[1]
+                        project = os.getenv("GOOGLE_VERTEX_PROJECT", "mystic-fountain-415918")
+                        location = os.getenv("GOOGLE_VERTEX_LOCATION", "us-central1")
+                        # Credentials supplied via GOOGLE_APPLICATION_CREDENTIALS
+                        agent.set_llm_config(
+                            provider="vertex-ai",
+                            vertex_project=project,
+                            vertex_location=location,
+                            vertex_model=model,
+                        )
+                        st.success(f"Vertex AI model set to {model}")
+                    except Exception as e:
+                        st.error(f"Failed to set Vertex AI model: {e}")
 
         with col1:
             if st.button("📊 Portfolio Summary"):
@@ -914,6 +987,13 @@ class PortfolioTrackerUI:
             metrics["volatility"] = metrics_calculator.calculate_volatility(portfolio_returns)
             metrics["sharpe_ratio"] = metrics_calculator.calculate_sharpe_ratio(portfolio_returns)
             metrics["sortino_ratio"] = metrics_calculator.calculate_sortino_ratio(portfolio_returns)
+            # Risk metrics
+            md, md_dur = metrics_calculator.calculate_max_drawdown(snapshots)
+            metrics["max_drawdown"] = md
+            metrics["max_drawdown_duration"] = md_dur
+            metrics["var_5pct"] = metrics_calculator.calculate_value_at_risk(portfolio_returns, 0.05)
+            metrics["cvar_5pct"] = metrics_calculator.calculate_conditional_var(portfolio_returns, 0.05)
+            metrics["calmar_ratio"] = metrics_calculator.calculate_calmar_ratio(portfolio_returns, snapshots)
 
             # Benchmark-relative metrics computed against the same date range
             bench_returns = metrics_calculator.get_benchmark_returns(benchmark, start_date, end_date)
@@ -1020,8 +1100,8 @@ class PortfolioTrackerUI:
         col1, col2 = st.columns(2)
 
         with col1:
-            st.metric("Value at Risk (5%)", f"{metrics.get('var_5pct', 0)*100:.2f}%")
-            st.metric("Conditional VaR (5%)", f"{metrics.get('cvar_5pct', 0)*100:.2f}%")
+            st.metric("Value at Risk (5%)", f"{metrics.get('var_5pct', 0)*100:.3f}%")
+            st.metric("Conditional VaR (5%)", f"{metrics.get('cvar_5pct', 0)*100:.3f}%")
 
         with col2:
             st.metric("Calmar Ratio", f"{metrics.get('calmar_ratio', 0):.3f}")

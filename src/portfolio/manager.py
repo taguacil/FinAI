@@ -286,7 +286,7 @@ class PortfolioManager:
         return self.current_portfolio.get_total_value_with_rate_function(get_rate)
 
     def create_snapshot(
-        self, snapshot_date: Optional[date] = None
+        self, snapshot_date: Optional[date] = None, save: bool = True
     ) -> PortfolioSnapshot:
         """Create a comprehensive portfolio snapshot for the given date."""
         if not self.current_portfolio:
@@ -356,7 +356,8 @@ class PortfolioManager:
         )
 
         # Save snapshot
-        self.storage.save_snapshot(self.current_portfolio.id, snapshot)
+        if save:
+            self.storage.save_snapshot(self.current_portfolio.id, snapshot)
         return snapshot
 
     def create_snapshots_since_last(
@@ -416,7 +417,7 @@ class PortfolioManager:
         return snapshots
 
     def create_snapshots_for_range(
-        self, start_date: date, end_date: date
+        self, start_date: date, end_date: date, save: bool = True
     ) -> List[PortfolioSnapshot]:
         """Create snapshots for a specific date range."""
         if not self.current_portfolio:
@@ -446,7 +447,7 @@ class PortfolioManager:
                 self.current_portfolio = temp_portfolio
 
                 # Create snapshot for this date
-                snapshot = self.create_snapshot(current_date)
+                snapshot = self.create_snapshot(current_date, save=save)
                 snapshots.append(snapshot)
 
                 # Restore original portfolio
@@ -458,6 +459,54 @@ class PortfolioManager:
             current_date += timedelta(days=1)
 
         return snapshots
+
+    def simulate_snapshots_for_range(
+        self,
+        start_date: date,
+        end_date: date,
+        exclude_symbols: Optional[List[str]] = None,
+        exclude_transaction_ids: Optional[List[str]] = None,
+    ) -> List[PortfolioSnapshot]:
+        """Simulate snapshots for a date range while excluding certain transactions or symbols.
+
+        Does not persist snapshots to storage.
+        """
+        if not self.current_portfolio:
+            raise ValueError("No portfolio loaded")
+
+        exclude_symbols = {s.upper() for s in (exclude_symbols or [])}
+        exclude_ids = set(exclude_transaction_ids or [])
+
+        original_portfolio = self.current_portfolio
+
+        # Filter transactions
+        filtered_txns: List[Transaction] = []
+        for t in original_portfolio.transactions:
+            if exclude_ids and t.id in exclude_ids:
+                continue
+            if exclude_symbols and t.instrument.symbol.upper() in exclude_symbols:
+                continue
+            filtered_txns.append(t)
+
+        # Build a temporary portfolio with filtered transactions
+        temp_portfolio = Portfolio(
+            id=original_portfolio.id,
+            name=original_portfolio.name,
+            base_currency=original_portfolio.base_currency,
+            created_at=original_portfolio.created_at,
+            transactions=filtered_txns,
+            positions={},
+            cash_balances={},
+        )
+
+        # Swap in temp, create snapshots without saving, restore original
+        self.current_portfolio = temp_portfolio
+        try:
+            simulated = self.create_snapshots_for_range(start_date, end_date, save=False)
+        finally:
+            self.current_portfolio = original_portfolio
+
+        return simulated
 
     def get_snapshot_summary(self, portfolio_id: Optional[str] = None) -> Dict:
         """Get a summary of all snapshots for a portfolio."""

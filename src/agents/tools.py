@@ -8,6 +8,7 @@ from typing import List, Optional
 
 from langchain.tools import BaseTool
 from pydantic import BaseModel, Field
+from pypdf import PdfReader
 
 from ..data_providers.manager import DataProviderManager
 from ..portfolio.manager import PortfolioManager
@@ -239,6 +240,105 @@ class GetPortfolioSummaryTool(BaseTool):
             return f"❌ Error getting portfolio summary: {str(e)}"
 
 
+class GetTransactionsTool(BaseTool):
+    """Tool for exporting transactions and history with metrics-ready fields."""
+
+    name: str = "get_transactions"
+    description: str = (
+        "Return all transactions with key fields for analysis (ids, timestamps, symbols, quantities, prices, fees, currency)."
+    )
+    portfolio_manager: PortfolioManager | None = None
+
+    def __init__(self, portfolio_manager: PortfolioManager):
+        super().__init__()
+        self.portfolio_manager = portfolio_manager
+
+    def _run(self) -> str:
+        try:
+            if not self.portfolio_manager.current_portfolio:
+                return "❌ No portfolio loaded."
+
+            txns = self.portfolio_manager.current_portfolio.transactions
+            lines = [
+                "🧾 Transactions (all):",
+                "id,timestamp,symbol,type,quantity,price,fees,currency,notes",
+            ]
+            for t in sorted(txns, key=lambda x: x.timestamp):
+                lines.append(
+                    ",".join(
+                        [
+                            t.id,
+                            t.timestamp.isoformat(),
+                            t.instrument.symbol,
+                            t.transaction_type.value,
+                            str(t.quantity),
+                            str(t.price),
+                            str(t.fees),
+                            t.currency.value,
+                            (t.notes or "").replace(",", " "),
+                        ]
+                    )
+                )
+            return "\n".join(lines)
+        except Exception as e:
+            return f"❌ Error exporting transactions: {str(e)}"
+
+
+class SimulateWhatIfTool(BaseTool):
+    """Tool to simulate a what-if scenario by excluding symbols or transaction ids and returning end value."""
+
+    name: str = "simulate_what_if"
+    description: str = (
+        "Simulate snapshots for a date range excluding certain symbols or transactions; returns end total value and basic stats."
+    )
+    portfolio_manager: PortfolioManager | None = None
+
+    def __init__(self, portfolio_manager: PortfolioManager):
+        super().__init__()
+        self.portfolio_manager = portfolio_manager
+
+    def _run(
+        self,
+        start: str,
+        end: str,
+        exclude_symbols: str = "",
+        exclude_txn_ids: str = "",
+    ) -> str:
+        try:
+            from datetime import date as date_cls
+
+            if not self.portfolio_manager.current_portfolio:
+                return "❌ No portfolio loaded."
+
+            start_date = date_cls.fromisoformat(start)
+            end_date = date_cls.fromisoformat(end)
+
+            symbols = [s.strip().upper() for s in exclude_symbols.split(" ") if s.strip()]
+            ids = [x.strip() for x in exclude_txn_ids.split(" ") if x.strip()]
+
+            snaps = self.portfolio_manager.simulate_snapshots_for_range(
+                start_date, end_date, exclude_symbols=symbols, exclude_transaction_ids=ids
+            )
+
+            if not snaps:
+                return "No snapshots generated for the specified range."
+
+            end_value = float(snaps[-1].total_value)
+            start_value = float(snaps[0].total_value)
+            total_return = ((end_value - start_value) / start_value * 100) if start_value > 0 else 0.0
+
+            return (
+                f"📈 What-if Simulation ({start} → {end})\n"
+                f"• Excluded symbols: {symbols or '-'}\n"
+                f"• Excluded txn ids: {ids or '-'}\n"
+                f"• Start value: ${start_value:,.2f}\n"
+                f"• End value: ${end_value:,.2f}\n"
+                f"• Total return: {total_return:.2f}%"
+            )
+        except Exception as e:
+            return f"❌ Error running simulation: {str(e)}"
+
+
 class SearchInstrumentTool(BaseTool):
     """Tool for searching financial instruments."""
 
@@ -449,8 +549,43 @@ def create_portfolio_tools(
     return [
         AddTransactionTool(portfolio_manager),
         GetPortfolioSummaryTool(portfolio_manager, metrics_calculator),
+        GetTransactionsTool(portfolio_manager),
+        SimulateWhatIfTool(portfolio_manager),
+        IngestPdfTool(),
         SearchInstrumentTool(data_manager),
         GetCurrentPriceTool(data_manager),
         GetPortfolioMetricsTool(portfolio_manager, metrics_calculator),
         GetTransactionHistoryTool(portfolio_manager),
     ]
+
+
+class IngestPdfTool(BaseTool):
+    """Tool to ingest a PDF file and return extracted text for analysis."""
+
+    name: str = "ingest_pdf"
+    description: str = (
+        "Ingest a local PDF file (datasheet) by providing its absolute path; returns extracted text for the agent to analyze."
+    )
+
+    def _run(self, path: str) -> str:
+        try:
+            reader = PdfReader(path)
+            texts = []
+            for page in reader.pages:
+                try:
+                    txt = page.extract_text() or ""
+                    if txt:
+                        texts.append(txt)
+                except Exception:
+                    continue
+            content = "\n\n".join(texts).strip()
+            if not content:
+                return "❌ No text extracted from PDF."
+            # Truncate extremely long content to keep within LLM context (basic safeguard)
+            if len(content) > 200_000:
+                content = content[:200_000] + "\n\n...[truncated]"
+            return f"📄 PDF Content Extracted (length: {len(content)} chars)\n\n{content}"
+        except FileNotFoundError:
+            return f"❌ File not found: {path}"
+        except Exception as e:
+            return f"❌ Error reading PDF: {str(e)}"

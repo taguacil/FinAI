@@ -10,7 +10,9 @@ from langchain.memory import ConversationBufferMemory
 from langchain.tools import Tool
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_openai import ChatOpenAI
+from langchain_openai import ChatOpenAI, AzureChatOpenAI
+from langchain_anthropic import ChatAnthropic
+from langchain_google_vertexai import ChatVertexAI
 
 from ..data_providers.manager import DataProviderManager
 from ..portfolio.manager import PortfolioManager
@@ -27,6 +29,10 @@ class PortfolioAgent:
         data_manager: DataProviderManager,
         metrics_calculator: FinancialMetricsCalculator,
         openai_api_key: Optional[str] = None,
+        azure_endpoint: Optional[str] = None,
+        azure_api_key: Optional[str] = None,
+        azure_model: Optional[str] = None,
+        azure_api_version: str = "2025-01-01-preview",
     ):
         """Initialize the portfolio agent."""
 
@@ -34,12 +40,14 @@ class PortfolioAgent:
         self.data_manager = data_manager
         self.metrics_calculator = metrics_calculator
 
-        # Initialize LLM
-        api_key = openai_api_key or os.getenv(
-            "OPENAI_API_KEY", "OPENAI_API_KEY_PLACEHOLDER"
-        )
-        self.llm = ChatOpenAI(
-            model="gpt-4-turbo-preview", temperature=0.1, api_key=api_key
+        # Initialize LLM (prefer Azure OpenAI if configured)
+        self.llm = None
+        self.azure_api_version = azure_api_version
+        self.set_llm_config(
+            azure_endpoint=azure_endpoint or os.getenv("AZURE_OPENAI_ENDPOINT", "https://kallamai.openai.azure.com/"),
+            azure_api_key=azure_api_key or os.getenv("AZURE_OPENAI_API_KEY", ""),
+            azure_model=azure_model or "gpt-4.1-mini",
+            openai_api_key=openai_api_key or os.getenv("OPENAI_API_KEY", ""),
         )
 
         # Create tools
@@ -60,6 +68,73 @@ class PortfolioAgent:
 
         # Create agent
         self.agent_executor = self._create_agent()
+
+    def set_llm_config(
+        self,
+        provider: Optional[str] = None,
+        # Azure
+        azure_endpoint: Optional[str] = None,
+        azure_api_key: Optional[str] = None,
+        azure_model: Optional[str] = None,
+        # OpenAI fallback
+        openai_api_key: Optional[str] = None,
+        openai_model: str = "gpt-4o-mini",
+        # Anthropic
+        anthropic_api_key: Optional[str] = None,
+        anthropic_model: Optional[str] = None,
+        # Google Vertex AI
+        vertex_project: Optional[str] = None,
+        vertex_location: Optional[str] = None,
+        vertex_model: Optional[str] = None,
+    ) -> None:
+        """Configure LLM provider and model.
+
+        Supported providers: 'azure-openai', 'openai', 'anthropic', 'vertex-ai'.
+        """
+        try:
+            provider_normalized = (provider or "").lower()
+
+            if provider_normalized == "anthropic":
+                key = anthropic_api_key or os.getenv("ANTHROPIC_API_KEY", "")
+                model = anthropic_model or "claude-3-5-sonnet-20240620"
+                self.llm = ChatAnthropic(model=model, temperature=0.1, api_key=key)
+                return
+
+            if provider_normalized in ("vertex", "vertex-ai", "google", "google-vertex"):
+                project = vertex_project or os.getenv("GOOGLE_VERTEX_PROJECT", "")
+                location = vertex_location or os.getenv("GOOGLE_VERTEX_LOCATION", "us-central1")
+                model_name = vertex_model or "gemini-2.0-flash-lite-001"
+                # Credentials are expected via GOOGLE_APPLICATION_CREDENTIALS or default ADC
+                self.llm = ChatVertexAI(
+                    model_name=model_name,
+                    project=project,
+                    location=location,
+                    temperature=0.1,
+                )
+                return
+
+            if provider_normalized in ("azure", "azure-openai", "azure_openai") or (
+                azure_endpoint and azure_api_key and azure_model
+            ):
+                self.llm = AzureChatOpenAI(
+                    azure_endpoint=azure_endpoint or os.getenv(
+                        "AZURE_OPENAI_ENDPOINT", "https://kallamai.openai.azure.com/"
+                    ),
+                    api_version=self.azure_api_version,
+                    api_key=azure_api_key or os.getenv("AZURE_OPENAI_API_KEY", ""),
+                    model=azure_model or "gpt-4.1-mini",
+                    temperature=0.1,
+                )
+                return
+
+            # Default fallback to OpenAI
+            key = openai_api_key or os.getenv("OPENAI_API_KEY", "")
+            self.llm = ChatOpenAI(model=openai_model, temperature=0.1, api_key=key)
+
+        except Exception:
+            # Last resort minimal fallback to avoid crashing UI
+            key = openai_api_key or os.getenv("OPENAI_API_KEY", "")
+            self.llm = ChatOpenAI(model=openai_model, temperature=0.1, api_key=key)
 
     def _create_web_search_tool(self) -> Tool:
         """Create web search tool for financial information."""
