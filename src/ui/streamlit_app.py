@@ -386,6 +386,14 @@ class PortfolioTrackerUI:
                     },
                 ),
                 (
+                    "Azure GPT-5",
+                    {
+                        "provider": "azure-openai",
+                        "endpoint": "https://kallamai.openai.azure.com/",
+                        "model": "gpt-5",
+                    },
+                ),
+                (
                     "Azure GPT-5 Mini",
                     {
                         "provider": "azure-openai",
