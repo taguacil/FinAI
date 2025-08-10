@@ -113,7 +113,9 @@ class PortfolioManager:
         if not instrument_info:
             # Create basic instrument info if not found
             inferred_type = (
-                InstrumentType.CASH if normalized_symbol == "CASH" else InstrumentType.STOCK
+                InstrumentType.CASH
+                if normalized_symbol == "CASH"
+                else InstrumentType.STOCK
             )
             instrument_info_dict = {
                 "symbol": normalized_symbol,
@@ -907,8 +909,13 @@ class PortfolioManager:
         base_cost: Dict[Currency, Decimal] = {}
 
         # Process cash transactions chronologically
-        for txn in sorted(self.current_portfolio.transactions, key=lambda t: t.timestamp):
-            if txn.transaction_type not in [TransactionType.DEPOSIT, TransactionType.WITHDRAWAL]:
+        for txn in sorted(
+            self.current_portfolio.transactions, key=lambda t: t.timestamp
+        ):
+            if txn.transaction_type not in [
+                TransactionType.DEPOSIT,
+                TransactionType.WITHDRAWAL,
+            ]:
                 continue
             cur = txn.currency
             amt = txn.total_value
@@ -950,7 +957,9 @@ class PortfolioManager:
 
         # Build summary using current balances and current FX
         result: Dict[Currency, Dict[str, Decimal]] = {}
-        currencies = set(self.current_portfolio.cash_balances.keys()) | set(foreign_balance.keys())
+        currencies = set(self.current_portfolio.cash_balances.keys()) | set(
+            foreign_balance.keys()
+        )
         for cur in currencies:
             amt_foreign = self.current_portfolio.cash_balances.get(cur, Decimal("0"))
             cost_base = base_cost.get(cur, Decimal("0"))
@@ -958,9 +967,13 @@ class PortfolioManager:
             if cur == base:
                 rate = Decimal("1")
             else:
-                rate = self.data_manager.get_exchange_rate(cur, base) or self.data_manager.get_historical_fx_rate_on(
-                    date.today(), cur, base
-                ) or Decimal("1")
+                rate = (
+                    self.data_manager.get_exchange_rate(cur, base)
+                    or self.data_manager.get_historical_fx_rate_on(
+                        date.today(), cur, base
+                    )
+                    or Decimal("1")
+                )
 
             current_value_base = amt_foreign * rate
             avg_cost_rate = (cost_base / amt_foreign) if amt_foreign else Decimal("0")
@@ -996,7 +1009,10 @@ class PortfolioManager:
         # Collect currencies to evaluate
         currencies: set[Currency] = set(self.current_portfolio.cash_balances.keys())
         for txn in self.current_portfolio.transactions:
-            if txn.transaction_type in [TransactionType.DEPOSIT, TransactionType.WITHDRAWAL]:
+            if txn.transaction_type in [
+                TransactionType.DEPOSIT,
+                TransactionType.WITHDRAWAL,
+            ]:
                 currencies.add(txn.currency)
 
         results: Dict[Currency, Dict[str, Decimal]] = {}
@@ -1016,32 +1032,52 @@ class PortfolioManager:
 
             # Opening balance before Jan1
             opening_foreign = Decimal("0")
-            for txn in sorted(self.current_portfolio.transactions, key=lambda t: t.timestamp):
-                if txn.transaction_type not in [TransactionType.DEPOSIT, TransactionType.WITHDRAWAL]:
+            for txn in sorted(
+                self.current_portfolio.transactions, key=lambda t: t.timestamp
+            ):
+                if txn.transaction_type not in [
+                    TransactionType.DEPOSIT,
+                    TransactionType.WITHDRAWAL,
+                ]:
                     continue
                 if txn.currency != cur:
                     continue
                 if txn.timestamp.date() < jan1:
-                    amt = txn.total_value if txn.transaction_type == TransactionType.DEPOSIT else -txn.total_value
+                    amt = (
+                        txn.total_value
+                        if txn.transaction_type == TransactionType.DEPOSIT
+                        else -txn.total_value
+                    )
                     opening_foreign += amt
 
             opening_base_cost = opening_foreign * fx_jan1
 
             # YTD flows contribution valued at their date FX
             ytd_base_contrib = Decimal("0")
-            for txn in sorted(self.current_portfolio.transactions, key=lambda t: t.timestamp):
-                if txn.transaction_type not in [TransactionType.DEPOSIT, TransactionType.WITHDRAWAL]:
+            for txn in sorted(
+                self.current_portfolio.transactions, key=lambda t: t.timestamp
+            ):
+                if txn.transaction_type not in [
+                    TransactionType.DEPOSIT,
+                    TransactionType.WITHDRAWAL,
+                ]:
                     continue
                 if txn.currency != cur:
                     continue
                 d = txn.timestamp.date()
                 if d < jan1:
                     continue
-                amt_signed = txn.total_value if txn.transaction_type == TransactionType.DEPOSIT else -txn.total_value
+                amt_signed = (
+                    txn.total_value
+                    if txn.transaction_type == TransactionType.DEPOSIT
+                    else -txn.total_value
+                )
                 ytd_base_contrib += amt_signed * fx_on(d)
 
             # Current value
-            current_foreign = self.current_portfolio.cash_balances.get(cur, Decimal("0"))
+            current_foreign = self.current_portfolio.cash_balances.get(
+                cur, Decimal("0")
+            )
             current_value_base = current_foreign * fx_today
 
             base_exposure_cost = opening_base_cost + ytd_base_contrib

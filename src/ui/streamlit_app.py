@@ -795,7 +795,9 @@ class PortfolioTrackerUI:
                     for curr, amt in portfolio.cash_balances.items():
                         curr_code = getattr(curr, "value", str(curr))
                         # FX summary for cash (compat with older cached manager)
-                        fx_summary = self._get_cash_fx_summary(portfolio_manager).get(curr)
+                        fx_summary = self._get_cash_fx_summary(portfolio_manager).get(
+                            curr
+                        )
                         amt_base = self._convert_to_base(
                             portfolio_manager,
                             Decimal(str(amt)),
@@ -806,14 +808,20 @@ class PortfolioTrackerUI:
                         # Compute FX P&L percent if base cost available (non-base currency only)
                         is_base_cur = curr_code == base_currency.value
                         fx_pnl_base = (
-                            (fx_summary.get("fx_unrealized_pnl_base") if fx_summary else None)
+                            (
+                                fx_summary.get("fx_unrealized_pnl_base")
+                                if fx_summary
+                                else None
+                            )
                             if not is_base_cur
                             else None
                         )
                         base_cost = fx_summary.get("base_cost") if fx_summary else None
                         fx_pnl_pct = (
                             (fx_pnl_base / base_cost * 100)
-                            if (not is_base_cur) and fx_summary and base_cost not in (None, Decimal("0"))
+                            if (not is_base_cur)
+                            and fx_summary
+                            and base_cost not in (None, Decimal("0"))
                             else None
                         )
                         # Robust YTD FX using manager method (respects purchase dates)
@@ -821,7 +829,9 @@ class PortfolioTrackerUI:
                         ytd_fx_pct = None
                         try:
                             if hasattr(portfolio_manager, "get_cash_ytd_fx_summary"):
-                                ysum = portfolio_manager.get_cash_ytd_fx_summary().get(curr)
+                                ysum = portfolio_manager.get_cash_ytd_fx_summary().get(
+                                    curr
+                                )
                                 if ysum:
                                     ytd_fx_base = ysum.get("ytd_fx_pnl_base")
                                     ytd_fx_pct = ysum.get("ytd_fx_percent")
@@ -1165,14 +1175,18 @@ class PortfolioTrackerUI:
         portfolio = portfolio_manager.current_portfolio
         if not portfolio:
             return {}
-        from src.portfolio.models import TransactionType, Currency as Cur
+        from src.portfolio.models import Currency as Cur
+        from src.portfolio.models import TransactionType
 
         base = portfolio.base_currency
         foreign_balance: Dict[Cur, Decimal] = {}
         base_cost: Dict[Cur, Decimal] = {}
 
         for txn in sorted(portfolio.transactions, key=lambda t: t.timestamp):
-            if txn.transaction_type not in [TransactionType.DEPOSIT, TransactionType.WITHDRAWAL]:
+            if txn.transaction_type not in [
+                TransactionType.DEPOSIT,
+                TransactionType.WITHDRAWAL,
+            ]:
                 continue
             cur = txn.currency
             amt = txn.total_value
@@ -1312,12 +1326,13 @@ class PortfolioTrackerUI:
                 fees = st.number_input("Fees", min_value=0.0, step=0.01, value=0.0)
                 trade_date = st.date_input("Date", value=date.today())
                 from src.portfolio.models import Currency
+
                 currency_code = st.selectbox(
                     "Currency",
                     [c.value for c in Currency],
                     index=[c.value for c in Currency].index(
                         portfolio_manager.current_portfolio.base_currency.value
-                    )
+                    ),
                 )
 
             notes = st.text_area("Notes (optional)")
@@ -1327,8 +1342,11 @@ class PortfolioTrackerUI:
                     # For cash movements: ignore symbol/isin, use CASH and amount in price field
                     if price > 0:
                         try:
-                            timestamp = datetime.combine(trade_date, datetime.now().time())
-                            from src.portfolio.models import TransactionType, Currency
+                            timestamp = datetime.combine(
+                                trade_date, datetime.now().time()
+                            )
+                            from src.portfolio.models import Currency, TransactionType
+
                             txn_type_map = {
                                 "deposit": TransactionType.DEPOSIT,
                                 "withdrawal": TransactionType.WITHDRAWAL,
