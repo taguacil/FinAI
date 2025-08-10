@@ -38,6 +38,10 @@ class AddTransactionInput(PortfolioToolInput):
     quantity: float = Field(description="Number of shares or amount")
     price: float = Field(description="Price per share or total amount")
     fees: float = Field(default=0.0, description="Transaction fees")
+    currency: Optional[str] = Field(
+        default=None,
+        description="Currency code (e.g., USD, EUR, GBP, CHF). Required for deposits/withdrawals; overrides instrument currency for trades if provided.",
+    )
     date: Optional[str] = Field(
         default=None,
         description="Trade date in YYYY-MM-DD format (defaults to today if omitted)",
@@ -106,6 +110,7 @@ class AddTransactionTool(BaseTool):
         date: Optional[str] = None,
         days_ago: int = 0,
         notes: Optional[str] = None,
+        currency: Optional[str] = None,
     ) -> str:
         """Add a transaction to the portfolio."""
         try:
@@ -132,10 +137,38 @@ class AddTransactionTool(BaseTool):
             else:
                 timestamp = datetime.now() - timedelta(days=days_ago)
 
-            # Choose identifier: symbol or ISIN (at least one required)
+            # Choose identifier: symbol or ISIN; for cash movements default to CASH
             identifier = symbol or isin
             if not identifier:
-                return "Please provide either a symbol or an ISIN."
+                if txn_type in (TransactionType.DEPOSIT, TransactionType.WITHDRAWAL):
+                    identifier = "CASH"
+                else:
+                    return "Please provide either a symbol or an ISIN."
+
+            # Normalize cash amount semantics for deposits/withdrawals
+            if identifier == "CASH" and txn_type in (
+                TransactionType.DEPOSIT,
+                TransactionType.WITHDRAWAL,
+            ):
+                # If only quantity provided, treat as amount; use quantity=1
+                if quantity > 0 and price == 0:
+                    price = quantity
+                    quantity = 1.0
+                # If neither positive, invalid
+                if price <= 0:
+                    return "Please provide a positive amount for deposit/withdrawal. Use 'price' as amount or 'quantity' alone."
+                # Force quantity=1 for cash movements
+                quantity = 1.0
+
+            # Prepare currency
+            from src.portfolio.models import Currency as Cur
+
+            cur_obj = None
+            if currency:
+                try:
+                    cur_obj = Cur(currency.upper())
+                except Exception:
+                    return f"Invalid currency: {currency}. Use one of {[c.value for c in Cur]}"
 
             # Add transaction
             success = self.portfolio_manager.add_transaction(
@@ -147,6 +180,7 @@ class AddTransactionTool(BaseTool):
                 fees=Decimal(str(fees)),
                 notes=notes,
                 isin=(isin.upper() if isin else None),
+                currency=cur_obj,
             )
 
             if success:
@@ -207,7 +241,8 @@ class GetPortfolioSummaryTool(BaseTool):
             if portfolio.cash_balances:
                 summary.append("💵 **Cash Balances:**")
                 for currency, amount in portfolio.cash_balances.items():
-                    summary.append(f"  • {currency}: ${amount:,.2f}")
+                    code = getattr(currency, "value", str(currency))
+                    summary.append(f"  • {code}: {amount:,.2f}")
                 summary.append("")
 
             # Positions

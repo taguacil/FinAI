@@ -74,6 +74,20 @@ class PortfolioTrackerUI:
         # Initialize session state
         self.init_session_state()
 
+        # Ensure previously selected portfolio remains loaded across reruns
+        try:
+            sel_id = st.session_state.get("selected_portfolio")
+            if sel_id:
+                if (
+                    not portfolio_manager.current_portfolio
+                    or portfolio_manager.current_portfolio.id != sel_id
+                ):
+                    loaded = portfolio_manager.load_portfolio(sel_id)
+                    if loaded:
+                        st.session_state.portfolio_loaded = True
+        except Exception:
+            pass
+
         # Header
         st.title("🤖 AI Portfolio Tracker")
         st.markdown(
@@ -149,7 +163,12 @@ class PortfolioTrackerUI:
                     if nm == chosen_name:
                         chosen_id = pid
                         break
-                if chosen_id and chosen_id != st.session_state.selected_portfolio:
+                # If different choice, or not currently loaded, load it
+                if chosen_id and (
+                    chosen_id != st.session_state.selected_portfolio
+                    or not portfolio_manager.current_portfolio
+                    or portfolio_manager.current_portfolio.id != chosen_id
+                ):
                     portfolio = portfolio_manager.load_portfolio(chosen_id)
                     if portfolio:
                         st.session_state.portfolio_loaded = True
@@ -503,8 +522,8 @@ class PortfolioTrackerUI:
             ref_prices_by_symbol = {}
             curr_prices_by_symbol = {}
 
-        # Overview uses only locally stored data (no network fetches)
-        fetch_live = False
+        # Enable FX conversion for accurate base-currency views
+        fetch_live = True
 
         # Check data freshness
         positions_with_prices = [
@@ -551,8 +570,19 @@ class PortfolioTrackerUI:
             st.metric("Positions", total_positions)
 
         with col3:
-            cash_total = sum(portfolio.cash_balances.values())
-            st.metric("Cash", f"${cash_total:,.2f}")
+            # Sum cash across currencies in base currency
+            cash_total_base = Decimal("0")
+            if portfolio.cash_balances:
+                for curr, amt in portfolio.cash_balances.items():
+                    curr_code = getattr(curr, "value", str(curr))
+                    cash_total_base += self._convert_to_base(
+                        portfolio_manager,
+                        Decimal(str(amt)),
+                        curr_code,
+                        portfolio.base_currency.value,
+                        allow_fetch=True,
+                    )
+            st.metric("Cash (base)", f"${cash_total_base:,.2f}")
 
         with col4:
             # Calculate total P&L
@@ -659,7 +689,7 @@ class PortfolioTrackerUI:
                     mv,
                     currency_code,
                     base_currency.value,
-                    allow_fetch=False,
+                    allow_fetch=True,
                 )
 
                 # Convert unrealized PnL to base currency
@@ -669,6 +699,7 @@ class PortfolioTrackerUI:
                     unreal_val_native,
                     currency_code,
                     base_currency.value,
+                    allow_fetch=True,
                 )
 
                 # Category classification
@@ -763,22 +794,55 @@ class PortfolioTrackerUI:
                 if cat == "Short Term" and portfolio.cash_balances:
                     for curr, amt in portfolio.cash_balances.items():
                         curr_code = getattr(curr, "value", str(curr))
+                        # FX summary for cash (compat with older cached manager)
+                        fx_summary = self._get_cash_fx_summary(portfolio_manager).get(curr)
                         amt_base = self._convert_to_base(
                             portfolio_manager,
                             Decimal(str(amt)),
                             curr_code,
                             base_currency.value,
+                            allow_fetch=True,
                         )
+                        # Compute FX P&L percent if base cost available (non-base currency only)
+                        is_base_cur = curr_code == base_currency.value
+                        fx_pnl_base = (
+                            (fx_summary.get("fx_unrealized_pnl_base") if fx_summary else None)
+                            if not is_base_cur
+                            else None
+                        )
+                        base_cost = fx_summary.get("base_cost") if fx_summary else None
+                        fx_pnl_pct = (
+                            (fx_pnl_base / base_cost * 100)
+                            if (not is_base_cur) and fx_summary and base_cost not in (None, Decimal("0"))
+                            else None
+                        )
+                        # Robust YTD FX using manager method (respects purchase dates)
+                        ytd_fx_base = None
+                        ytd_fx_pct = None
+                        try:
+                            if hasattr(portfolio_manager, "get_cash_ytd_fx_summary"):
+                                ysum = portfolio_manager.get_cash_ytd_fx_summary().get(curr)
+                                if ysum:
+                                    ytd_fx_base = ysum.get("ytd_fx_pnl_base")
+                                    ytd_fx_pct = ysum.get("ytd_fx_percent")
+                        except Exception:
+                            ytd_fx_base = None
+                            ytd_fx_pct = None
+
                         cash_items.append(
                             {
                                 "name": f"Cash ({curr_code})",
                                 "isin": "-",
                                 "currency": curr_code,
+                                "instrument_type": "cash",
                                 "quantity": None,
                                 "current_price": None,
                                 "market_value_base": amt_base,
-                                "unrealized_pnl_base": None,
-                                "unrealized_pnl_percent": None,
+                                "market_value": Decimal(str(amt)),
+                                "unrealized_pnl_base": fx_pnl_base,
+                                "unrealized_pnl_percent": fx_pnl_pct,
+                                "ytd_fx_pnl_base": ytd_fx_base,
+                                "ytd_fx_percent": ytd_fx_pct,
                                 "ytd_unrealized_pnl": None,
                                 "ytd_unrealized_pnl_percent": None,
                             }
@@ -958,6 +1022,7 @@ class PortfolioTrackerUI:
         qty = item.get("quantity")
         price = item.get("current_price")
         mv_base = item.get("market_value_base")
+        mv_native = item.get("market_value")
         pnl_base = item.get("unrealized_pnl_base")
         pnl_pct = item.get("unrealized_pnl_percent")
         ytd_mkt_native = item.get("ytd_market_pnl")
@@ -986,14 +1051,44 @@ class PortfolioTrackerUI:
             f"<div style='font-weight:600; margin-bottom:2px;'>{name}</div>",
             f"<div style='color:#666; font-size:12px; margin-bottom:6px;'>ISIN: {isin}</div>",
             qty_price_html,
-            f"<div><span style='color:#666;'>Market Value:</span> <strong>{fmt_money(mv_base)} {base_currency_code}</strong></div>",
-            f"<div><span style='color:#666;'>Unrealized PnL:</span> {colored(pnl_base)} {base_currency_code} ({fmt_signed(pnl_pct)}%)</div>",
+            # For cash, prefer showing native currency value prominently, with base in parentheses
+            (
+                f"<div><span style='color:#666;'>Value:</span> <strong>{fmt_money(mv_native)} {currency}</strong>"
+                f" <span style='color:#999;'>({fmt_money(mv_base)} {base_currency_code})</span></div>"
+                if (item.get("instrument_type") == "cash" and mv_native is not None)
+                else f"<div><span style='color:#666;'>Market Value:</span> <strong>{fmt_money(mv_base)} {base_currency_code}</strong></div>"
+            ),
         ]
-        # YTD Market from snapshots (native currency) — always show, N/A if missing
-        if ytd_mkt_native is not None:
-            ytd_line = f"<div style='font-size:13px; margin-top:4px;'><em>YTD Market:</em> {colored(ytd_mkt_native)} {currency} ({fmt_signed(ytd_mkt_pct)}%)</div>"
+        # Show PnL line only when present and meaningful
+        show_pnl = True
+        if item.get("instrument_type") == "cash":
+            # For cash, hide FX PnL when currency equals base (no FX exposure)
+            if currency == base_currency_code:
+                show_pnl = False
+        if show_pnl and pnl_base is not None:
+            lines.append(
+                f"<div><span style='color:#666;'>Unrealized PnL:</span> {colored(pnl_base)} {base_currency_code} ({fmt_signed(pnl_pct)}%)</div>"
+            )
+        # YTD Market/Fx: for cash, compute from Jan 1 FX; for positions, use snapshots (if present)
+        if item.get("instrument_type") == "cash":
+            ytd_fx_base = item.get("ytd_fx_pnl_base")
+            ytd_fx_pct = item.get("ytd_fx_percent")
+            if ytd_fx_base is not None and currency != base_currency_code:
+                ytd_line = (
+                    f"<div style='font-size:13px; margin-top:4px;'><em>YTD FX:</em> "
+                    f"{colored(ytd_fx_base)} {base_currency_code} ({fmt_signed(ytd_fx_pct)}%)</div>"
+                )
+            else:
+                ytd_line = f"<div style='font-size:13px; margin-top:4px;'><em>YTD FX:</em> N/A</div>"
         else:
-            ytd_line = f"<div style='font-size:13px; margin-top:4px;'><em>YTD Market:</em> N/A</div>"
+            # Positions: show snapshot-based market YTD in native
+            if ytd_mkt_native is not None:
+                ytd_line = (
+                    f"<div style='font-size:13px; margin-top:4px;'><em>YTD Market:</em> "
+                    f"{colored(ytd_mkt_native)} {currency} ({fmt_signed(ytd_mkt_pct)}%)</div>"
+                )
+            else:
+                ytd_line = f"<div style='font-size:13px; margin-top:4px;'><em>YTD Market:</em> N/A</div>"
         lines.append(ytd_line)
         if total_buy is not None:
             qty_str = fmt_money(qty) if qty is not None else "-"
@@ -1036,14 +1131,106 @@ class PortfolioTrackerUI:
         try:
             from src.portfolio.models import Currency
 
+            # Try real-time FX first
             rate = portfolio_manager.data_manager.get_exchange_rate(
                 Currency(from_currency_code), Currency(base_currency_code)
             )
             if rate:
                 return Decimal(str(amount)) * rate
+
+            # Fallback to historical FX for today (handles cases where live quote is missing)
+            hist_rate = portfolio_manager.data_manager.get_historical_fx_rate_on(
+                date.today(), Currency(from_currency_code), Currency(base_currency_code)
+            )
+            if hist_rate:
+                return Decimal(str(amount)) * hist_rate
         except Exception:
             pass
         return Decimal(str(amount))
+
+    def _get_cash_fx_summary(self, portfolio_manager) -> Dict:
+        """Safely get cash FX summary even if the manager instance is from an older cache.
+
+        Tries PortfolioManager.get_cash_fx_summary(); if missing, computes locally.
+        Returns a dict keyed by Currency with fields similar to manager method.
+        """
+        # Try direct method if available
+        if hasattr(portfolio_manager, "get_cash_fx_summary"):
+            try:
+                return portfolio_manager.get_cash_fx_summary()
+            except Exception:
+                pass
+
+        # Local computation fallback
+        portfolio = portfolio_manager.current_portfolio
+        if not portfolio:
+            return {}
+        from src.portfolio.models import TransactionType, Currency as Cur
+
+        base = portfolio.base_currency
+        foreign_balance: Dict[Cur, Decimal] = {}
+        base_cost: Dict[Cur, Decimal] = {}
+
+        for txn in sorted(portfolio.transactions, key=lambda t: t.timestamp):
+            if txn.transaction_type not in [TransactionType.DEPOSIT, TransactionType.WITHDRAWAL]:
+                continue
+            cur = txn.currency
+            amt = txn.total_value
+            if cur not in foreign_balance:
+                foreign_balance[cur] = Decimal("0")
+                base_cost[cur] = Decimal("0")
+            if cur == base:
+                fx = Decimal("1")
+            else:
+                fx = (
+                    portfolio_manager.data_manager.get_historical_fx_rate_on(
+                        txn.timestamp.date(), cur, base
+                    )
+                    or portfolio_manager.data_manager.get_exchange_rate(cur, base)
+                    or Decimal("1")
+                )
+            if txn.transaction_type == TransactionType.DEPOSIT:
+                foreign_balance[cur] += amt
+                base_cost[cur] += amt * fx
+            else:
+                existing_bal = foreign_balance[cur]
+                existing_cost = base_cost[cur]
+                avg_rate = (existing_cost / existing_bal) if existing_bal else fx
+                foreign_balance[cur] = existing_bal - amt
+                base_cost[cur] = existing_cost - (amt * avg_rate)
+                if foreign_balance[cur].copy_abs() < Decimal("0.0000001"):
+                    foreign_balance[cur] = Decimal("0")
+                if base_cost[cur].copy_abs() < Decimal("0.0000001"):
+                    base_cost[cur] = Decimal("0")
+
+        result: Dict[Cur, Dict[str, Decimal]] = {}
+        currencies = set(portfolio.cash_balances.keys()) | set(foreign_balance.keys())
+        for cur in currencies:
+            amt_foreign = portfolio.cash_balances.get(cur, Decimal("0"))
+            cost_base = base_cost.get(cur, Decimal("0"))
+            rate = (
+                Decimal("1")
+                if cur == base
+                else (
+                    portfolio_manager.data_manager.get_exchange_rate(cur, base)
+                    or portfolio_manager.data_manager.get_historical_fx_rate_on(
+                        date.today(), cur, base
+                    )
+                    or Decimal("1")
+                )
+            )
+            current_value_base = amt_foreign * rate
+            avg_cost_rate = (cost_base / amt_foreign) if amt_foreign else Decimal("0")
+            fx_unrealized = current_value_base - cost_base
+            result[cur] = {
+                "foreign_amount": amt_foreign,
+                "base_cost": cost_base,
+                "current_rate": rate,
+                "current_value_base": current_value_base,
+                "fx_unrealized_pnl_base": fx_unrealized,
+                "avg_cost_rate": avg_cost_rate,
+            }
+        return result
 
     def _classify_position(self, pos: Dict, instrument) -> str:
         """Classify a position into user-defined categories."""
@@ -1124,11 +1311,51 @@ class PortfolioTrackerUI:
             with col3:
                 fees = st.number_input("Fees", min_value=0.0, step=0.01, value=0.0)
                 trade_date = st.date_input("Date", value=date.today())
+                from src.portfolio.models import Currency
+                currency_code = st.selectbox(
+                    "Currency",
+                    [c.value for c in Currency],
+                    index=[c.value for c in Currency].index(
+                        portfolio_manager.current_portfolio.base_currency.value
+                    )
+                )
 
             notes = st.text_area("Notes (optional)")
 
             if st.form_submit_button("Add Transaction"):
-                if (symbol or isin) and quantity > 0 and price > 0:
+                if transaction_type in {"deposit", "withdrawal"}:
+                    # For cash movements: ignore symbol/isin, use CASH and amount in price field
+                    if price > 0:
+                        try:
+                            timestamp = datetime.combine(trade_date, datetime.now().time())
+                            from src.portfolio.models import TransactionType, Currency
+                            txn_type_map = {
+                                "deposit": TransactionType.DEPOSIT,
+                                "withdrawal": TransactionType.WITHDRAWAL,
+                            }
+                            success = portfolio_manager.add_transaction(
+                                symbol="CASH",
+                                transaction_type=txn_type_map[transaction_type],
+                                quantity=Decimal("1"),
+                                price=Decimal(str(price)),
+                                timestamp=timestamp,
+                                fees=Decimal(str(fees)),
+                                notes=notes if notes else None,
+                                isin=None,
+                                currency=Currency(currency_code),
+                            )
+                            if success:
+                                st.success(
+                                    f"Added {transaction_type} of {price:.2f} {currency_code}"
+                                )
+                                st.rerun()
+                            else:
+                                st.error("Failed to add cash transaction")
+                        except Exception as e:
+                            st.error(f"Error adding cash transaction: {e}")
+                    else:
+                        st.error("Please enter a positive amount for cash transactions")
+                elif (symbol or isin) and quantity > 0 and price > 0:
                     try:
                         # Use selected trade date at current time
                         timestamp = datetime.combine(trade_date, datetime.now().time())
@@ -1153,6 +1380,8 @@ class PortfolioTrackerUI:
                             fees=Decimal(str(fees)),
                             notes=notes if notes else None,
                             isin=(isin.upper() if isin else None),
+                            # For non-cash trades, let instrument currency be used
+                            currency=None,
                         )
 
                         if success:

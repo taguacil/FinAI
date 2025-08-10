@@ -44,6 +44,12 @@ class PortfolioManager:
             name=name,
             base_currency=base_currency,
             created_at=datetime.now(),
+            cash_balances={
+                Currency.USD: Decimal("0"),
+                Currency.GBP: Decimal("0"),
+                Currency.EUR: Decimal("0"),
+                Currency.CHF: Decimal("0"),
+            },
         )
 
         self.storage.save_portfolio(portfolio)
@@ -106,10 +112,13 @@ class PortfolioManager:
         instrument_info = self.data_manager.get_instrument_info(normalized_symbol)
         if not instrument_info:
             # Create basic instrument info if not found
+            inferred_type = (
+                InstrumentType.CASH if normalized_symbol == "CASH" else InstrumentType.STOCK
+            )
             instrument_info_dict = {
                 "symbol": normalized_symbol,
-                "name": normalized_symbol,
-                "instrument_type": InstrumentType.STOCK,  # Default
+                "name": "Cash" if normalized_symbol == "CASH" else normalized_symbol,
+                "instrument_type": inferred_type,
                 "currency": currency or Currency.USD,
                 "isin": isin,
             }
@@ -879,3 +888,174 @@ class PortfolioManager:
             flows[txn_date] = flows.get(txn_date, Decimal("0")) + amount_base
 
         return flows
+
+    def get_cash_fx_summary(self) -> Dict[Currency, Dict[str, Decimal]]:
+        """Compute FX summary for cash balances per currency.
+
+        For each currency, reconstruct a running average base-cost for the remaining
+        foreign cash using historical FX on deposit dates and average-cost reduction
+        on withdrawals. Returns per-currency metrics including current base value
+        and unrealized FX PnL relative to the base-cost of remaining cash.
+        """
+        if not self.current_portfolio:
+            return {}
+
+        base = self.current_portfolio.base_currency
+
+        # Running balances and base-costs by currency
+        foreign_balance: Dict[Currency, Decimal] = {}
+        base_cost: Dict[Currency, Decimal] = {}
+
+        # Process cash transactions chronologically
+        for txn in sorted(self.current_portfolio.transactions, key=lambda t: t.timestamp):
+            if txn.transaction_type not in [TransactionType.DEPOSIT, TransactionType.WITHDRAWAL]:
+                continue
+            cur = txn.currency
+            amt = txn.total_value
+
+            if cur not in foreign_balance:
+                foreign_balance[cur] = Decimal("0")
+                base_cost[cur] = Decimal("0")
+
+            # Historical FX on transaction date (or 1 if base)
+            if cur == base:
+                fx = Decimal("1")
+            else:
+                fx = self.data_manager.get_historical_fx_rate_on(
+                    txn.timestamp.date(), cur, base
+                ) or Decimal("0")
+                if fx == 0:
+                    # As a fallback, try current FX
+                    fx = self.data_manager.get_exchange_rate(cur, base) or Decimal("1")
+
+            if txn.transaction_type == TransactionType.DEPOSIT:
+                foreign_balance[cur] += amt
+                base_cost[cur] += amt * fx
+            else:
+                # Reduce at running average base-cost
+                existing_bal = foreign_balance[cur]
+                existing_cost = base_cost[cur]
+                if existing_bal > 0:
+                    avg_rate = existing_cost / existing_bal
+                else:
+                    avg_rate = fx
+                foreign_balance[cur] = existing_bal - amt
+                base_cost[cur] = existing_cost - (amt * avg_rate)
+
+                # Clean near-zero noise
+                if foreign_balance[cur].copy_abs() < Decimal("0.0000001"):
+                    foreign_balance[cur] = Decimal("0")
+                if base_cost[cur].copy_abs() < Decimal("0.0000001"):
+                    base_cost[cur] = Decimal("0")
+
+        # Build summary using current balances and current FX
+        result: Dict[Currency, Dict[str, Decimal]] = {}
+        currencies = set(self.current_portfolio.cash_balances.keys()) | set(foreign_balance.keys())
+        for cur in currencies:
+            amt_foreign = self.current_portfolio.cash_balances.get(cur, Decimal("0"))
+            cost_base = base_cost.get(cur, Decimal("0"))
+
+            if cur == base:
+                rate = Decimal("1")
+            else:
+                rate = self.data_manager.get_exchange_rate(cur, base) or self.data_manager.get_historical_fx_rate_on(
+                    date.today(), cur, base
+                ) or Decimal("1")
+
+            current_value_base = amt_foreign * rate
+            avg_cost_rate = (cost_base / amt_foreign) if amt_foreign else Decimal("0")
+            fx_unrealized = current_value_base - cost_base
+
+            result[cur] = {
+                "foreign_amount": amt_foreign,
+                "base_cost": cost_base,
+                "current_rate": rate,
+                "current_value_base": current_value_base,
+                "fx_unrealized_pnl_base": fx_unrealized,
+                "avg_cost_rate": avg_cost_rate,
+            }
+
+        return result
+
+    def get_cash_ytd_fx_summary(self) -> Dict[Currency, Dict[str, Decimal]]:
+        """Compute YTD FX PnL for cash per currency based on transaction timing.
+
+        Method:
+        - Determine opening foreign balance as of Jan 1 (pre-YTD flows) and value it at Jan 1 FX.
+        - For each YTD cash flow (deposit +, withdrawal -) on date t, add a contribution valued at FX(t).
+        - YTD FX PnL = current_balance * FX(today) - [opening_balance * FX(Jan1) + sum(YTD_flows * FX(t))].
+        Returns per currency dict with keys: ytd_fx_pnl_base, ytd_fx_percent, base_exposure_cost.
+        """
+        if not self.current_portfolio:
+            return {}
+
+        base = self.current_portfolio.base_currency
+        today = date.today()
+        jan1 = date(today.year, 1, 1)
+
+        # Collect currencies to evaluate
+        currencies: set[Currency] = set(self.current_portfolio.cash_balances.keys())
+        for txn in self.current_portfolio.transactions:
+            if txn.transaction_type in [TransactionType.DEPOSIT, TransactionType.WITHDRAWAL]:
+                currencies.add(txn.currency)
+
+        results: Dict[Currency, Dict[str, Decimal]] = {}
+
+        for cur in currencies:
+            # FX helpers
+            def fx_on(d: date) -> Decimal:
+                if cur == base:
+                    return Decimal("1")
+                r = self.data_manager.get_historical_fx_rate_on(d, cur, base)
+                if r is None:
+                    r = self.data_manager.get_exchange_rate(cur, base)
+                return r or Decimal("1")
+
+            fx_today = fx_on(today)
+            fx_jan1 = fx_on(jan1)
+
+            # Opening balance before Jan1
+            opening_foreign = Decimal("0")
+            for txn in sorted(self.current_portfolio.transactions, key=lambda t: t.timestamp):
+                if txn.transaction_type not in [TransactionType.DEPOSIT, TransactionType.WITHDRAWAL]:
+                    continue
+                if txn.currency != cur:
+                    continue
+                if txn.timestamp.date() < jan1:
+                    amt = txn.total_value if txn.transaction_type == TransactionType.DEPOSIT else -txn.total_value
+                    opening_foreign += amt
+
+            opening_base_cost = opening_foreign * fx_jan1
+
+            # YTD flows contribution valued at their date FX
+            ytd_base_contrib = Decimal("0")
+            for txn in sorted(self.current_portfolio.transactions, key=lambda t: t.timestamp):
+                if txn.transaction_type not in [TransactionType.DEPOSIT, TransactionType.WITHDRAWAL]:
+                    continue
+                if txn.currency != cur:
+                    continue
+                d = txn.timestamp.date()
+                if d < jan1:
+                    continue
+                amt_signed = txn.total_value if txn.transaction_type == TransactionType.DEPOSIT else -txn.total_value
+                ytd_base_contrib += amt_signed * fx_on(d)
+
+            # Current value
+            current_foreign = self.current_portfolio.cash_balances.get(cur, Decimal("0"))
+            current_value_base = current_foreign * fx_today
+
+            base_exposure_cost = opening_base_cost + ytd_base_contrib
+            ytd_fx_pnl_base = current_value_base - base_exposure_cost
+            ytd_fx_percent = (
+                (ytd_fx_pnl_base / base_exposure_cost * 100)
+                if base_exposure_cost != 0
+                else Decimal("0")
+            )
+
+            results[cur] = {
+                "ytd_fx_pnl_base": ytd_fx_pnl_base,
+                "ytd_fx_percent": ytd_fx_percent,
+                "base_exposure_cost": base_exposure_cost,
+            }
+
+        return results
