@@ -167,7 +167,7 @@ class AddTransactionTool(BaseTool):
             if currency:
                 try:
                     cur_obj = Cur(currency.upper())
-                except Exception:
+                except ValueError:
                     return f"Invalid currency: {currency}. Use one of {[c.value for c in Cur]}"
 
             # Add transaction
@@ -265,16 +265,20 @@ class GetPortfolioSummaryTool(BaseTool):
 
             # Basic metrics if requested
             if include_metrics:
-                metrics = self.portfolio_manager.get_performance_metrics()
-                if "error" not in metrics:
-                    summary.append("📊 **Performance Metrics:**")
-                    summary.append(
-                        f"  • Total Return: {metrics.get('total_return_percent', 0):.2f}%"
-                    )
-                    summary.append(
-                        f"  • Volatility: {metrics.get('annualized_volatility_percent', 0):.2f}%"
-                    )
-                    summary.append("")
+                try:
+                    metrics = self.portfolio_manager.get_performance_metrics()
+                    if metrics and "error" not in metrics:
+                        summary.append("📊 **Performance Metrics:**")
+                        summary.append(
+                            f"  • Total Return: {metrics.get('total_return_percent', 0):.2f}%"
+                        )
+                        summary.append(
+                            f"  • Volatility: {metrics.get('annualized_volatility_percent', 0):.2f}%"
+                        )
+                        summary.append("")
+                except Exception:
+                    # Metrics calculation failed, continue without them
+                    pass
 
             return "\n".join(summary)
 
@@ -515,9 +519,13 @@ class GetPortfolioMetricsTool(BaseTool):
             # Get snapshots for the period
             end_date = date.today()
             start_date = end_date - timedelta(days=days)
-            snapshots = self.portfolio_manager.storage.load_snapshots(
-                self.portfolio_manager.current_portfolio.id, start_date, end_date
-            )
+
+            try:
+                snapshots = self.portfolio_manager.storage.load_snapshots(
+                    self.portfolio_manager.current_portfolio.id, start_date, end_date
+                )
+            except Exception as e:
+                return f"❌ Error loading snapshots: {str(e)}"
 
             if len(snapshots) < 2:
                 return "❌ Insufficient historical data for metrics calculation. Need at least 2 data points."
@@ -583,7 +591,10 @@ class GetTransactionHistoryTool(BaseTool):
             if not self.portfolio_manager.current_portfolio:
                 return "❌ No portfolio loaded."
 
-            transactions = self.portfolio_manager.get_transaction_history(days)
+            try:
+                transactions = self.portfolio_manager.get_transaction_history(days)
+            except Exception as e:
+                return f"❌ Error getting transaction history: {str(e)}"
 
             if not transactions:
                 return f"📝 No transactions found in the last {days} days."

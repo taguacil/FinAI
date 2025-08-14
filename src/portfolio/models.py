@@ -94,6 +94,9 @@ class Transaction(BaseModel):
     fees: Decimal = Field(default=Decimal("0"), description="Transaction fees", ge=0)
     currency: Currency = Field(..., description="Transaction currency")
     notes: Optional[str] = Field(None, description="Additional notes", max_length=500)
+    current_balance: Optional[Decimal] = Field(
+        None, description="Cash balance in transaction currency after this transaction"
+    )
 
     @property
     def total_value(self) -> Decimal:
@@ -123,6 +126,8 @@ class Position(BaseModel):
     @property
     def market_value(self) -> Optional[Decimal]:
         """Calculate current market value of the position."""
+        if self.quantity == 0:
+            return Decimal("0")
         if self.current_price is not None:
             return self.quantity * self.current_price
         return None
@@ -197,6 +202,15 @@ class Portfolio(BaseModel):
         self.transactions.append(transaction)
         self._update_position_from_transaction(transaction)
 
+    def add_transaction_for_reconstruction(self, transaction: Transaction) -> None:
+        """Add a transaction for historical reconstruction without affecting cash balances.
+
+        This method is used when reconstructing portfolio state at a historical date
+        and should not modify cash balances since we're just reconstructing positions.
+        """
+        self.transactions.append(transaction)
+        self._update_position_from_transaction_for_reconstruction(transaction)
+
     def _update_position_from_transaction(self, transaction: Transaction) -> None:
         """Update position and cash balances based on a new transaction."""
         symbol = transaction.instrument.symbol
@@ -261,6 +275,43 @@ class Portfolio(BaseModel):
             if currency not in self.cash_balances:
                 self.cash_balances[currency] = Decimal("0")
             self.cash_balances[currency] += transaction.total_value
+
+    def _update_position_from_transaction_for_reconstruction(
+        self, transaction: Transaction
+    ) -> None:
+        """Update position without affecting cash balances for historical reconstruction."""
+        symbol = transaction.instrument.symbol
+
+        if transaction.transaction_type == TransactionType.BUY:
+            if symbol in self.positions:
+                # Update existing position
+                pos = self.positions[symbol]
+                total_cost = (pos.quantity * pos.average_cost) + transaction.total_value
+                total_quantity = pos.quantity + transaction.quantity
+                pos.average_cost = (
+                    total_cost / total_quantity if total_quantity > 0 else Decimal("0")
+                )
+                pos.quantity = total_quantity
+            else:
+                # Create new position
+                self.positions[symbol] = Position(
+                    instrument=transaction.instrument,
+                    quantity=transaction.quantity,
+                    average_cost=transaction.price,
+                )
+            # Note: Cash balances are NOT updated for historical reconstruction
+
+        elif transaction.transaction_type == TransactionType.SELL:
+            if symbol in self.positions:
+                pos = self.positions[symbol]
+                pos.quantity -= transaction.quantity
+                if pos.quantity <= 0:
+                    del self.positions[symbol]
+            # Note: Cash balances are NOT updated for historical reconstruction
+
+        # For other transaction types (DEPOSIT, WITHDRAWAL, DIVIDEND, INTEREST),
+        # we don't update cash balances during historical reconstruction
+        # since we're just reconstructing the position state
 
     def get_total_value(
         self, exchange_rates: Optional[Dict[str, Decimal]] = None
@@ -337,6 +388,10 @@ class Portfolio(BaseModel):
             for pos in self.positions.values()
             if pos.instrument.instrument_type == instrument_type
         ]
+
+    def get_cash_balance(self, currency: Currency) -> Decimal:
+        """Get current cash balance for a specific currency."""
+        return self.cash_balances.get(currency, Decimal("0"))
 
     class Config:
         use_enum_values = False

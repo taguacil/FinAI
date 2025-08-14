@@ -148,6 +148,34 @@ class PortfolioManager:
             notes=notes,
         )
 
+        # Calculate current balance in transaction currency after this transaction
+        transaction_currency = currency or instrument.currency
+        current_balance = self.current_portfolio.cash_balances.get(
+            transaction_currency, Decimal("0")
+        )
+
+        # Simulate the transaction effect on cash balance to get the post-transaction balance
+        if transaction_type == TransactionType.BUY:
+            # Buying decreases cash
+            post_transaction_balance = current_balance - transaction.total_value
+        elif transaction_type == TransactionType.SELL:
+            # Selling increases cash
+            post_transaction_balance = current_balance + transaction.total_value
+        elif transaction_type == TransactionType.DEPOSIT:
+            # Deposit increases cash
+            post_transaction_balance = current_balance + transaction.total_value
+        elif transaction_type == TransactionType.WITHDRAWAL:
+            # Withdrawal decreases cash
+            post_transaction_balance = current_balance - transaction.total_value
+        elif transaction_type in [TransactionType.DIVIDEND, TransactionType.INTEREST]:
+            # Income increases cash
+            post_transaction_balance = current_balance + transaction.total_value
+        else:
+            # For other transaction types, assume no cash impact
+            post_transaction_balance = current_balance
+
+        transaction.current_balance = post_transaction_balance
+
         self.current_portfolio.add_transaction(transaction)
         self.storage.save_portfolio(self.current_portfolio)
 
@@ -424,14 +452,15 @@ class PortfolioManager:
 
                 # Temporarily set current portfolio to the historical state
                 original_portfolio = self.current_portfolio
-                self.current_portfolio = temp_portfolio
+                try:
+                    self.current_portfolio = temp_portfolio
 
-                # Create snapshot for this date
-                snapshot = self.create_snapshot(current_date)
-                snapshots.append(snapshot)
-
-                # Restore original portfolio
-                self.current_portfolio = original_portfolio
+                    # Create snapshot for this date
+                    snapshot = self.create_snapshot(current_date)
+                    snapshots.append(snapshot)
+                finally:
+                    # Always restore original portfolio even if snapshot creation fails
+                    self.current_portfolio = original_portfolio
 
             except Exception as e:
                 logging.warning(f"Failed to create snapshot for {current_date}: {e}")
@@ -472,14 +501,15 @@ class PortfolioManager:
 
                 # Temporarily set current portfolio to the historical state
                 original_portfolio = self.current_portfolio
-                self.current_portfolio = temp_portfolio
+                try:
+                    self.current_portfolio = temp_portfolio
 
-                # Create snapshot for this date
-                snapshot = self.create_snapshot(current_date, save=save)
-                snapshots.append(snapshot)
-
-                # Restore original portfolio
-                self.current_portfolio = original_portfolio
+                    # Create snapshot for this date
+                    snapshot = self.create_snapshot(current_date, save=save)
+                    snapshots.append(snapshot)
+                finally:
+                    # Always restore original portfolio even if snapshot creation fails
+                    self.current_portfolio = original_portfolio
 
             except Exception as e:
                 logging.warning(f"Failed to create snapshot for {current_date}: {e}")
