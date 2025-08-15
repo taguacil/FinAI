@@ -8,6 +8,7 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Dict, List, Optional
 
+import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -1480,149 +1481,79 @@ class PortfolioTrackerUI:
                     f"✅ Latest snapshot: {latest_snapshot_date.strftime('%Y-%m-%d')}"
                 )
 
-        # Calculate metrics (time-weighted returns in display currency)
-        with st.spinner("Calculating metrics..."):
-            from src.portfolio.models import Currency as Cur
-
-            # Build FX helper
-            fx_cache_m: Dict[tuple, Optional[Decimal]] = {}
-            last_pair: Dict[tuple, Optional[Decimal]] = {}
-
-            def fx(day: date, from_code: str, to_code: str) -> Optional[Decimal]:
-                if from_code == to_code:
-                    return Decimal("1")
-                key = (day, from_code, to_code)
-                if key in fx_cache_m:
-                    return fx_cache_m[key]
-                try:
-                    r = portfolio_manager.data_manager.get_historical_fx_rate_on(
-                        day, Cur(from_code), Cur(to_code)
-                    )
-                except Exception:
-                    r = None
-                fx_cache_m[key] = r
-                pair = (from_code, to_code)
-                if r is not None:
-                    last_pair[pair] = r
-                else:
-                    last = last_pair.get(pair)
-                    if last is not None:
-                        r = last
-                        fx_cache_m[key] = r
-                return r
-
-            base_code = (
-                snapshots[0].base_currency.value
-                if hasattr(snapshots[0].base_currency, "value")
-                else str(snapshots[0].base_currency)
-            )
-
-            # Values in display currency
-            values_disp: List[float] = []
-            for s in snapshots:
-                r = fx(s.date, base_code, display_currency_code)
-                v = Decimal(str(s.total_value))
-                if r is not None:
-                    v = v * r
-                values_disp.append(float(v))
-
-            # External cash flows in display currency
-            flows_base = portfolio_manager.get_external_cash_flows_by_day(
+        # Calculate metrics using proper time-weighted methods from metrics calculator
+        with st.spinner("Calculating time-weighted metrics..."):
+            # Get external cash flows for the period
+            external_cash_flows = portfolio_manager.get_external_cash_flows_by_day(
                 start_date, end_date
             )
-            flows_disp: Dict[date, float] = {}
-            for d, a in flows_base.items():
-                r = fx(d, base_code, display_currency_code)
-                val = Decimal(str(a))
-                if r is not None:
-                    val = val * r
-                flows_disp[d] = float(val)
 
-            # Returns with flows (in display currency)
-            portfolio_returns: List[float] = []
-            for i in range(1, len(values_disp)):
-                prev_v = values_disp[i - 1]
-                curr_v = values_disp[i]
-                cf = float(flows_disp.get(snapshots[i].date, 0.0))
-                if prev_v > 0:
-                    portfolio_returns.append((curr_v - prev_v - cf) / prev_v)
-            if len(portfolio_returns) == 0:
-                st.error("Could not calculate returns")
+            # Convert cash flows to float for metrics calculator
+            cash_flows_float = {d: float(v) for d, v in external_cash_flows.items()}
+
+            # Calculate time-weighted returns using the metrics calculator
+            portfolio_returns_twr = metrics_calculator.calculate_time_weighted_return(
+                snapshots, cash_flows_float
+            )
+
+            if not portfolio_returns_twr:
+                st.error("Could not calculate time-weighted returns")
                 return
 
-            # Base metrics dict
-            metrics = {}
-
-            # TWR total and annualized
-            import numpy as np
-
-            twr_product = float(np.prod([1.0 + r for r in portfolio_returns]))
-            total_return_twr = twr_product - 1.0
-            n = len(portfolio_returns)
-            annualized_return_twr = (twr_product ** (252.0 / n)) - 1.0 if n > 0 else 0.0
-
-            metrics["total_return"] = total_return_twr
-            metrics["annualized_return"] = annualized_return_twr
-            metrics["volatility"] = metrics_calculator.calculate_volatility(
-                portfolio_returns
-            )
-            metrics["sharpe_ratio"] = metrics_calculator.calculate_sharpe_ratio(
-                portfolio_returns
-            )
-            metrics["sortino_ratio"] = metrics_calculator.calculate_sortino_ratio(
-                portfolio_returns
-            )
-            # Risk metrics
-            md, md_dur = metrics_calculator.calculate_max_drawdown(snapshots)
-            metrics["max_drawdown"] = md
-            metrics["max_drawdown_duration"] = md_dur
-            metrics["var_5pct"] = metrics_calculator.calculate_value_at_risk(
-                portfolio_returns, 0.05
-            )
-            metrics["cvar_5pct"] = metrics_calculator.calculate_conditional_var(
-                portfolio_returns, 0.05
-            )
-            metrics["calmar_ratio"] = metrics_calculator.calculate_calmar_ratio(
-                portfolio_returns, snapshots
+            # Calculate comprehensive metrics using the metrics calculator
+            comprehensive_metrics = metrics_calculator.calculate_portfolio_metrics(
+                snapshots, benchmark, cash_flows_float
             )
 
-            # Benchmark-relative metrics computed against the same date range
-            bench_returns = metrics_calculator.get_benchmark_returns(
-                benchmark, start_date, end_date
-            )
-            min_len = min(len(portfolio_returns), len(bench_returns))
-            if min_len > 1:
-                pr = portfolio_returns[-min_len:]
-                br = bench_returns[-min_len:]
-                metrics["beta"] = metrics_calculator.calculate_beta(pr, br)
-                metrics["alpha"] = metrics_calculator.calculate_alpha(pr, br)
-                metrics["information_ratio"] = (
-                    metrics_calculator.calculate_information_ratio(pr, br)
-                )
-                metrics["benchmark_return"] = float(np.mean(br) * 252)
-                metrics["benchmark_volatility"] = (
-                    metrics_calculator.calculate_volatility(br)
-                )
-                metrics["benchmark_available"] = True
-            else:
-                metrics["benchmark_available"] = False
+            if "error" in comprehensive_metrics:
+                st.error(comprehensive_metrics["error"])
+                return
 
-        if "error" in metrics:
-            st.error(metrics["error"])
-            return
+            # Extract key metrics
+            metrics = {
+                "total_return_twr": comprehensive_metrics.get("total_return", 0.0),  # Fixed: now uses actual total return
+                "annualized_return_twr": comprehensive_metrics.get("annualized_return", 0.0),  # Fixed: now uses actual annualized return
+                "time_weighted_annualized_return": comprehensive_metrics.get("time_weighted_annualized_return", 0.0),
+                "modified_dietz_return": comprehensive_metrics.get("modified_dietz_return", 0.0),
+                "volatility": comprehensive_metrics.get("volatility", 0.0),
+                "sharpe_ratio": comprehensive_metrics.get("sharpe_ratio", 0.0),
+                "sortino_ratio": comprehensive_metrics.get("sortino_ratio", 0.0),
+                "max_drawdown": comprehensive_metrics.get("max_drawdown", 0.0),
+                "max_drawdown_duration": comprehensive_metrics.get(
+                    "max_drawdown_duration", 0
+                ),
+                "var_5pct": comprehensive_metrics.get("var_5pct", 0.0),
+                "cvar_5pct": comprehensive_metrics.get("cvar_5pct", 0.0),
+                "calmar_ratio": comprehensive_metrics.get("calmar_ratio", 0.0),
+                "beta": comprehensive_metrics.get("beta", 0.0),
+                "alpha": comprehensive_metrics.get("alpha", 0.0),
+                "information_ratio": comprehensive_metrics.get(
+                    "information_ratio", 0.0
+                ),
+                "benchmark_return": comprehensive_metrics.get("benchmark_return", 0.0),
+                "benchmark_volatility": comprehensive_metrics.get(
+                    "benchmark_volatility", 0.0
+                ),
+                "benchmark_available": comprehensive_metrics.get(
+                    "benchmark_available", False
+                ),
+            }
 
-        # Display key metrics
-        st.subheader("📊 Performance Metrics")
+        # Display key metrics with emphasis on time-weighted returns
+        st.subheader("📊 Performance Metrics (Time-Weighted)")
 
         col1, col2, col3, col4 = st.columns(4)
 
         with col1:
-            st.metric("Total Return", f"{metrics.get('total_return', 0)*100:.2f}%")
+            st.metric(
+                "Total Return (TWR)", f"{metrics.get('total_return_twr', 0)*100:.2f}%"
+            )
             st.metric("Sharpe Ratio", f"{metrics.get('sharpe_ratio', 0):.3f}")
 
         with col2:
             st.metric(
-                "Annualized Return", f"{metrics.get('annualized_return', 0)*100:.2f}%"
+                "Annualized Return (TWR)",
+                f"{metrics.get('annualized_return_twr', 0)*100:.2f}%",
             )
             st.metric("Volatility", f"{metrics.get('volatility', 0)*100:.2f}%")
 
@@ -1637,7 +1568,97 @@ class PortfolioTrackerUI:
             else:
                 st.info("Benchmark data not available")
 
-        # YTD TWR and Unrealized PnL (Value) in selected currency
+        # Additional return metrics for comparison
+        st.subheader("📈 Return Calculation Methods Comparison")
+        col1, col2, col3 = st.columns(3)
+
+        with col1:
+            st.metric(
+                "Period Total Return (TWR)",
+                f"{metrics.get('total_return_twr', 0)*100:.2f}%"
+            )
+            st.caption("Total return for the selected period using geometric linking")
+
+        with col2:
+            st.metric(
+                "Period Annualized Return (TWR)",
+                f"{metrics.get('annualized_return_twr', 0)*100:.2f}%"
+            )
+            st.caption("Annualized return for the selected period using geometric linking")
+
+        with col3:
+            st.metric(
+                "Time-Weighted Annualized Return",
+                f"{metrics.get('time_weighted_annualized_return', 0)*100:.2f}%"
+            )
+            st.caption("Annualized return using dedicated TWR methodology")
+
+        # Additional time-weighted metrics
+        st.subheader("🔄 Time-Weighted Return Details")
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.metric(
+                "Modified Dietz Return",
+                f"{metrics.get('modified_dietz_return', 0)*100:.2f}%",
+            )
+            st.metric("Calmar Ratio", f"{metrics.get('calmar_ratio', 0):.3f}")
+
+        with col2:
+            st.metric("Value at Risk (5%)", f"{metrics.get('var_5pct', 0)*100:.3f}%")
+            st.metric("Conditional VaR (5%)", f"{metrics.get('cvar_5pct', 0)*100:.3f}%")
+
+        # Comparison between TWR and MWR methodologies
+        st.subheader("📊 Return Methodology Comparison")
+
+        # Calculate money-weighted returns for comparison
+        try:
+            portfolio_returns_mwr = metrics_calculator.calculate_money_weighted_return(
+                snapshots, cash_flows_float
+            )
+            mwr_annualized = (
+                metrics_calculator.calculate_annualized_money_weighted_return(
+                    snapshots, cash_flows_float
+                )
+            )
+
+            col1, col2, col3 = st.columns(3)
+
+            with col1:
+                st.metric(
+                    "Time-Weighted Return (TWR)",
+                    f"{metrics.get('annualized_return_twr', 0)*100:.2f}%",
+                )
+                st.caption(
+                    "Eliminates cash flow impact - measures pure investment performance"
+                )
+
+            with col2:
+                st.metric("Money-Weighted Return (MWR)", f"{mwr_annualized*100:.2f}%")
+                st.caption(
+                    "Includes cash flow timing - shows investor's actual experience"
+                )
+
+            with col3:
+                difference = metrics.get("annualized_return_twr", 0) - mwr_annualized
+                st.metric("TWR vs MWR Difference", f"{difference*100:.2f}%")
+                if abs(difference) > 0.01:  # 1% threshold
+                    if difference > 0:
+                        st.caption("TWR > MWR: Cash flows helped performance")
+                    else:
+                        st.caption("TWR < MWR: Cash flows hurt performance")
+                else:
+                    st.caption("TWR ≈ MWR: Minimal cash flow impact")
+
+        except Exception as e:
+            st.warning(
+                f"Could not calculate money-weighted returns for comparison: {e}"
+            )
+            st.info(
+                "Time-weighted returns are shown above. Money-weighted returns require additional data processing."
+            )
+
+        # YTD Time-Weighted Performance
         try:
             ytd_start = date(date.today().year, 1, 1)
             if end_date < ytd_start:
@@ -1646,69 +1667,30 @@ class PortfolioTrackerUI:
                 portfolio_manager.current_portfolio.id, ytd_start, end_date
             )
 
-            col_ytd1, col_ytd2 = st.columns(2)
-
-            # YTD Performance (TWR)
             if len(ytd_snaps) >= 2:
                 ytd_flows = portfolio_manager.get_external_cash_flows_by_day(
                     ytd_start, end_date
                 )
                 ytd_flows_f = {d: float(v) for d, v in ytd_flows.items()}
-                ytd_returns = metrics_calculator.calculate_returns(
+
+                # Calculate YTD time-weighted return using the same method as Portfolio tab
+                daily_returns = metrics_calculator.calculate_time_weighted_return(
                     ytd_snaps, ytd_flows_f
                 )
-                if ytd_returns:
-                    import numpy as np
 
-                    prod = float(np.prod([1.0 + r for r in ytd_returns]))
-                    ytd_twr_pct = (prod - 1.0) * 100.0
-                    col_ytd1.metric("YTD Performance (TWR)", f"{ytd_twr_pct:.2f}%")
+                if daily_returns:
+                    # Geometric aggregation for period return (same as Portfolio tab)
+                    twr = 1.0
+                    for r in daily_returns:
+                        twr *= 1.0 + r
+                    ytd_perf_pct = (twr - 1.0) * 100.0
+                    st.metric("YTD Performance (TWR)", f"{ytd_perf_pct:.2f}%")
                 else:
-                    col_ytd1.metric("YTD Performance (TWR)", "N/A")
+                    st.metric("YTD Performance (TWR)", "N/A")
             else:
-                col_ytd1.metric("YTD Performance (TWR)", "N/A")
-
-            # Unrealized PnL (Value) as of end_date in selected currency
-            unreal_sum = 0.0
-            if ytd_snaps:
-                last_snap = ytd_snaps[-1]
-                disp_code = display_currency_code
-                from src.portfolio.models import Currency as Cur
-
-                for pos in last_snap.positions.values():
-                    if (
-                        pos.current_price is None
-                        or pos.average_cost is None
-                        or pos.quantity is None
-                    ):
-                        continue
-                    try:
-                        pnl_native = (
-                            pos.current_price - pos.average_cost
-                        ) * pos.quantity
-                        from_code = (
-                            pos.instrument.currency.value
-                            if hasattr(pos.instrument.currency, "value")
-                            else str(pos.instrument.currency)
-                        )
-                        if from_code == disp_code:
-                            unreal_sum += float(pnl_native)
-                        else:
-                            rate = portfolio_manager.data_manager.get_historical_fx_rate_on(
-                                last_snap.date, Cur(from_code), Cur(disp_code)
-                            )
-                            if rate:
-                                unreal_sum += float(pnl_native * rate)
-                            else:
-                                unreal_sum += float(pnl_native)
-                    except Exception:
-                        continue
-            col_ytd2.metric(
-                f"Unrealized PnL ({display_currency_code})",
-                f"{unreal_sum:,.2f} {display_currency_code}",
-            )
+                st.metric("YTD Performance (TWR)", "N/A")
         except Exception:
-            pass
+            st.metric("YTD Performance (TWR)", "N/A")
 
         # Prepare benchmark series (aligned to snapshot dates)
         bench_map: Dict[date, float] = {}
@@ -1740,6 +1722,7 @@ class PortfolioTrackerUI:
             end_date,
             benchmark_symbol=benchmark,
             benchmark_prices_aligned=bench_prices_aligned,
+            portfolio_returns_twr=portfolio_returns_twr,  # Pass TWR returns for plotting
         )
 
         # Risk metrics
@@ -1757,6 +1740,68 @@ class PortfolioTrackerUI:
                     "Information Ratio", f"{metrics.get('information_ratio', 0):.3f}"
                 )
 
+        # Add explanation of time-weighted methodology
+        st.info(
+            "💡 **Time-Weighted Returns (TWR)**: All performance metrics above use time-weighted returns, "
+            "which eliminate the impact of external cash flows (deposits/withdrawals) to measure pure investment performance. "
+            "This applies to both the overall portfolio and individual asset categories, providing consistent and "
+            "comparable performance measurement across all components."
+        )
+
+        # Daily time-weighted returns chart
+        if portfolio_returns_twr:
+            st.subheader("📈 Daily Time-Weighted Returns")
+
+            # Convert returns to percentages for better readability
+            daily_returns_pct = [r * 100 for r in portfolio_returns_twr]
+
+            # Create dates list from snapshots (skip first date since returns start from second snapshot)
+            dates = [s.date for s in snapshots]
+
+            fig3 = go.Figure()
+            fig3.add_trace(
+                go.Scatter(
+                    x=dates[1:],  # Skip first date since returns start from second snapshot
+                    y=daily_returns_pct,
+                    mode="lines+markers",
+                    name="Daily TWR",
+                    line=dict(color="#1f77b4", width=1),
+                    marker=dict(size=3),
+                )
+            )
+
+            # Add zero line for reference
+            fig3.add_hline(
+                y=0,
+                line_dash="dash",
+                line_color="gray",
+                annotation_text="Zero Return Line",
+            )
+
+            fig3.update_layout(
+                title="Daily Time-Weighted Returns Over Time",
+                xaxis_title="Date",
+                yaxis_title="Daily Return (%)",
+                height=300,
+                showlegend=True,
+            )
+            fig3.update_xaxes(range=[start_date, end_date])
+            st.plotly_chart(fig3, use_container_width=True)
+
+            # Summary statistics for daily returns
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("Best Day", f"{max(daily_returns_pct):.2f}%")
+            with col2:
+                st.metric("Worst Day", f"{min(daily_returns_pct):.2f}%")
+            with col3:
+                st.metric("Avg Daily Return", f"{np.mean(daily_returns_pct):.2f}%")
+            with col4:
+                st.metric(
+                    "Positive Days",
+                    f"{sum(1 for r in daily_returns_pct if r > 0)}/{len(daily_returns_pct)}",
+                )
+
     def plot_portfolio_and_categories(
         self,
         snapshots,
@@ -1766,6 +1811,7 @@ class PortfolioTrackerUI:
         end_date: date,
         benchmark_symbol: Optional[str] = None,
         benchmark_prices_aligned: Optional[List[Optional[float]]] = None,
+        portfolio_returns_twr: Optional[float] = None,
     ):
         """Plot portfolio and category series in selected currency, plus cumulative returns."""
         if len(snapshots) < 2:
@@ -1930,7 +1976,7 @@ class PortfolioTrackerUI:
                 )
 
         fig.update_layout(
-            title=f"Performance Over Time (in {display_currency_code})",
+            title=f"Portfolio Value Over Time (in {display_currency_code}) - Time-Weighted Analysis",
             xaxis_title="Date",
             yaxis_title=f"Value ({display_currency_code})",
             height=420,
@@ -1939,8 +1985,25 @@ class PortfolioTrackerUI:
         fig.update_xaxes(range=[start_date, end_date])
         st.plotly_chart(fig, use_container_width=True)
 
-        # Cumulative returns for portfolio and categories
+        # Cumulative returns for portfolio and categories (using time-weighted returns)
+        def to_cum_returns_twr(returns: List[float]) -> List[Optional[float]]:
+            """Calculate cumulative returns from time-weighted daily returns."""
+            if not returns:
+                return []
+
+            # Calculate cumulative return using geometric linking: (1+r1)*(1+r2)*...*(1+rn) - 1
+            cumulative = []
+            running_product = 1.0
+
+            for daily_return in returns:
+                running_product *= 1 + daily_return
+                cumulative_return = (running_product - 1.0) * 100.0
+                cumulative.append(cumulative_return)
+
+            return cumulative
+
         def to_cum_returns(values: List[float]) -> List[Optional[float]]:
+            """Calculate cumulative returns from absolute values (for categories)."""
             if not values:
                 return []
             # Find first non-zero starting point
@@ -1959,26 +2022,53 @@ class PortfolioTrackerUI:
                 out.append(((v / base) - 1.0) * 100.0)
             return out
 
-        fig2 = go.Figure()
-        fig2.add_trace(
-            go.Scatter(
-                x=dates,
-                y=to_cum_returns(portfolio_values),
-                mode="lines",
-                name="Portfolio",
-                line=dict(width=2, color="#000"),
-            )
+        # Portfolio cumulative returns using TWR
+        portfolio_cum_returns = (
+            to_cum_returns_twr(portfolio_returns_twr) if portfolio_returns_twr else []
         )
-        for c in categories:
+
+        fig2 = go.Figure()
+        if portfolio_cum_returns:
             fig2.add_trace(
                 go.Scatter(
-                    x=dates,
-                    y=to_cum_returns(cat_series[c]),
+                    x=dates[1:],  # Skip first date since returns start from second snapshot
+                    y=portfolio_cum_returns,
                     mode="lines",
-                    name=c,
-                    line=dict(color=color_map.get(c)),
+                    name="Portfolio (TWR)",
+                    line=dict(width=2, color="#000"),
                 )
             )
+
+        # Category cumulative returns (using time-weighted returns for consistency)
+        for c in categories:
+            # Calculate daily returns for this category using TWR methodology
+            cat_returns = []
+            for i in range(1, len(cat_series[c])):
+                prev_val = cat_series[c][i - 1]
+                curr_val = cat_series[c][i]
+
+                # Apply TWR formula: (V_t - V_{t-1} - External_CF_t) / V_{t-1}
+                # For categories, we assume no external cash flows (they're internal portfolio movements)
+                if prev_val > 0:
+                    daily_return = (curr_val - prev_val) / prev_val
+                    cat_returns.append(daily_return)
+                else:
+                    cat_returns.append(0.0)
+
+            # Calculate cumulative TWR returns for the category
+            cat_cum_returns = to_cum_returns_twr(cat_returns) if cat_returns else []
+
+            if cat_cum_returns:
+                fig2.add_trace(
+                    go.Scatter(
+                        x=dates[1:],  # Skip first date since returns start from second snapshot
+                        y=cat_cum_returns,
+                        mode="lines",
+                        name=f"{c} (TWR)",
+                        line=dict(color=color_map.get(c)),
+                    )
+                )
+
         # Add benchmark cumulative returns
         if benchmark_symbol and benchmark_prices_aligned:
             first_bench = next(
@@ -2000,8 +2090,9 @@ class PortfolioTrackerUI:
                         line=dict(color="#888", dash="dot"),
                     )
                 )
+
         fig2.update_layout(
-            title=f"Cumulative Returns (in {display_currency_code})",
+            title=f"Cumulative Returns - All Series (Time-Weighted) in {display_currency_code}",
             xaxis_title="Date",
             yaxis_title="Return (%)",
             height=320,

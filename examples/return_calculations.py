@@ -6,16 +6,16 @@ This script shows how to use the new return calculation methods in the Financial
 to analyze portfolio performance with and without considering cash flows.
 """
 
-import sys
 import os
+import sys
 from datetime import date, timedelta
 from decimal import Decimal
 
 # Add the src directory to the path so we can import our modules
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+from src.portfolio.models import Currency, PortfolioSnapshot
 from src.utils.metrics import FinancialMetricsCalculator
-from src.portfolio.models import PortfolioSnapshot, Currency
 
 
 def create_sample_portfolio_snapshots():
@@ -33,17 +33,19 @@ def create_sample_portfolio_snapshots():
             total_value = base_value
         elif i == 5:
             # Large deposit on day 5
-            total_value = base_value * (1.001 ** i) + 2000
+            total_value = base_value * (1.001**i) + 2000
         elif i == 15:
             # Large withdrawal on day 15
-            total_value = base_value * (1.001 ** i) - 1500
+            total_value = base_value * (1.001**i) - 1500
         elif i == 20:
             # Another deposit on day 20
-            total_value = base_value * (1.001 ** i) + 1000
+            total_value = base_value * (1.001**i) + 1000
         else:
             # Normal growth with some volatility (0.1% daily growth on average)
-            growth_rate = 1.001 + (0.0005 * (i % 3 - 1))  # Varies between 0.9995 and 1.0015
-            total_value = base_value * (growth_rate ** i)
+            growth_rate = 1.001 + (
+                0.0005 * (i % 3 - 1)
+            )  # Varies between 0.9995 and 1.0015
+            total_value = base_value * (growth_rate**i)
 
         snapshot = PortfolioSnapshot(
             date=snapshot_date,
@@ -55,7 +57,9 @@ def create_sample_portfolio_snapshots():
             cash_balances={Currency.USD: Decimal("1000")},
             total_cost_basis=Decimal("10000"),
             total_unrealized_pnl=Decimal(str(round(total_value - 10000, 2))),
-            total_unrealized_pnl_percent=Decimal(str(round(((total_value - 10000) / 10000) * 100, 2)))
+            total_unrealized_pnl_percent=Decimal(
+                str(round(((total_value - 10000) / 10000) * 100, 2))
+            ),
         )
         snapshots.append(snapshot)
 
@@ -67,9 +71,9 @@ def create_cash_flows():
     base_date = date(2023, 1, 1)
 
     return {
-        base_date + timedelta(days=5): 2000.0,   # Deposit on day 5
+        base_date + timedelta(days=5): 2000.0,  # Deposit on day 5
         base_date + timedelta(days=15): -1500.0,  # Withdrawal on day 15
-        base_date + timedelta(days=20): 1000.0,   # Deposit on day 20
+        base_date + timedelta(days=20): 1000.0,  # Deposit on day 20
     }
 
 
@@ -84,7 +88,9 @@ def main():
     snapshots = create_sample_portfolio_snapshots()
     cash_flows = create_cash_flows()
 
-    print(f"Created {len(snapshots)} portfolio snapshots from {snapshots[0].date} to {snapshots[-1].date}")
+    print(
+        f"Created {len(snapshots)} portfolio snapshots from {snapshots[0].date} to {snapshots[-1].date}"
+    )
     print(f"Cash flows: {len(cash_flows)} transactions")
     print()
 
@@ -99,7 +105,9 @@ def main():
 
     # Calculate time-weighted returns
     twr_daily = calculator.calculate_time_weighted_return(snapshots, cash_flows)
-    twr_annualized = calculator.calculate_annualized_time_weighted_return(snapshots, cash_flows)
+    twr_annualized = calculator.calculate_annualized_time_weighted_return(
+        snapshots, cash_flows
+    )
 
     print(f"Daily TWR returns: {len(twr_daily)} periods")
     print(f"Average daily TWR: {sum(twr_daily) / len(twr_daily):.4f}")
@@ -108,13 +116,17 @@ def main():
 
     print("2. MONEY-WEIGHTED RETURNS (MWR)")
     print("-" * 40)
-    print("Money-weighted returns measure the actual return experienced by the investor,")
+    print(
+        "Money-weighted returns measure the actual return experienced by the investor,"
+    )
     print("including the timing and magnitude of cash flows.")
     print()
 
     # Calculate money-weighted returns
     mwr_daily = calculator.calculate_money_weighted_return(snapshots, cash_flows)
-    mwr_annualized = calculator.calculate_annualized_money_weighted_return(snapshots, cash_flows)
+    mwr_annualized = calculator.calculate_annualized_money_weighted_return(
+        snapshots, cash_flows
+    )
 
     print(f"Daily MWR returns: {len(mwr_daily)} periods")
     print(f"Average daily MWR: {sum(mwr_daily) / len(mwr_daily):.4f}")
@@ -131,7 +143,9 @@ def main():
 
     print(f"Modified Dietz Return: {modified_dietz:.4f} ({modified_dietz * 100:.2f}%)")
     print(f"Internal Rate of Return (IRR): {irr:.4f} ({irr * 100:.2f}%)")
-    print(f"Dollar-Weighted Return: {dollar_weighted:.4f} ({dollar_weighted * 100:.2f}%)")
+    print(
+        f"Dollar-Weighted Return: {dollar_weighted:.4f} ({dollar_weighted * 100:.2f}%)"
+    )
     print()
 
     print("4. COMPREHENSIVE ANALYSIS")

@@ -1,6 +1,6 @@
 [project]
 name = "portfolio-tracker"
-version = "0.6.0"
+version = "0.6.2"
 description = "AI Portfolio Tracker with financial analysis and chatbot"
 readme = "README.md"
 requires-python = ">=3.11"

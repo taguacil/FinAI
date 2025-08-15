@@ -286,7 +286,6 @@ class FileBasedStorage:
                             "transaction_type": txn.transaction_type,
                             "quantity": float(txn.quantity),
                             "price": float(txn.price),
-
                             "currency": txn.currency,
                             "total_value": float(txn.total_value),
                             "notes": txn.notes or "",

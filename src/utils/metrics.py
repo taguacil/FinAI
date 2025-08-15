@@ -164,7 +164,7 @@ class FinancialMetricsCalculator:
         # (1 + r1) * (1 + r2) * ... * (1 + rn) - 1
         total_return = 1.0
         for daily_return in twr_returns:
-            total_return *= (1 + daily_return)
+            total_return *= 1 + daily_return
         total_return -= 1.0
 
         # Calculate the number of years between first and last snapshot
@@ -211,7 +211,7 @@ class FinancialMetricsCalculator:
         # Calculate the total period return using geometric linking
         total_return = 1.0
         for daily_return in mwr_returns:
-            total_return *= (1 + daily_return)
+            total_return *= 1 + daily_return
         total_return -= 1.0
 
         # Calculate the number of years between first and last snapshot
@@ -277,7 +277,9 @@ class FinancialMetricsCalculator:
         if initial_value + weighted_cash_flows == 0:
             return 0.0
 
-        modified_dietz_return = (final_value - initial_value - weighted_cash_flows) / (initial_value + weighted_cash_flows)
+        modified_dietz_return = (final_value - initial_value - weighted_cash_flows) / (
+            initial_value + weighted_cash_flows
+        )
 
         return float(modified_dietz_return)
 
@@ -433,7 +435,9 @@ class FinancialMetricsCalculator:
 
         # Dollar-weighted return formula
         # (Final Value - Initial Value - Total Cash Flows) / Average Capital
-        dollar_weighted_return = (final_value - initial_value - total_cash_flows) / average_capital
+        dollar_weighted_return = (
+            final_value - initial_value - total_cash_flows
+        ) / average_capital
 
         return float(dollar_weighted_return)
 
@@ -491,6 +495,41 @@ class FinancialMetricsCalculator:
         metrics["money_weighted_annualized"] = metrics["money_weighted_return"]
 
         return metrics
+
+    def _calculate_total_return_from_daily_returns(self, daily_returns: List[float]) -> float:
+        """Calculate total return from daily returns using geometric linking."""
+        if not daily_returns:
+            return 0.0
+
+        # Use geometric linking: (1+r1)*(1+r2)*...*(1+rn) - 1
+        total_return = 1.0
+        for daily_return in daily_returns:
+            total_return *= (1 + daily_return)
+        total_return -= 1.0
+
+        return float(total_return)
+
+    def _calculate_annualized_return_from_daily_returns(self, daily_returns: List[float], snapshots: List[PortfolioSnapshot]) -> float:
+        """Calculate annualized return from daily returns using proper geometric annualization."""
+        if not daily_returns or len(snapshots) < 2:
+            return 0.0
+
+        # Calculate total return using geometric linking
+        total_return = self._calculate_total_return_from_daily_returns(daily_returns)
+
+        # Calculate the number of years between first and last snapshot
+        start_date = snapshots[0].date
+        end_date = snapshots[-1].date
+        days = (end_date - start_date).days
+        years = days / 365.25
+
+        if years <= 0:
+            return 0.0
+
+        # Annualize using the formula: (1 + total_return)^(1/years) - 1
+        annualized_return = (1 + total_return) ** (1 / years) - 1
+
+        return float(annualized_return)
 
     def calculate_returns(
         self,
@@ -747,27 +786,33 @@ class FinancialMetricsCalculator:
         self,
         snapshots: List[PortfolioSnapshot],
         benchmark_symbol: str = "SPY",
+        cash_flows_by_day: Optional[Dict[date, float]] = None,
         risk_free_rate: float = 0.02,
     ) -> Dict:
         """Calculate comprehensive portfolio metrics."""
         if len(snapshots) < 2:
             return {"error": "Insufficient data for metrics calculation"}
 
-        # Calculate external cash flows and portfolio returns
-        try:
-            from ..portfolio.manager import PortfolioManager
-        except Exception:
-            PortfolioManager = None
+        # Use provided cash flows or try to derive them
+        cash_flows_by_day_float: Optional[Dict[date, float]] = cash_flows_by_day
+        if cash_flows_by_day_float is None:
+            try:
+                from ..portfolio.manager import PortfolioManager
+            except Exception:
+                PortfolioManager = None
 
-        cash_flows_by_day_float: Optional[Dict[date, float]] = None
-        if PortfolioManager:
-            # Best-effort: derive flows from snapshots' portfolio id via storage is not trivial here.
-            # Expect caller-side computation. Fallback: treat as no flows.
-            pass
+            if PortfolioManager:
+                # Best-effort: derive flows from snapshots' portfolio id via storage is not trivial here.
+                # Expect caller-side computation. Fallback: treat as no flows.
+                pass
 
         # Calculate both time-weighted and money-weighted returns
-        portfolio_returns_twr = self.calculate_time_weighted_return(snapshots, cash_flows_by_day_float)
-        portfolio_returns_mwr = self.calculate_money_weighted_return(snapshots, cash_flows_by_day_float)
+        portfolio_returns_twr = self.calculate_time_weighted_return(
+            snapshots, cash_flows_by_day_float
+        )
+        portfolio_returns_mwr = self.calculate_money_weighted_return(
+            snapshots, cash_flows_by_day_float
+        )
 
         # Use time-weighted returns for backward compatibility and standard performance metrics
         portfolio_returns = portfolio_returns_twr
@@ -792,9 +837,9 @@ class FinancialMetricsCalculator:
             benchmark_returns_aligned = []
 
         metrics = {
-            # Basic metrics
-            "total_return": float(np.sum(portfolio_returns)),
-            "annualized_return": float(np.mean(portfolio_returns) * 252),
+            # Basic metrics - Fixed to use proper geometric linking
+            "total_return": self._calculate_total_return_from_daily_returns(portfolio_returns),
+            "annualized_return": self._calculate_annualized_return_from_daily_returns(portfolio_returns, snapshots),
             "volatility": self.calculate_volatility(portfolio_returns),
             "sharpe_ratio": self.calculate_sharpe_ratio(
                 portfolio_returns, risk_free_rate

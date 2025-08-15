@@ -18,7 +18,6 @@ from .models import (
     Position,
     Transaction,
     TransactionType,
-    CombinedPortfolio,
 )
 from .storage import FileBasedStorage
 
