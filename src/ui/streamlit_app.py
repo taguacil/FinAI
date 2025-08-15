@@ -902,7 +902,7 @@ class PortfolioTrackerUI:
 
         # Recent transactions
         st.subheader("📝 Recent Transactions")
-        transactions = portfolio_manager.get_transaction_history(30)
+        transactions = portfolio_manager.get_transaction_history()
 
         if transactions:
             df_transactions = pd.DataFrame(transactions)

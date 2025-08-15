@@ -18,6 +18,7 @@ from .models import (
     Position,
     Transaction,
     TransactionType,
+    CombinedPortfolio,
 )
 from .storage import FileBasedStorage
 
@@ -835,7 +836,6 @@ class PortfolioManager:
                 "type": txn.transaction_type.value,
                 "quantity": txn.quantity,
                 "price": txn.price,
-                "fees": txn.fees,
                 "total_value": txn.total_value,
                 "currency": txn.currency.value,
                 "notes": txn.notes,
