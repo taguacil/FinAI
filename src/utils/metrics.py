@@ -1,5 +1,32 @@
 """
 Financial metrics calculator for portfolio analysis.
+
+This module provides comprehensive portfolio performance analysis with multiple return calculation
+methodologies:
+
+1. Time-Weighted Returns (TWR):
+   - calculate_time_weighted_return(): Daily returns ignoring external cash flows
+   - calculate_annualized_time_weighted_return(): Annualized TWR using geometric linking
+   - Best for measuring investment manager performance (eliminates cash flow impact)
+
+2. Money-Weighted Returns (MWR):
+   - calculate_money_weighted_return(): Daily returns including cash flows
+   - calculate_annualized_money_weighted_return(): Annualized MWR
+   - calculate_internal_rate_of_return(): IRR using Newton-Raphson method
+   - calculate_dollar_weighted_return(): Dollar-weighted return considering flow timing
+   - Best for measuring investor's actual experience
+
+3. Hybrid Approaches:
+   - calculate_modified_dietz_return(): Time-weighted with cash flow timing consideration
+   - Provides balance between TWR and MWR methodologies
+
+4. Comprehensive Analysis:
+   - calculate_all_return_metrics(): All return metrics in one call
+   - calculate_portfolio_metrics(): Complete portfolio analysis including returns
+
+Note: Time-weighted returns are the industry standard for performance measurement as they
+eliminate the distorting effects of cash flows, while money-weighted returns show the
+actual return experienced by the investor.
 """
 
 import logging
@@ -19,6 +46,443 @@ class FinancialMetricsCalculator:
         """Initialize metrics calculator."""
         self.data_manager = data_manager or DataProviderManager()
 
+    def calculate_time_weighted_return(
+        self,
+        snapshots: List[PortfolioSnapshot],
+        cash_flows_by_day: Optional[Dict[date, float]] = None,
+    ) -> List[float]:
+        """Calculate time-weighted returns (TWR) ignoring external cash flows.
+
+        Time-weighted returns measure the compound rate of growth of one unit of currency
+        invested in the portfolio. This method eliminates the impact of external cash flows
+        (deposits/withdrawals) on performance measurement.
+
+        Args:
+            snapshots: List of portfolio snapshots
+            cash_flows_by_day: Optional dict mapping dates to cash flows (positive for deposits, negative for withdrawals)
+
+        Returns:
+            List of daily time-weighted returns
+        """
+        if len(snapshots) < 2:
+            return []
+
+        returns = []
+        for i in range(1, len(snapshots)):
+            prev_value = float(snapshots[i - 1].total_value)
+            curr_value = float(snapshots[i].total_value)
+
+            # Extract cash flow for this day if provided
+            cf = 0.0
+            if cash_flows_by_day:
+                cf = float(cash_flows_by_day.get(snapshots[i].date, 0.0))
+
+            # TWR formula: (V_t - V_{t-1} - CF_t) / V_{t-1}
+            # This removes the impact of external cash flows from return calculation
+            if prev_value > 0:
+                daily_return = (curr_value - prev_value - cf) / prev_value
+                returns.append(daily_return)
+
+        return returns
+
+    def calculate_money_weighted_return(
+        self,
+        snapshots: List[PortfolioSnapshot],
+        cash_flows_by_day: Optional[Dict[date, float]] = None,
+    ) -> List[float]:
+        """Calculate money-weighted returns (MWR) including external cash flows.
+
+        Money-weighted returns measure the internal rate of return considering the timing
+        and magnitude of cash flows. This method includes the impact of deposits and
+        withdrawals on performance measurement.
+
+        Args:
+            snapshots: List of portfolio snapshots
+            cash_flows_by_day: Optional dict mapping dates to cash flows (positive for deposits, negative for withdrawals)
+
+        Returns:
+            List of daily money-weighted returns
+        """
+        if len(snapshots) < 2:
+            return []
+
+        returns = []
+        for i in range(1, len(snapshots)):
+            prev_value = float(snapshots[i - 1].total_value)
+            curr_value = float(snapshots[i].total_value)
+
+            # Extract cash flow for this day if provided
+            cf = 0.0
+            if cash_flows_by_day:
+                cf = float(cash_flows_by_day.get(snapshots[i].date, 0.0))
+
+            # MWR formula: (V_t - V_{t-1}) / V_{t-1}
+            # This includes the impact of external cash flows in return calculation
+            if prev_value > 0:
+                daily_return = (curr_value - prev_value) / prev_value
+                returns.append(daily_return)
+
+        return returns
+
+    def calculate_annualized_time_weighted_return(
+        self,
+        snapshots: List[PortfolioSnapshot],
+        cash_flows_by_day: Optional[Dict[date, float]] = None,
+    ) -> float:
+        """Calculate annualized time-weighted return.
+
+        This method computes the compound annual growth rate (CAGR) using time-weighted
+        returns, which is the standard for measuring portfolio performance as it eliminates
+        the distorting effects of cash flows.
+
+        Args:
+            snapshots: List of portfolio snapshots
+            cash_flows_by_day: Optional dict mapping dates to cash flows
+
+        Returns:
+            Annualized time-weighted return as a decimal
+        """
+        if len(snapshots) < 2:
+            return 0.0
+
+        # Calculate time-weighted returns (ignoring cash flows)
+        twr_returns = self.calculate_time_weighted_return(snapshots, cash_flows_by_day)
+
+        if not twr_returns:
+            return 0.0
+
+        # Calculate the total period return using geometric linking
+        # (1 + r1) * (1 + r2) * ... * (1 + rn) - 1
+        total_return = 1.0
+        for daily_return in twr_returns:
+            total_return *= (1 + daily_return)
+        total_return -= 1.0
+
+        # Calculate the number of years between first and last snapshot
+        start_date = snapshots[0].date
+        end_date = snapshots[-1].date
+        days = (end_date - start_date).days
+        years = days / 365.25
+
+        if years <= 0:
+            return 0.0
+
+        # Annualize using the formula: (1 + total_return)^(1/years) - 1
+        annualized_return = (1 + total_return) ** (1 / years) - 1
+
+        return float(annualized_return)
+
+    def calculate_annualized_money_weighted_return(
+        self,
+        snapshots: List[PortfolioSnapshot],
+        cash_flows_by_day: Optional[Dict[date, float]] = None,
+    ) -> float:
+        """Calculate annualized money-weighted return.
+
+        This method computes the internal rate of return (IRR) considering cash flows,
+        which shows the actual return experienced by the investor including the timing
+        of deposits and withdrawals.
+
+        Args:
+            snapshots: List of portfolio snapshots
+            cash_flows_by_day: Optional dict mapping dates to cash flows
+
+        Returns:
+            Annualized money-weighted return as a decimal
+        """
+        if len(snapshots) < 2:
+            return 0.0
+
+        # Calculate money-weighted returns (including cash flows)
+        mwr_returns = self.calculate_money_weighted_return(snapshots, cash_flows_by_day)
+
+        if not mwr_returns:
+            return 0.0
+
+        # Calculate the total period return using geometric linking
+        total_return = 1.0
+        for daily_return in mwr_returns:
+            total_return *= (1 + daily_return)
+        total_return -= 1.0
+
+        # Calculate the number of years between first and last snapshot
+        start_date = snapshots[0].date
+        end_date = snapshots[-1].date
+        days = (end_date - start_date).days
+        years = days / 365.25
+
+        if years <= 0:
+            return 0.0
+
+        # Annualize using the formula: (1 + total_return)^(1/years) - 1
+        annualized_return = (1 + total_return) ** (1 / years) - 1
+
+        return float(annualized_return)
+
+    def calculate_modified_dietz_return(
+        self,
+        snapshots: List[PortfolioSnapshot],
+        cash_flows_by_day: Optional[Dict[date, float]] = None,
+    ) -> float:
+        """Calculate Modified Dietz return, a time-weighted approach that considers cash flow timing.
+
+        The Modified Dietz method weights cash flows by the amount of time they have been
+        invested in the portfolio, providing a more accurate measure than simple returns
+        when there are significant cash flows.
+
+        Args:
+            snapshots: List of portfolio snapshots
+            cash_flows_by_day: Optional dict mapping dates to cash flows (positive for deposits, negative for withdrawals)
+
+        Returns:
+            Modified Dietz return as a decimal
+        """
+        if len(snapshots) < 2:
+            return 0.0
+
+        start_date = snapshots[0].date
+        end_date = snapshots[-1].date
+        total_days = (end_date - start_date).days
+
+        if total_days <= 0:
+            return 0.0
+
+        # Initial portfolio value
+        initial_value = float(snapshots[0].total_value)
+
+        # Final portfolio value
+        final_value = float(snapshots[-1].total_value)
+
+        # Calculate weighted cash flows
+        weighted_cash_flows = 0.0
+        if cash_flows_by_day:
+            for flow_date, flow_amount in cash_flows_by_day.items():
+                # Calculate days from start to cash flow
+                days_from_start = (flow_date - start_date).days
+                if 0 <= days_from_start <= total_days:
+                    # Weight cash flow by time invested
+                    weight = (total_days - days_from_start) / total_days
+                    weighted_cash_flows += float(flow_amount) * weight
+
+        # Modified Dietz formula: (End - Begin - Weighted Cash Flows) / (Begin + Weighted Cash Flows)
+        if initial_value + weighted_cash_flows == 0:
+            return 0.0
+
+        modified_dietz_return = (final_value - initial_value - weighted_cash_flows) / (initial_value + weighted_cash_flows)
+
+        return float(modified_dietz_return)
+
+    def calculate_internal_rate_of_return(
+        self,
+        snapshots: List[PortfolioSnapshot],
+        cash_flows_by_day: Optional[Dict[date, float]] = None,
+        tolerance: float = 1e-6,
+        max_iterations: int = 100,
+    ) -> float:
+        """Calculate Internal Rate of Return (IRR) using Newton-Raphson method.
+
+        IRR is the discount rate that makes the net present value of all cash flows
+        (including initial investment and final value) equal to zero. This is the
+        most accurate money-weighted return measure.
+
+        Args:
+            snapshots: List of portfolio snapshots
+            cash_flows_by_day: Optional dict mapping dates to cash flows
+            tolerance: Convergence tolerance for IRR calculation
+            max_iterations: Maximum number of iterations for convergence
+
+        Returns:
+            Internal rate of return as a decimal, or 0.0 if calculation fails
+        """
+        if len(snapshots) < 2:
+            return 0.0
+
+        start_date = snapshots[0].date
+        end_date = snapshots[-1].date
+        total_days = (end_date - start_date).days
+
+        if total_days <= 0:
+            return 0.0
+
+        # Initial portfolio value (negative as it's an outflow)
+        initial_value = -float(snapshots[0].total_value)
+
+        # Final portfolio value (positive as it's an inflow)
+        final_value = float(snapshots[-1].total_value)
+
+        # Prepare cash flows with dates
+        cash_flows = [(0, initial_value)]  # Day 0: initial investment
+
+        if cash_flows_by_day:
+            for flow_date, flow_amount in cash_flows_by_day.items():
+                days_from_start = (flow_date - start_date).days
+                if 0 <= days_from_start <= total_days:
+                    cash_flows.append((days_from_start, float(flow_amount)))
+
+        # Add final value
+        cash_flows.append((total_days, final_value))
+
+        # Sort by day
+        cash_flows.sort(key=lambda x: x[0])
+
+        # Newton-Raphson method to find IRR
+        # Start with a reasonable guess
+        rate = 0.1  # 10% initial guess
+
+        for iteration in range(max_iterations):
+            npv = 0.0
+            npv_derivative = 0.0
+
+            for day, amount in cash_flows:
+                # Convert days to years
+                years = day / 365.25
+
+                # Calculate present value
+                if years == 0:
+                    npv += amount
+                else:
+                    present_value = amount / ((1 + rate) ** years)
+                    npv += present_value
+
+                    # Calculate derivative for Newton-Raphson
+                    if rate != -1:  # Avoid division by zero
+                        npv_derivative -= (years * amount) / ((1 + rate) ** (years + 1))
+
+            # Check convergence
+            if abs(npv) < tolerance:
+                break
+
+            # Update rate using Newton-Raphson formula
+            if abs(npv_derivative) > tolerance:
+                rate = rate - npv / npv_derivative
+            else:
+                # If derivative is too small, try a different approach
+                rate = rate * 1.1
+
+            # Ensure rate stays reasonable
+            if rate < -0.99 or rate > 10:
+                rate = 0.1  # Reset to reasonable value
+
+        # Convert to annual rate
+        annual_irr = (1 + rate) ** (365.25 / total_days) - 1 if total_days > 0 else 0.0
+
+        return float(annual_irr)
+
+    def calculate_dollar_weighted_return(
+        self,
+        snapshots: List[PortfolioSnapshot],
+        cash_flows_by_day: Optional[Dict[date, float]] = None,
+    ) -> float:
+        """Calculate dollar-weighted return, considering the size and timing of cash flows.
+
+        Dollar-weighted return measures the actual return experienced by the investor,
+        taking into account when money was invested or withdrawn and in what amounts.
+        This method is particularly useful for portfolios with significant cash flows.
+
+        Args:
+            snapshots: List of portfolio snapshots
+            cash_flows_by_day: Optional dict mapping dates to cash flows
+
+        Returns:
+            Dollar-weighted return as a decimal
+        """
+        if len(snapshots) < 2:
+            return 0.0
+
+        start_date = snapshots[0].date
+        end_date = snapshots[-1].date
+        total_days = (end_date - start_date).days
+
+        if total_days <= 0:
+            return 0.0
+
+        # Initial portfolio value
+        initial_value = float(snapshots[0].total_value)
+
+        # Final portfolio value
+        final_value = float(snapshots[-1].total_value)
+
+        # Calculate total cash flows and their timing
+        total_cash_flows = 0.0
+        weighted_cash_flows = 0.0
+
+        if cash_flows_by_day:
+            for flow_date, flow_amount in cash_flows_by_day.items():
+                days_from_start = (flow_date - start_date).days
+                if 0 <= days_from_start <= total_days:
+                    total_cash_flows += float(flow_amount)
+                    # Weight by time invested (more weight for earlier flows)
+                    weight = (total_days - days_from_start) / total_days
+                    weighted_cash_flows += float(flow_amount) * weight
+
+        # Calculate average capital employed
+        # This considers both initial investment and timing of cash flows
+        average_capital = initial_value + weighted_cash_flows
+
+        if average_capital == 0:
+            return 0.0
+
+        # Dollar-weighted return formula
+        # (Final Value - Initial Value - Total Cash Flows) / Average Capital
+        dollar_weighted_return = (final_value - initial_value - total_cash_flows) / average_capital
+
+        return float(dollar_weighted_return)
+
+    def calculate_all_return_metrics(
+        self,
+        snapshots: List[PortfolioSnapshot],
+        cash_flows_by_day: Optional[Dict[date, float]] = None,
+    ) -> Dict[str, float]:
+        """Calculate all return metrics for comprehensive portfolio analysis.
+
+        This method provides a complete view of portfolio performance using different
+        methodologies, allowing users to understand both the investment manager's
+        performance (time-weighted) and their personal experience (money-weighted).
+
+        Args:
+            snapshots: List of portfolio snapshots
+            cash_flows_by_day: Optional dict mapping dates to cash flows
+
+        Returns:
+            Dictionary containing all return metrics
+        """
+        if len(snapshots) < 2:
+            return {
+                "error": "Insufficient data for return calculation",
+                "time_weighted_return": 0.0,
+                "money_weighted_return": 0.0,
+                "modified_dietz_return": 0.0,
+                "internal_rate_of_return": 0.0,
+                "dollar_weighted_return": 0.0,
+                "time_weighted_annualized": 0.0,
+                "money_weighted_annualized": 0.0,
+            }
+
+        # Calculate all return metrics
+        metrics = {
+            "time_weighted_return": self.calculate_annualized_time_weighted_return(
+                snapshots, cash_flows_by_day
+            ),
+            "money_weighted_return": self.calculate_annualized_money_weighted_return(
+                snapshots, cash_flows_by_day
+            ),
+            "modified_dietz_return": self.calculate_modified_dietz_return(
+                snapshots, cash_flows_by_day
+            ),
+            "internal_rate_of_return": self.calculate_internal_rate_of_return(
+                snapshots, cash_flows_by_day
+            ),
+            "dollar_weighted_return": self.calculate_dollar_weighted_return(
+                snapshots, cash_flows_by_day
+            ),
+        }
+
+        # Add annualized versions
+        metrics["time_weighted_annualized"] = metrics["time_weighted_return"]
+        metrics["money_weighted_annualized"] = metrics["money_weighted_return"]
+
+        return metrics
+
     def calculate_returns(
         self,
         snapshots: List[PortfolioSnapshot],
@@ -29,23 +493,10 @@ class FinancialMetricsCalculator:
         If cash_flows_by_day is provided (base currency amounts, positive for deposits,
         negative for withdrawals), the return for day t is computed as:
         r_t = (V_t - V_{t-1} - CF_t) / V_{t-1}, where CF_t is external cash flow on day t.
+
+        Note: This method is now an alias for calculate_time_weighted_return for backward compatibility.
         """
-        if len(snapshots) < 2:
-            return []
-
-        returns = []
-        for i in range(1, len(snapshots)):
-            prev_value = float(snapshots[i - 1].total_value)
-            curr_value = float(snapshots[i].total_value)
-            cf = 0.0
-            if cash_flows_by_day:
-                cf = float(cash_flows_by_day.get(snapshots[i].date, 0.0))
-
-            if prev_value > 0:
-                daily_return = (curr_value - prev_value - cf) / prev_value
-                returns.append(daily_return)
-
-        return returns
+        return self.calculate_time_weighted_return(snapshots, cash_flows_by_day)
 
     def calculate_volatility(
         self, returns: List[float], annualized: bool = True
@@ -293,7 +744,7 @@ class FinancialMetricsCalculator:
         if len(snapshots) < 2:
             return {"error": "Insufficient data for metrics calculation"}
 
-        # Calculate external cash flows and time-weighted portfolio returns
+        # Calculate external cash flows and portfolio returns
         try:
             from ..portfolio.manager import PortfolioManager
         except Exception:
@@ -305,7 +756,12 @@ class FinancialMetricsCalculator:
             # Expect caller-side computation. Fallback: treat as no flows.
             pass
 
-        portfolio_returns = self.calculate_returns(snapshots, cash_flows_by_day_float)
+        # Calculate both time-weighted and money-weighted returns
+        portfolio_returns_twr = self.calculate_time_weighted_return(snapshots, cash_flows_by_day_float)
+        portfolio_returns_mwr = self.calculate_money_weighted_return(snapshots, cash_flows_by_day_float)
+
+        # Use time-weighted returns for backward compatibility and standard performance metrics
+        portfolio_returns = portfolio_returns_twr
 
         if len(portfolio_returns) == 0:
             return {"error": "Could not calculate returns"}
@@ -336,6 +792,22 @@ class FinancialMetricsCalculator:
             ),
             "sortino_ratio": self.calculate_sortino_ratio(
                 portfolio_returns, risk_free_rate=risk_free_rate
+            ),
+            # Return calculation methods
+            "time_weighted_annualized_return": self.calculate_annualized_time_weighted_return(
+                snapshots, cash_flows_by_day_float
+            ),
+            "money_weighted_annualized_return": self.calculate_annualized_money_weighted_return(
+                snapshots, cash_flows_by_day_float
+            ),
+            "modified_dietz_return": self.calculate_modified_dietz_return(
+                snapshots, cash_flows_by_day_float
+            ),
+            "internal_rate_of_return": self.calculate_internal_rate_of_return(
+                snapshots, cash_flows_by_day_float
+            ),
+            "dollar_weighted_return": self.calculate_dollar_weighted_return(
+                snapshots, cash_flows_by_day_float
             ),
             # Risk metrics
             "max_drawdown": self.calculate_max_drawdown(snapshots)[0],

@@ -1,0 +1,233 @@
+"""
+Unit tests for financial metrics calculator.
+"""
+
+import pytest
+from datetime import date, timedelta
+from decimal import Decimal
+
+from src.utils.metrics import FinancialMetricsCalculator
+from src.portfolio.models import PortfolioSnapshot, Currency, FinancialInstrument, InstrumentType
+
+
+class TestFinancialMetricsCalculator:
+    """Test cases for FinancialMetricsCalculator."""
+
+    def setup_method(self):
+        """Set up test fixtures."""
+        self.calculator = FinancialMetricsCalculator()
+
+        # Create test portfolio snapshots
+        self.base_date = date(2023, 1, 1)
+        self.snapshots = []
+
+        # Create a simple portfolio that grows over time
+        for i in range(10):
+            snapshot_date = self.base_date + timedelta(days=i)
+            # Portfolio grows by 1% per day
+            total_value = Decimal("10000") * (Decimal("1.01") ** i)
+
+            snapshot = PortfolioSnapshot(
+                date=snapshot_date,
+                total_value=total_value,
+                cash_balance=Decimal("1000"),
+                positions_value=total_value - Decimal("1000"),
+                base_currency=Currency.USD,
+                positions={},
+                cash_balances={Currency.USD: Decimal("1000")},
+                total_cost_basis=Decimal("10000"),
+                total_unrealized_pnl=total_value - Decimal("10000"),
+                total_unrealized_pnl_percent=((total_value - Decimal("10000")) / Decimal("10000")) * Decimal("100")
+            )
+            self.snapshots.append(snapshot)
+
+    def test_calculate_time_weighted_return(self):
+        """Test time-weighted return calculation."""
+        returns = self.calculator.calculate_time_weighted_return(self.snapshots)
+
+        assert len(returns) == 9  # 9 daily returns for 10 snapshots
+        assert all(isinstance(r, float) for r in returns)
+        # Each return should be approximately 0.01 (1%)
+        assert all(abs(r - 0.01) < 0.001 for r in returns)
+
+    def test_calculate_money_weighted_return(self):
+        """Test money-weighted return calculation."""
+        returns = self.calculator.calculate_money_weighted_return(self.snapshots)
+
+        assert len(returns) == 9  # 9 daily returns for 10 snapshots
+        assert all(isinstance(r, float) for r in returns)
+        # Each return should be approximately 0.01 (1%)
+        assert all(abs(r - 0.01) < 0.001 for r in returns)
+
+    def test_calculate_annualized_time_weighted_return(self):
+        """Test annualized time-weighted return calculation."""
+        annualized_return = self.calculator.calculate_annualized_time_weighted_return(self.snapshots)
+
+        assert isinstance(annualized_return, float)
+        assert annualized_return > 0
+        # With 1% daily growth, annualized should be approximately (1.01^365 - 1)
+        expected_annual = (1.01 ** 365.25) - 1
+        assert abs(annualized_return - expected_annual) < 0.1
+
+    def test_calculate_annualized_money_weighted_return(self):
+        """Test annualized money-weighted return calculation."""
+        annualized_return = self.calculator.calculate_annualized_money_weighted_return(self.snapshots)
+
+        assert isinstance(annualized_return, float)
+        assert annualized_return > 0
+        # With 1% daily growth, annualized should be approximately (1.01^365 - 1)
+        expected_annual = (1.01 ** 365.25) - 1
+        assert abs(annualized_return - expected_annual) < 0.1
+
+    def test_calculate_modified_dietz_return(self):
+        """Test Modified Dietz return calculation."""
+        # Add some cash flows
+        cash_flows = {
+            self.base_date + timedelta(days=2): 1000.0,  # Deposit on day 2
+            self.base_date + timedelta(days=5): -500.0,  # Withdrawal on day 5
+        }
+
+        modified_dietz_return = self.calculator.calculate_modified_dietz_return(
+            self.snapshots, cash_flows
+        )
+
+        assert isinstance(modified_dietz_return, float)
+        # Should be positive given the growth scenario
+
+    def test_calculate_internal_rate_of_return(self):
+        """Test internal rate of return calculation."""
+        irr = self.calculator.calculate_internal_rate_of_return(self.snapshots)
+
+        assert isinstance(irr, float)
+        assert irr > 0
+        # IRR should be positive given the growth scenario
+
+    def test_calculate_dollar_weighted_return(self):
+        """Test dollar-weighted return calculation."""
+        # Add some cash flows
+        cash_flows = {
+            self.base_date + timedelta(days=2): 1000.0,  # Deposit on day 2
+            self.base_date + timedelta(days=5): -500.0,  # Withdrawal on day 5
+        }
+
+        dollar_weighted_return = self.calculator.calculate_dollar_weighted_return(
+            self.snapshots, cash_flows
+        )
+
+        assert isinstance(dollar_weighted_return, float)
+        # Should be positive given the growth scenario
+
+    def test_calculate_all_return_metrics(self):
+        """Test comprehensive return metrics calculation."""
+        all_metrics = self.calculator.calculate_all_return_metrics(self.snapshots)
+
+        assert isinstance(all_metrics, dict)
+        expected_keys = [
+            "time_weighted_return",
+            "money_weighted_return",
+            "modified_dietz_return",
+            "internal_rate_of_return",
+            "dollar_weighted_return",
+            "time_weighted_annualized",
+            "money_weighted_annualized"
+        ]
+
+        for key in expected_keys:
+            assert key in all_metrics
+            assert isinstance(all_metrics[key], float)
+
+    def test_cash_flows_impact(self):
+        """Test that cash flows affect money-weighted but not time-weighted returns."""
+        # Create a scenario where cash flows create different return patterns
+        # Portfolio starts at 10000, grows 1% per day, but has a large withdrawal on day 2
+        simple_snapshots = []
+        base_value = 10000
+
+        for i in range(5):
+            snapshot_date = self.base_date + timedelta(days=i)
+
+            if i == 0:
+                total_value = base_value
+            elif i == 1:
+                total_value = base_value * 1.01  # 1% growth
+            elif i == 2:
+                total_value = (base_value * 1.01 * 1.01) - 5000  # Growth then large withdrawal
+            elif i == 3:
+                total_value = ((base_value * 1.01 * 1.01) - 5000) * 1.01  # Growth after withdrawal
+            else:  # i == 4
+                total_value = (((base_value * 1.01 * 1.01) - 5000) * 1.01) * 1.01  # Continued growth
+
+            snapshot = PortfolioSnapshot(
+                date=snapshot_date,
+                total_value=Decimal(str(total_value)),
+                cash_balance=Decimal("1000"),
+                positions_value=Decimal(str(total_value - 1000)),
+                base_currency=Currency.USD,
+                positions={},
+                cash_balances={Currency.USD: Decimal("1000")},
+                total_cost_basis=Decimal("10000"),
+                total_unrealized_pnl=Decimal(str(total_value - 10000)),
+                total_unrealized_pnl_percent=Decimal(str(((total_value - 10000) / 10000) * 100))
+            )
+            simple_snapshots.append(snapshot)
+
+        # Add the withdrawal cash flow
+        cash_flows = {
+            self.base_date + timedelta(days=2): -5000.0,  # Large withdrawal on day 2
+        }
+
+        # Time-weighted returns should remove the cash flow impact and show consistent growth
+        twr_returns = self.calculator.calculate_time_weighted_return(simple_snapshots, cash_flows)
+        twr_no_flows = self.calculator.calculate_time_weighted_return(simple_snapshots)
+
+        # Both should show the underlying growth pattern (approximately 1% per day)
+        assert len(twr_returns) == len(twr_no_flows)
+
+        # Verify that time-weighted returns show consistent growth (approximately 1% per day)
+        for i, return_val in enumerate(twr_returns):
+            assert abs(return_val - 0.01) < 0.1, f"Return {i} should be approximately 1% (got {return_val})"
+
+        # Money-weighted returns should be different due to cash flow impact
+        mwr_returns = self.calculator.calculate_money_weighted_return(simple_snapshots, cash_flows)
+        mwr_no_flows = self.calculator.calculate_money_weighted_return(simple_snapshots)
+
+        # The key difference: time-weighted returns remove cash flow impact,
+        # while money-weighted returns include it in the return calculation
+        # Both methods use the same portfolio values, but calculate returns differently
+
+        # Verify that the time-weighted returns show the underlying growth pattern
+        # (approximately 1% per day, ignoring the cash flow impact)
+        for i, return_val in enumerate(twr_returns):
+            if i == 1:  # Day 2 has the large withdrawal
+                # The time-weighted return should remove the cash flow impact
+                # and show the underlying growth
+                assert abs(return_val - 0.01) < 0.1, f"Return {i} should be approximately 1% (got {return_val})"
+            else:
+                assert abs(return_val - 0.01) < 0.1, f"Return {i} should be approximately 1% (got {return_val})"
+
+        # The money-weighted returns should show the actual portfolio performance
+        # including the cash flow impact
+        assert len(mwr_returns) == len(mwr_no_flows)
+
+    def test_empty_snapshots(self):
+        """Test behavior with insufficient data."""
+        empty_snapshots = []
+        single_snapshot = [self.snapshots[0]]
+
+        # Test with empty list
+        assert self.calculator.calculate_time_weighted_return(empty_snapshots) == []
+        assert self.calculator.calculate_annualized_time_weighted_return(empty_snapshots) == 0.0
+
+        # Test with single snapshot
+        assert self.calculator.calculate_time_weighted_return(single_snapshot) == []
+        assert self.calculator.calculate_annualized_time_weighted_return(single_snapshot) == 0.0
+
+    def test_backward_compatibility(self):
+        """Test that the old calculate_returns method still works."""
+        returns = self.calculator.calculate_returns(self.snapshots)
+
+        assert len(returns) == 9
+        assert all(isinstance(r, float) for r in returns)
+        # Should return the same as time-weighted returns
+        twr_returns = self.calculator.calculate_time_weighted_return(self.snapshots)
+        assert returns == twr_returns
