@@ -25,8 +25,9 @@ methodologies:
    - calculate_portfolio_metrics(): Complete portfolio analysis including returns
 
 Note: Time-weighted returns are the industry standard for performance measurement as they
-eliminate the distorting effects of cash flows, while money-weighted returns show the
-actual return experienced by the investor.
+eliminate the distorting effects of EXTERNAL cash flows (deposits/withdrawals), while
+preserving INTERNAL cash flows (dividends, interest, fees) as part of investment performance.
+Money-weighted returns show the actual return experienced by the investor including all cash flows.
 """
 
 import logging
@@ -55,11 +56,13 @@ class FinancialMetricsCalculator:
 
         Time-weighted returns measure the compound rate of growth of one unit of currency
         invested in the portfolio. This method eliminates the impact of external cash flows
-        (deposits/withdrawals) on performance measurement.
+        (deposits/withdrawals) on performance measurement, but preserves internal cash flows
+        (dividends, interest, fees) as part of the investment performance.
 
         Args:
             snapshots: List of portfolio snapshots
             cash_flows_by_day: Optional dict mapping dates to cash flows (positive for deposits, negative for withdrawals)
+                             Note: This should only contain DEPOSIT and WITHDRAWAL transactions, not DIVIDEND, INTEREST, or FEES
 
         Returns:
             List of daily time-weighted returns
@@ -72,15 +75,17 @@ class FinancialMetricsCalculator:
             prev_value = float(snapshots[i - 1].total_value)
             curr_value = float(snapshots[i].total_value)
 
-            # Extract cash flow for this day if provided
-            cf = 0.0
+            # Extract external cash flow for this day if provided
+            # Note: cash_flows_by_day should only contain deposits/withdrawals, not dividends/interest/fees
+            external_cf = 0.0
             if cash_flows_by_day:
-                cf = float(cash_flows_by_day.get(snapshots[i].date, 0.0))
+                external_cf = float(cash_flows_by_day.get(snapshots[i].date, 0.0))
 
-            # TWR formula: (V_t - V_{t-1} - CF_t) / V_{t-1}
-            # This removes the impact of external cash flows from return calculation
+            # TWR formula: (V_t - V_{t-1} - External_CF_t) / V_{t-1}
+            # This removes ONLY external cash flows (deposits/withdrawals) from return calculation
+            # Internal cash flows (dividends, interest, fees) remain as part of the portfolio performance
             if prev_value > 0:
-                daily_return = (curr_value - prev_value - cf) / prev_value
+                daily_return = (curr_value - prev_value - external_cf) / prev_value
                 returns.append(daily_return)
 
         return returns
@@ -94,11 +99,13 @@ class FinancialMetricsCalculator:
 
         Money-weighted returns measure the internal rate of return considering the timing
         and magnitude of cash flows. This method includes the impact of deposits and
-        withdrawals on performance measurement.
+        withdrawals on performance measurement, while naturally including internal cash flows
+        (dividends, interest, fees) as part of the portfolio value changes.
 
         Args:
             snapshots: List of portfolio snapshots
             cash_flows_by_day: Optional dict mapping dates to cash flows (positive for deposits, negative for withdrawals)
+                             Note: This should only contain DEPOSIT and WITHDRAWAL transactions, not DIVIDEND, INTEREST, or FEES
 
         Returns:
             List of daily money-weighted returns
@@ -111,13 +118,15 @@ class FinancialMetricsCalculator:
             prev_value = float(snapshots[i - 1].total_value)
             curr_value = float(snapshots[i].total_value)
 
-            # Extract cash flow for this day if provided
-            cf = 0.0
-            if cash_flows_by_day:
-                cf = float(cash_flows_by_day.get(snapshots[i].date, 0.0))
+            # Note: For MWR, we don't need to extract cash flows from the parameter
+            # because we want to include ALL cash flow impacts in the return calculation
+            # The portfolio snapshots' total_value already includes the impact of:
+            # - External flows (deposits/withdrawals)
+            # - Internal flows (dividends, interest, fees)
+            # - Market price changes
 
             # MWR formula: (V_t - V_{t-1}) / V_{t-1}
-            # This includes the impact of external cash flows in return calculation
+            # This includes the impact of ALL cash flows in return calculation
             if prev_value > 0:
                 daily_return = (curr_value - prev_value) / prev_value
                 returns.append(daily_return)

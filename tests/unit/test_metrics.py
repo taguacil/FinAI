@@ -209,6 +209,70 @@ class TestFinancialMetricsCalculator:
         # including the cash flow impact
         assert len(mwr_returns) == len(mwr_no_flows)
 
+    def test_twr_preserves_internal_cash_flows(self):
+        """Test that time-weighted returns preserve internal cash flows (dividends, interest, fees)."""
+        # Create a scenario where the portfolio has internal cash flows (dividends, interest, fees)
+        # but no external cash flows (deposits/withdrawals)
+        simple_snapshots = []
+        base_value = 10000
+
+        for i in range(5):
+            snapshot_date = self.base_date + timedelta(days=i)
+
+            if i == 0:
+                total_value = base_value
+            elif i == 1:
+                # Day 1: 1% growth + $100 dividend
+                total_value = base_value * 1.01 + 100
+            elif i == 2:
+                # Day 2: 1% growth + $50 interest - $25 fees
+                total_value = (base_value * 1.01 + 100) * 1.01 + 50 - 25
+            elif i == 3:
+                # Day 3: 1% growth + $75 dividend
+                total_value = ((base_value * 1.01 + 100) * 1.01 + 50 - 25) * 1.01 + 75
+            else:  # i == 4
+                # Day 4: 1% growth + $30 interest
+                total_value = (((base_value * 1.01 + 100) * 1.01 + 50 - 25) * 1.01 + 75) * 1.01 + 30
+
+            snapshot = PortfolioSnapshot(
+                date=snapshot_date,
+                total_value=Decimal(str(round(total_value, 2))),
+                cash_balance=Decimal("1000"),
+                positions_value=Decimal(str(round(total_value - 1000, 2))),
+                base_currency=Currency.USD,
+                positions={},
+                cash_balances={Currency.USD: Decimal("1000")},
+                total_cost_basis=Decimal("10000"),
+                total_unrealized_pnl=Decimal(str(round(total_value - 10000, 2))),
+                total_unrealized_pnl_percent=Decimal(str(round(((total_value - 10000) / 10000) * 100, 2)))
+            )
+            simple_snapshots.append(snapshot)
+
+        # No external cash flows (deposits/withdrawals)
+        cash_flows = {}
+
+        # Time-weighted returns should include internal cash flows as part of performance
+        twr_returns = self.calculator.calculate_time_weighted_return(simple_snapshots, cash_flows)
+
+        # Verify that internal cash flows are preserved in TWR calculations
+        # Day 1: Should show growth + dividend impact
+        assert twr_returns[0] > 0.01, f"Day 1 return should include dividend impact (got {twr_returns[0]})"
+
+        # Day 2: Should show growth + interest - fees impact
+        assert twr_returns[1] > 0.01, f"Day 2 return should include interest and fees impact (got {twr_returns[1]})"
+
+        # Day 3: Should show growth + dividend impact
+        assert twr_returns[2] > 0.01, f"Day 3 return should include dividend impact (got {twr_returns[2]})"
+
+        # Day 4: Should show growth + interest impact
+        assert twr_returns[3] > 0.01, f"Day 4 return should include interest impact (got {twr_returns[3]})"
+
+        # Money-weighted returns should show the same pattern since they include all cash flows
+        mwr_returns = self.calculator.calculate_money_weighted_return(simple_snapshots, cash_flows)
+
+        # Both should be identical when there are no external cash flows
+        assert twr_returns == mwr_returns, "TWR and MWR should be identical when no external cash flows"
+
     def test_empty_snapshots(self):
         """Test behavior with insufficient data."""
         empty_snapshots = []
