@@ -132,7 +132,6 @@ class TestPortfolioManager:
             transaction_type=TransactionType.BUY,
             quantity=Decimal("100"),
             price=Decimal("150.00"),
-            fees=Decimal("5.00"),
         )
 
         assert result is True
@@ -144,12 +143,11 @@ class TestPortfolioManager:
         assert transaction.transaction_type == TransactionType.BUY
         assert transaction.quantity == Decimal("100")
         assert transaction.price == Decimal("150.00")
-        assert transaction.fees == Decimal("5.00")
         assert transaction.currency == Currency.USD
 
         # Verify current_balance was set correctly
-        # 10000 - (100 * 150 + 5) = 10000 - 15005 = -5005
-        assert transaction.current_balance == Decimal("-5005")
+        # 10000 - (100 * 150) = 10000 - 15000 = -5000
+        assert transaction.current_balance == Decimal("-5000")
 
         # Verify storage was called
         self.mock_storage.save_portfolio.assert_called_once_with(portfolio)
@@ -175,7 +173,6 @@ class TestPortfolioManager:
             symbol="TSLA",
             quantity=Decimal("50"),
             price=Decimal("200.00"),
-            fees=Decimal("10.00"),
             notes="Test purchase",
         )
 
@@ -187,7 +184,6 @@ class TestPortfolioManager:
         assert transaction.instrument.symbol == "TSLA"
         assert transaction.quantity == Decimal("50")
         assert transaction.price == Decimal("200.00")
-        assert transaction.fees == Decimal("10.00")
         assert transaction.notes == "Test purchase"
 
     def test_sell_shares_convenience_method(self):
@@ -211,7 +207,6 @@ class TestPortfolioManager:
             symbol="MSFT",
             quantity=Decimal("25"),
             price=Decimal("300.00"),
-            fees=Decimal("5.00"),
             notes="Test sale",
         )
 
@@ -223,7 +218,6 @@ class TestPortfolioManager:
         assert transaction.instrument.symbol == "MSFT"
         assert transaction.quantity == Decimal("25")
         assert transaction.price == Decimal("300.00")
-        assert transaction.fees == Decimal("5.00")
         assert transaction.notes == "Test sale"
 
     def test_deposit_cash_convenience_method(self):

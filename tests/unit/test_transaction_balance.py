@@ -79,7 +79,6 @@ class TestTransactionCurrentBalance:
             symbol="AAPL",
             quantity=Decimal("10"),
             price=Decimal("50"),
-            fees=Decimal("5"),
             notes="Test buy",
         )
 
@@ -89,8 +88,8 @@ class TestTransactionCurrentBalance:
         transaction = portfolio.transactions[-1]
 
         # Verify the transaction has the correct current balance
-        # For BUY: total_value = (10 * 50) + 5 = 505, so balance = 1000 - 505 = 495
-        expected_balance = Decimal("495")
+        # For BUY: total_value = (10 * 50) = 500, so balance = 1000 - 500 = 500
+        expected_balance = Decimal("500")
         assert transaction.current_balance == expected_balance
         assert portfolio.cash_balances[Currency.USD] == expected_balance
 
@@ -155,7 +154,6 @@ class TestTransactionCurrentBalance:
             symbol="AAPL",
             quantity=Decimal("10"),
             price=Decimal("50"),
-            fees=Decimal("5"),
             notes="Initial buy",
         )
 
@@ -164,7 +162,6 @@ class TestTransactionCurrentBalance:
             symbol="AAPL",
             quantity=Decimal("5"),
             price=Decimal("60"),
-            fees=Decimal("3"),
             notes="Test sell",
         )
 
@@ -176,9 +173,9 @@ class TestTransactionCurrentBalance:
 
         # Verify the sell transaction has the correct current balance
         # Initial balance: 100
-        # After buy: 100 - (10 * 50 + 5) = 100 - 505 = -405
-        # After sell: -405 + (5 * 60 - 3) = -405 + 297 = -108
-        expected_balance = Decimal("-108")
+        # After buy: 100 - (10 * 50) = 100 - 500 = -400
+        # After sell: -400 + (5 * 60) = -400 + 300 = -100
+        expected_balance = Decimal("-100")
         assert sell_transaction.current_balance == expected_balance
         assert portfolio.cash_balances[Currency.USD] == expected_balance
 
@@ -341,8 +338,8 @@ class TestTransactionCurrentBalance:
         assert transactions[2].current_balance == Decimal("200")
         assert portfolio.cash_balances[Currency.CHF] == Decimal("200")
 
-    def test_transaction_with_zero_fees(self):
-        """Test that transactions with zero fees calculate balance correctly."""
+    def test_transaction_without_fees(self):
+        """Test that transactions without fees calculate balance correctly."""
         portfolio = Portfolio(
             id="test",
             name="Test Portfolio",
@@ -359,12 +356,11 @@ class TestTransactionCurrentBalance:
         manager = PortfolioManager(storage=mock_storage, data_manager=mock_data_manager)
         manager.current_portfolio = portfolio
 
-        # Buy shares with no fees
+        # Buy shares without fees
         result = manager.buy_shares(
             symbol="TSLA",
             quantity=Decimal("5"),
             price=Decimal("100"),
-            fees=Decimal("0"),
             notes="Commission-free trade",
         )
 
@@ -374,7 +370,7 @@ class TestTransactionCurrentBalance:
         transaction = portfolio.transactions[-1]
 
         # Verify the transaction has the correct current balance
-        # For BUY with no fees: total_value = (5 * 100) + 0 = 500, so balance = 1000 - 500 = 500
+        # For BUY: total_value = (5 * 100) = 500, so balance = 1000 - 500 = 500
         expected_balance = Decimal("500")
         assert transaction.current_balance == expected_balance
         assert portfolio.cash_balances[Currency.USD] == expected_balance

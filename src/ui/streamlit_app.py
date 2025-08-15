@@ -911,7 +911,7 @@ class PortfolioTrackerUI:
             ).dt.strftime("%Y-%m-%d %H:%M")
 
             # Format monetary columns
-            for col in ["quantity", "price", "fees", "total_value"]:
+            for col in ["quantity", "price", "total_value"]:
                 if col in df_transactions.columns:
                     df_transactions[col] = df_transactions[col].apply(
                         lambda x: f"{float(x):,.2f}"
@@ -1323,7 +1323,7 @@ class PortfolioTrackerUI:
                     "ISIN (optional)", placeholder="e.g., US0378331005"
                 )
                 transaction_type = st.selectbox(
-                    "Type", ["buy", "sell", "dividend", "deposit", "withdrawal"]
+                    "Type", ["buy", "sell", "dividend", "deposit", "withdrawal", "fees"]
                 )
 
             with col2:
@@ -1331,7 +1331,6 @@ class PortfolioTrackerUI:
                 price = st.number_input("Price", min_value=0.0, step=0.01)
 
             with col3:
-                fees = st.number_input("Fees", min_value=0.0, step=0.01, value=0.0)
                 trade_date = st.date_input("Date", value=date.today())
                 from src.portfolio.models import Currency
 
@@ -1346,7 +1345,7 @@ class PortfolioTrackerUI:
             notes = st.text_area("Notes (optional)")
 
             if st.form_submit_button("Add Transaction"):
-                if transaction_type in {"deposit", "withdrawal"}:
+                if transaction_type in {"deposit", "withdrawal", "fees"}:
                     # For cash movements: ignore symbol/isin, use CASH and amount in price field
                     if price > 0:
                         try:
@@ -1358,6 +1357,7 @@ class PortfolioTrackerUI:
                             txn_type_map = {
                                 "deposit": TransactionType.DEPOSIT,
                                 "withdrawal": TransactionType.WITHDRAWAL,
+                                "fees": TransactionType.FEES,
                             }
                             success = portfolio_manager.add_transaction(
                                 symbol="CASH",
@@ -1365,7 +1365,6 @@ class PortfolioTrackerUI:
                                 quantity=Decimal("1"),
                                 price=Decimal(str(price)),
                                 timestamp=timestamp,
-                                fees=Decimal(str(fees)),
                                 notes=notes if notes else None,
                                 isin=None,
                                 currency=Currency(currency_code),
@@ -1403,7 +1402,6 @@ class PortfolioTrackerUI:
                             quantity=Decimal(str(quantity)),
                             price=Decimal(str(price)),
                             timestamp=timestamp,
-                            fees=Decimal(str(fees)),
                             notes=notes if notes else None,
                             isin=(isin.upper() if isin else None),
                             # For non-cash trades, let instrument currency be used

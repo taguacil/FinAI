@@ -33,6 +33,7 @@ class TransactionType(str, Enum):
     INTEREST = "interest"
     DEPOSIT = "deposit"
     WITHDRAWAL = "withdrawal"
+    FEES = "fees"
     SPLIT = "split"
     MERGER = "merger"
 
@@ -91,7 +92,6 @@ class Transaction(BaseModel):
     transaction_type: TransactionType = Field(..., description="Type of transaction")
     quantity: Decimal = Field(..., description="Number of shares/units", gt=0)
     price: Decimal = Field(..., description="Price per unit", ge=0)
-    fees: Decimal = Field(default=Decimal("0"), description="Transaction fees", ge=0)
     currency: Currency = Field(..., description="Transaction currency")
     notes: Optional[str] = Field(None, description="Additional notes", max_length=500)
     current_balance: Optional[Decimal] = Field(
@@ -100,13 +100,8 @@ class Transaction(BaseModel):
 
     @property
     def total_value(self) -> Decimal:
-        """Calculate total transaction value including fees."""
-        base_value = self.quantity * self.price
-        if self.transaction_type == TransactionType.BUY:
-            return base_value + self.fees
-        elif self.transaction_type == TransactionType.SELL:
-            return base_value - self.fees
-        return base_value
+        """Calculate total transaction value."""
+        return self.quantity * self.price
 
     class Config:
         use_enum_values = False
@@ -233,7 +228,7 @@ class Portfolio(BaseModel):
                     average_cost=transaction.price,
                 )
 
-            # Decrease cash by the total cost of the buy (including fees)
+            # Decrease cash by the total cost of the buy
             currency = transaction.currency
             if currency not in self.cash_balances:
                 self.cash_balances[currency] = Decimal("0")
@@ -246,11 +241,18 @@ class Portfolio(BaseModel):
                 if pos.quantity <= 0:
                     del self.positions[symbol]
 
-            # Increase cash by proceeds from the sale (net of fees)
+            # Increase cash by proceeds from the sale
             currency = transaction.currency
             if currency not in self.cash_balances:
                 self.cash_balances[currency] = Decimal("0")
             self.cash_balances[currency] += transaction.total_value
+
+        elif transaction.transaction_type == TransactionType.FEES:
+            # Handle fee transactions - decrease cash balance
+            currency = transaction.currency
+            if currency not in self.cash_balances:
+                self.cash_balances[currency] = Decimal("0")
+            self.cash_balances[currency] -= transaction.total_value
 
         elif transaction.transaction_type in [
             TransactionType.DEPOSIT,
@@ -309,7 +311,7 @@ class Portfolio(BaseModel):
                     del self.positions[symbol]
             # Note: Cash balances are NOT updated for historical reconstruction
 
-        # For other transaction types (DEPOSIT, WITHDRAWAL, DIVIDEND, INTEREST),
+        # For other transaction types (DEPOSIT, WITHDRAWAL, DIVIDEND, INTEREST, FEES),
         # we don't update cash balances during historical reconstruction
         # since we're just reconstructing the position state
 

@@ -444,7 +444,6 @@ class TestTransaction:
             transaction_type=TransactionType.BUY,
             quantity=Decimal("100"),
             price=Decimal("150.00"),
-            fees=Decimal("5.00"),
             currency=Currency.USD,
             notes="Test purchase",
         )
@@ -453,7 +452,6 @@ class TestTransaction:
         assert transaction.transaction_type == TransactionType.BUY
         assert transaction.quantity == Decimal("100")
         assert transaction.price == Decimal("150.00")
-        assert transaction.fees == Decimal("5.00")
         assert transaction.currency == Currency.USD
         assert transaction.notes == "Test purchase"
         assert transaction.current_balance is None  # Not set yet
@@ -475,12 +473,11 @@ class TestTransaction:
             transaction_type=TransactionType.BUY,
             quantity=Decimal("50"),
             price=Decimal("200.00"),
-            fees=Decimal("10.00"),
             currency=Currency.USD,
         )
 
-        # For BUY: total_value = (50 * 200) + 10 = 10010
-        expected_buy_value = (Decimal("50") * Decimal("200.00")) + Decimal("10.00")
+        # For BUY: total_value = (50 * 200) = 10000
+        expected_buy_value = Decimal("50") * Decimal("200.00")
         assert buy_transaction.total_value == expected_buy_value
 
         # Test SELL transaction
@@ -491,12 +488,11 @@ class TestTransaction:
             transaction_type=TransactionType.SELL,
             quantity=Decimal("25"),
             price=Decimal("220.00"),
-            fees=Decimal("5.00"),
             currency=Currency.USD,
         )
 
-        # For SELL: total_value = (25 * 220) - 5 = 5495
-        expected_sell_value = (Decimal("25") * Decimal("220.00")) - Decimal("5.00")
+        # For SELL: total_value = (25 * 220) = 5500
+        expected_sell_value = Decimal("25") * Decimal("220.00")
         assert sell_transaction.total_value == expected_sell_value
 
         # Test DEPOSIT transaction
@@ -507,7 +503,6 @@ class TestTransaction:
             transaction_type=TransactionType.DEPOSIT,
             quantity=Decimal("1"),
             price=Decimal("1000.00"),
-            fees=Decimal("0"),
             currency=Currency.USD,
         )
 
@@ -531,10 +526,9 @@ class TestTransaction:
             transaction_type=TransactionType.BUY,
             quantity=Decimal("10"),
             price=Decimal("300.00"),
-            fees=Decimal("5.00"),
             currency=Currency.USD,
-            current_balance=Decimal("6995.00"),  # Set manually for testing
+            current_balance=Decimal("7000.00"),  # Set manually for testing
         )
 
-        assert transaction.current_balance == Decimal("6995.00")
-        assert transaction.total_value == Decimal("3005.00")  # (10 * 300) + 5
+        assert transaction.current_balance == Decimal("7000.00")
+        assert transaction.total_value == Decimal("3000.00")  # (10 * 300)

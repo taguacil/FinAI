@@ -33,11 +33,10 @@ class AddTransactionInput(PortfolioToolInput):
         default=None, description="ISIN identifier (e.g., US0378331005)"
     )
     transaction_type: str = Field(
-        description="Type: buy, sell, dividend, deposit, withdrawal"
+        description="Type: buy, sell, dividend, deposit, withdrawal, fees"
     )
     quantity: float = Field(description="Number of shares or amount")
     price: float = Field(description="Price per share or total amount")
-    fees: float = Field(default=0.0, description="Transaction fees")
     currency: Optional[str] = Field(
         default=None,
         description="Currency code (e.g., USD, EUR, GBP, CHF). Required for deposits/withdrawals; overrides instrument currency for trades if provided.",
@@ -87,10 +86,12 @@ class AddTransactionTool(BaseTool):
     - buy/sell stocks: specify symbol, quantity, price
     - deposit/withdraw cash: use 'CASH' as symbol
     - dividends: specify symbol and amount
+    - fees: use 'fees' as transaction type with CASH symbol
     Examples:
     - "I bought 50 shares of AAPL at $150"
     - "I sold 25 TSLA shares at $200 yesterday"
     - "I deposited $5000 cash"
+    - "I paid $5 in trading fees"
     """
     args_schema: type[BaseModel] = AddTransactionInput
     portfolio_manager: PortfolioManager | None = None
@@ -106,7 +107,6 @@ class AddTransactionTool(BaseTool):
         transaction_type: str = "buy",
         quantity: float = 0.0,
         price: float = 0.0,
-        fees: float = 0.0,
         date: Optional[str] = None,
         days_ago: int = 0,
         notes: Optional[str] = None,
@@ -122,6 +122,7 @@ class AddTransactionTool(BaseTool):
                 "deposit": TransactionType.DEPOSIT,
                 "withdrawal": TransactionType.WITHDRAWAL,
                 "withdraw": TransactionType.WITHDRAWAL,
+                "fees": TransactionType.FEES,
             }
 
             txn_type = txn_type_map.get(transaction_type.lower())
@@ -177,7 +178,6 @@ class AddTransactionTool(BaseTool):
                 quantity=Decimal(str(quantity)),
                 price=Decimal(str(price)),
                 timestamp=timestamp,
-                fees=Decimal(str(fees)),
                 notes=notes,
                 isin=(isin.upper() if isin else None),
                 currency=cur_obj,
@@ -291,7 +291,7 @@ class GetTransactionsTool(BaseTool):
 
     name: str = "get_transactions"
     description: str = (
-        "Return all transactions with key fields for analysis (ids, timestamps, symbols, quantities, prices, fees, currency)."
+        "Return all transactions with key fields for analysis (ids, timestamps, symbols, quantities, prices, currency)."
     )
     portfolio_manager: PortfolioManager | None = None
 
@@ -307,7 +307,7 @@ class GetTransactionsTool(BaseTool):
             txns = self.portfolio_manager.current_portfolio.transactions
             lines = [
                 "🧾 Transactions (all):",
-                "id,timestamp,symbol,type,quantity,price,fees,currency,notes",
+                "id,timestamp,symbol,type,quantity,price,currency,notes",
             ]
             for t in sorted(txns, key=lambda x: x.timestamp):
                 lines.append(
@@ -319,7 +319,6 @@ class GetTransactionsTool(BaseTool):
                             t.transaction_type.value,
                             str(t.quantity),
                             str(t.price),
-                            str(t.fees),
                             t.currency.value,
                             (t.notes or "").replace(",", " "),
                         ]

@@ -95,7 +95,6 @@ class PortfolioManager:
         quantity: Decimal,
         price: Decimal,
         timestamp: Optional[datetime] = None,
-        fees: Decimal = Decimal("0"),
         currency: Optional[Currency] = None,
         notes: Optional[str] = None,
         isin: Optional[str] = None,
@@ -143,7 +142,6 @@ class PortfolioManager:
             transaction_type=transaction_type,
             quantity=quantity,
             price=price,
-            fees=fees,
             currency=currency or instrument.currency,
             notes=notes,
         )
@@ -166,6 +164,9 @@ class PortfolioManager:
             post_transaction_balance = current_balance + transaction.total_value
         elif transaction_type == TransactionType.WITHDRAWAL:
             # Withdrawal decreases cash
+            post_transaction_balance = current_balance - transaction.total_value
+        elif transaction_type == TransactionType.FEES:
+            # Fees decrease cash
             post_transaction_balance = current_balance - transaction.total_value
         elif transaction_type in [TransactionType.DIVIDEND, TransactionType.INTEREST]:
             # Income increases cash
@@ -190,7 +191,6 @@ class PortfolioManager:
         quantity: Decimal,
         price: Decimal,
         timestamp: Optional[datetime] = None,
-        fees: Decimal = Decimal("0"),
         notes: Optional[str] = None,
     ) -> bool:
         """Convenience method to buy shares."""
@@ -200,7 +200,6 @@ class PortfolioManager:
             quantity=quantity,
             price=price,
             timestamp=timestamp,
-            fees=fees,
             notes=notes,
         )
 
@@ -210,7 +209,6 @@ class PortfolioManager:
         quantity: Decimal,
         price: Decimal,
         timestamp: Optional[datetime] = None,
-        fees: Decimal = Decimal("0"),
         notes: Optional[str] = None,
     ) -> bool:
         """Convenience method to sell shares."""
@@ -220,7 +218,6 @@ class PortfolioManager:
             quantity=quantity,
             price=price,
             timestamp=timestamp,
-            fees=fees,
             notes=notes,
         )
 
@@ -270,6 +267,24 @@ class PortfolioManager:
         return self.add_transaction(
             symbol="CASH",
             transaction_type=TransactionType.WITHDRAWAL,
+            quantity=Decimal("1"),
+            price=amount,
+            timestamp=timestamp,
+            currency=currency,
+            notes=notes,
+        )
+
+    def add_fees(
+        self,
+        amount: Decimal,
+        currency: Currency = Currency.USD,
+        timestamp: Optional[datetime] = None,
+        notes: Optional[str] = None,
+    ) -> bool:
+        """Add a fees transaction."""
+        return self.add_transaction(
+            symbol="CASH",
+            transaction_type=TransactionType.FEES,
             quantity=Decimal("1"),
             price=amount,
             timestamp=timestamp,

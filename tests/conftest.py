@@ -81,7 +81,6 @@ def sample_buy_transaction(sample_instrument: FinancialInstrument) -> Transactio
         transaction_type=TransactionType.BUY,
         quantity=Decimal("100"),
         price=Decimal("150.00"),
-        fees=Decimal("1.00"),
         currency=Currency.USD,
         notes="Sample buy transaction",
     )
@@ -97,7 +96,6 @@ def sample_sell_transaction(sample_instrument: FinancialInstrument) -> Transacti
         transaction_type=TransactionType.SELL,
         quantity=Decimal("50"),
         price=Decimal("160.00"),
-        fees=Decimal("1.00"),
         currency=Currency.USD,
         notes="Sample sell transaction",
     )
@@ -113,7 +111,6 @@ def sample_dividend_transaction(sample_instrument: FinancialInstrument) -> Trans
         transaction_type=TransactionType.DIVIDEND,
         quantity=Decimal("1"),
         price=Decimal("25.00"),
-        fees=Decimal("0"),
         currency=Currency.USD,
         notes="Quarterly dividend",
     )

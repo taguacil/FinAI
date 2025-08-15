@@ -51,7 +51,7 @@ class TestAddTransactionTool:
     def test_add_buy_transaction(self, tool, mock_portfolio_manager):
         """Test adding a buy transaction."""
         result = tool._run(
-            symbol="AAPL", transaction_type="buy", quantity=100, price=150.00, fees=1.00
+            symbol="AAPL", transaction_type="buy", quantity=100, price=150.00
         )
 
         assert "✅ Added buy transaction" in result
@@ -65,7 +65,7 @@ class TestAddTransactionTool:
     def test_add_sell_transaction(self, tool, mock_portfolio_manager):
         """Test adding a sell transaction."""
         result = tool._run(
-            symbol="TSLA", transaction_type="sell", quantity=50, price=200.00, fees=1.00
+            symbol="TSLA", transaction_type="sell", quantity=50, price=200.00
         )
 
         assert "✅ Added sell transaction" in result
@@ -74,7 +74,7 @@ class TestAddTransactionTool:
     def test_add_dividend_transaction(self, tool, mock_portfolio_manager):
         """Test adding a dividend transaction."""
         result = tool._run(
-            symbol="AAPL", transaction_type="dividend", quantity=1, price=0.50, fees=0
+            symbol="AAPL", transaction_type="dividend", quantity=1, price=0.50
         )
 
         assert "✅ Added dividend transaction" in result
@@ -83,7 +83,7 @@ class TestAddTransactionTool:
     def test_add_cash_deposit(self, tool, mock_portfolio_manager):
         """Test adding a cash deposit."""
         result = tool._run(
-            symbol="CASH", transaction_type="deposit", quantity=5000, price=0, fees=0
+            symbol="CASH", transaction_type="deposit", quantity=5000, price=0
         )
 
         assert "✅ Added deposit transaction" in result
@@ -94,7 +94,7 @@ class TestAddTransactionTool:
     def test_add_cash_withdrawal(self, tool, mock_portfolio_manager):
         """Test adding a cash withdrawal."""
         result = tool._run(
-            symbol="CASH", transaction_type="withdrawal", quantity=1000, price=0, fees=0
+            symbol="CASH", transaction_type="withdrawal", quantity=1000, price=0
         )
 
         assert "✅ Added withdrawal transaction" in result
@@ -288,7 +288,6 @@ class TestGetTransactionsTool:
         txn1.transaction_type = TransactionType.BUY
         txn1.quantity = Decimal("100")
         txn1.price = Decimal("150.00")
-        txn1.fees = Decimal("1.00")
         txn1.currency = Currency.USD
         txn1.notes = "Test transaction"
 
@@ -299,7 +298,6 @@ class TestGetTransactionsTool:
         txn2.transaction_type = TransactionType.SELL
         txn2.quantity = Decimal("50")
         txn2.price = Decimal("200.00")
-        txn2.fees = Decimal("1.00")
         txn2.currency = Currency.USD
         txn2.notes = None
 
@@ -317,12 +315,12 @@ class TestGetTransactionsTool:
         result = tool._run()
 
         assert "🧾 Transactions (all):" in result
-        assert "id,timestamp,symbol,type,quantity,price,fees,currency,notes" in result
+        assert "id,timestamp,symbol,type,quantity,price,currency,notes" in result
         assert (
-            "txn1,2024-01-15T10:30:00,AAPL,buy,100,150.00,1.00,USD,Test transaction"
+            "txn1,2024-01-15T10:30:00,AAPL,buy,100,150.00,USD,Test transaction"
             in result
         )
-        assert "txn2,2024-01-20T14:15:00,TSLA,sell,50,200.00,1.00,USD," in result
+        assert "txn2,2024-01-20T14:15:00,TSLA,sell,50,200.00,USD," in result
 
     def test_no_portfolio_loaded(self, tool, mock_portfolio_manager):
         """Test handling when no portfolio is loaded."""
@@ -339,7 +337,7 @@ class TestGetTransactionsTool:
         result = tool._run()
 
         assert "🧾 Transactions (all):" in result
-        assert "id,timestamp,symbol,type,quantity,price,fees,currency,notes" in result
+        assert "id,timestamp,symbol,type,quantity,price,currency,notes" in result
         # Only header should be present
 
 
