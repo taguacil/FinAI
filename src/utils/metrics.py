@@ -496,7 +496,9 @@ class FinancialMetricsCalculator:
 
         return metrics
 
-    def _calculate_total_return_from_daily_returns(self, daily_returns: List[float]) -> float:
+    def _calculate_total_return_from_daily_returns(
+        self, daily_returns: List[float]
+    ) -> float:
         """Calculate total return from daily returns using geometric linking."""
         if not daily_returns:
             return 0.0
@@ -504,12 +506,14 @@ class FinancialMetricsCalculator:
         # Use geometric linking: (1+r1)*(1+r2)*...*(1+rn) - 1
         total_return = 1.0
         for daily_return in daily_returns:
-            total_return *= (1 + daily_return)
+            total_return *= 1 + daily_return
         total_return -= 1.0
 
         return float(total_return)
 
-    def _calculate_annualized_return_from_daily_returns(self, daily_returns: List[float], snapshots: List[PortfolioSnapshot]) -> float:
+    def _calculate_annualized_return_from_daily_returns(
+        self, daily_returns: List[float], snapshots: List[PortfolioSnapshot]
+    ) -> float:
         """Calculate annualized return from daily returns using proper geometric annualization."""
         if not daily_returns or len(snapshots) < 2:
             return 0.0
@@ -838,8 +842,12 @@ class FinancialMetricsCalculator:
 
         metrics = {
             # Basic metrics - Fixed to use proper geometric linking
-            "total_return": self._calculate_total_return_from_daily_returns(portfolio_returns),
-            "annualized_return": self._calculate_annualized_return_from_daily_returns(portfolio_returns, snapshots),
+            "total_return": self._calculate_total_return_from_daily_returns(
+                portfolio_returns
+            ),
+            "annualized_return": self._calculate_annualized_return_from_daily_returns(
+                portfolio_returns, snapshots
+            ),
             "volatility": self.calculate_volatility(portfolio_returns),
             "sharpe_ratio": self.calculate_sharpe_ratio(
                 portfolio_returns, risk_free_rate

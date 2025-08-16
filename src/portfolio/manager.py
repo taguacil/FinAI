@@ -572,6 +572,11 @@ class PortfolioManager:
             cash_balances={},
         )
 
+        # Initialize cash balances from the original portfolio's initial state
+        # This ensures the simulation starts with the correct cash position
+        for currency, amount in original_portfolio.cash_balances.items():
+            temp_portfolio.cash_balances[currency] = amount
+
         # Swap in temp, create snapshots without saving, restore original
         self.current_portfolio = temp_portfolio
         try:

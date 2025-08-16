@@ -1511,10 +1511,18 @@ class PortfolioTrackerUI:
 
             # Extract key metrics
             metrics = {
-                "total_return_twr": comprehensive_metrics.get("total_return", 0.0),  # Fixed: now uses actual total return
-                "annualized_return_twr": comprehensive_metrics.get("annualized_return", 0.0),  # Fixed: now uses actual annualized return
-                "time_weighted_annualized_return": comprehensive_metrics.get("time_weighted_annualized_return", 0.0),
-                "modified_dietz_return": comprehensive_metrics.get("modified_dietz_return", 0.0),
+                "total_return_twr": comprehensive_metrics.get(
+                    "total_return", 0.0
+                ),  # Fixed: now uses actual total return
+                "annualized_return_twr": comprehensive_metrics.get(
+                    "annualized_return", 0.0
+                ),  # Fixed: now uses actual annualized return
+                "time_weighted_annualized_return": comprehensive_metrics.get(
+                    "time_weighted_annualized_return", 0.0
+                ),
+                "modified_dietz_return": comprehensive_metrics.get(
+                    "modified_dietz_return", 0.0
+                ),
                 "volatility": comprehensive_metrics.get("volatility", 0.0),
                 "sharpe_ratio": comprehensive_metrics.get("sharpe_ratio", 0.0),
                 "sortino_ratio": comprehensive_metrics.get("sortino_ratio", 0.0),
@@ -1575,21 +1583,23 @@ class PortfolioTrackerUI:
         with col1:
             st.metric(
                 "Period Total Return (TWR)",
-                f"{metrics.get('total_return_twr', 0)*100:.2f}%"
+                f"{metrics.get('total_return_twr', 0)*100:.2f}%",
             )
             st.caption("Total return for the selected period using geometric linking")
 
         with col2:
             st.metric(
                 "Period Annualized Return (TWR)",
-                f"{metrics.get('annualized_return_twr', 0)*100:.2f}%"
+                f"{metrics.get('annualized_return_twr', 0)*100:.2f}%",
             )
-            st.caption("Annualized return for the selected period using geometric linking")
+            st.caption(
+                "Annualized return for the selected period using geometric linking"
+            )
 
         with col3:
             st.metric(
                 "Time-Weighted Annualized Return",
-                f"{metrics.get('time_weighted_annualized_return', 0)*100:.2f}%"
+                f"{metrics.get('time_weighted_annualized_return', 0)*100:.2f}%",
             )
             st.caption("Annualized return using dedicated TWR methodology")
 
