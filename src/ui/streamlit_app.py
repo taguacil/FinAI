@@ -1261,12 +1261,11 @@ class PortfolioTrackerUI:
         name = (pos.get("name") or "").lower()
         symbol = (pos.get("symbol") or "").upper()
 
-        # Short-term: cash or treasury bills by name hints
+        # Short-term: cash only
         if itype == "cash":
             return "Short Term"
         if itype == "bond":
-            if any(hint in name for hint in ["treasury", "t-bill", "bill", "tbill"]):
-                return "Short Term"
+            # All bonds go to Bonds category, regardless of type
             return "Bonds"
 
         # Alternatives: crypto or gold

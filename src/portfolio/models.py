@@ -56,9 +56,9 @@ class FinancialInstrument(BaseModel):
     """Represents a financial instrument (stock, bond, crypto, etc.)."""
 
     symbol: str = Field(
-        ...,
-        description="Trading symbol (e.g., AAPL, TSLA)",
-        min_length=1,
+        "",
+        description="Trading symbol (e.g., AAPL, TSLA). Can be empty for bonds identified by ISIN.",
+        min_length=0,
         max_length=50,
     )
     isin: Optional[str] = Field(

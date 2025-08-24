@@ -83,13 +83,15 @@ class AddTransactionTool(BaseTool):
 
     name: str = "add_transaction"
     description: str = """Add a transaction to the portfolio. Supports:
-    - buy/sell stocks: specify symbol, quantity, price
+    - buy/sell stocks, bonds, ETFs: specify symbol, quantity, price
     - deposit/withdraw cash: use 'CASH' as symbol
     - dividends: specify symbol and amount
     - fees: use 'fees' as transaction type with CASH symbol
     Examples:
     - "I bought 50 shares of AAPL at $150"
     - "I sold 25 TSLA shares at $200 yesterday"
+    - "I bought 100 TLT bonds at $90.50"
+    - "I purchased 50 BIL treasury bills at $98.75"
     - "I deposited $5000 cash"
     - "I paid $5 in trading fees"
     """
@@ -139,12 +141,20 @@ class AddTransactionTool(BaseTool):
                 timestamp = datetime.now() - timedelta(days=days_ago)
 
             # Choose identifier: symbol or ISIN; for cash movements default to CASH
-            identifier = symbol or isin
-            if not identifier:
-                if txn_type in (TransactionType.DEPOSIT, TransactionType.WITHDRAWAL):
-                    identifier = "CASH"
-                else:
-                    return "Please provide either a symbol or an ISIN."
+            # Handle different transaction scenarios
+            if txn_type in (TransactionType.DEPOSIT, TransactionType.WITHDRAWAL):
+                identifier = "CASH"
+            elif isin and symbol:
+                # Both ISIN and symbol provided - use symbol as identifier
+                identifier = symbol
+            elif isin:
+                # Only ISIN provided - try to find symbol or use ISIN as fallback
+                identifier = isin
+            elif symbol:
+                # Only symbol provided - use symbol as identifier
+                identifier = symbol
+            else:
+                return "Please provide either a symbol or an ISIN."
 
             # Normalize cash amount semantics for deposits/withdrawals
             if identifier == "CASH" and txn_type in (
@@ -171,12 +181,31 @@ class AddTransactionTool(BaseTool):
                 except ValueError:
                     return f"Invalid currency: {currency}. Use one of {[c.value for c in Cur]}"
 
+            # Handle bond price interpretation (percentages)
+            final_price = price
+            if isin and isin.upper().startswith('XS'):  # XS ISINs are typically bonds
+                # If price looks like a percentage (between 0 and 200), treat as percentage of face value
+                if 0 < price <= 200:
+                    # Keep the percentage as-is for bonds (98.85% -> 98.85)
+                    # This is the standard way bonds are quoted
+                    final_price = price
+                    notes = f"{notes or ''} (Price: {price}% of face value)".strip()
+
             # Add transaction
+            # Determine the transaction symbol
+            if isin and not symbol:
+                # Only ISIN provided - try to find symbol or use placeholder
+                # The portfolio manager will handle symbol discovery
+                transaction_symbol = ""  # Let portfolio manager find/create symbol
+            else:
+                # Symbol provided or no ISIN - use the identifier
+                transaction_symbol = identifier.upper()
+
             success = self.portfolio_manager.add_transaction(
-                symbol=identifier.upper(),
+                symbol=transaction_symbol,
                 transaction_type=txn_type,
                 quantity=Decimal(str(quantity)),
-                price=Decimal(str(price)),
+                price=Decimal(str(final_price)),
                 timestamp=timestamp,
                 notes=notes,
                 isin=(isin.upper() if isin else None),
@@ -184,7 +213,13 @@ class AddTransactionTool(BaseTool):
             )
 
             if success:
-                label = symbol.upper() if symbol else isin.upper()
+                # Show the actual symbol if available, otherwise show ISIN
+                if symbol:
+                    label = symbol.upper()
+                elif isin:
+                    label = f"ISIN_{isin[:8]}"
+                else:
+                    label = "Unknown"
                 return f"✅ Added {transaction_type} transaction: {quantity} {label} @ ${price}"
             else:
                 return "❌ Failed to add transaction. Make sure a portfolio is loaded."
@@ -256,9 +291,20 @@ class GetPortfolioSummaryTool(BaseTool):
                         pnl_emoji = "📈" if pnl >= 0 else "📉"
                         pnl_str = f" | {pnl_emoji} {pnl:+.2f} ({pnl_pct:+.1f}%)"
 
+                    # Get appropriate unit label based on instrument type
+                    instrument_type = pos.get("instrument_type", "stock")
+                    if instrument_type == "bond":
+                        unit_label = "bonds"
+                    elif instrument_type == "etf":
+                        unit_label = "shares"
+                    elif instrument_type == "crypto":
+                        unit_label = "coins"
+                    else:
+                        unit_label = "shares"
+
                     summary.append(
-                        f"  • **{pos['symbol']}** ({pos['name']}): "
-                        f"{pos['quantity']} shares @ ${pos['current_price'] or 'N/A'}"
+                        f"  • **{pos['symbol']}** ({pos['name']}) [{instrument_type.upper()}]: "
+                        f"{pos['quantity']} {unit_label} @ ${pos['current_price'] or 'N/A'}"
                         f"{pnl_str}"
                     )
                 summary.append("")
@@ -420,7 +466,7 @@ class SearchInstrumentTool(BaseTool):
 
     name: str = "search_instrument"
     description: str = (
-        "Search for stocks, ETFs, or other financial instruments by symbol or company name."
+        "Search for stocks, bonds, ETFs, or other financial instruments by symbol or company name."
     )
     args_schema: type[BaseModel] = SearchInstrumentInput
     data_manager: DataProviderManager | None = None
@@ -462,7 +508,7 @@ class GetCurrentPriceTool(BaseTool):
 
     name: str = "get_current_price"
     description: str = (
-        "Get the current market price of a stock, ETF, or other financial instrument."
+        "Get the current market price of a stock, bond, ETF, or other financial instrument."
     )
     args_schema: type[BaseModel] = GetPriceInput
     data_manager: DataProviderManager | None = None

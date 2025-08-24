@@ -3,12 +3,13 @@ Data provider manager for coordinating multiple financial data sources.
 """
 
 import logging
+import time
 from datetime import date, timedelta
 from decimal import Decimal
 from typing import Dict, List, Optional
 
 from ..portfolio.models import Currency, InstrumentType
-from .alpha_vantage import AlphaVantageProvider
+
 from .base import BaseDataProvider, InstrumentInfo, PriceData
 from .yahoo_finance import YahooFinanceProvider
 
@@ -16,20 +17,24 @@ from .yahoo_finance import YahooFinanceProvider
 class DataProviderManager:
     """Manages multiple data providers and routes requests appropriately."""
 
-    def __init__(self, alpha_vantage_api_key: Optional[str] = None):
+    def __init__(self):
         """Initialize the data provider manager."""
         self.providers: List[BaseDataProvider] = []
         self.provider_priorities: Dict[InstrumentType, List[str]] = {}
 
         # Initialize providers
-        self._setup_providers(alpha_vantage_api_key)
+        self._setup_providers()
         self._setup_priorities()
 
         # Cache for instrument info to avoid repeated API calls
-        self._instrument_cache: Dict[str, InstrumentInfo] = {}
-        self._exchange_rate_cache: Dict[str, Decimal] = {}
+        self._instrument_cache: Dict[str, tuple[InstrumentInfo, float]] = {}
+        self._exchange_rate_cache: Dict[str, tuple[Decimal, float]] = {}
+        self._failed_symbols_cache: Dict[str, float] = {}
+        self._failed_isins_cache: Dict[str, float] = {}
+        self._positive_cache_ttl = 3600  # 1 hour for successful lookups
+        self._negative_cache_ttl = 86400  # 24 hours for failed lookups
 
-    def _setup_providers(self, alpha_vantage_api_key: Optional[str]):
+    def _setup_providers(self):
         """Set up available data providers."""
         # Yahoo Finance (free, good coverage)
         try:
@@ -39,22 +44,14 @@ class DataProviderManager:
         except Exception as e:
             logging.warning(f"Failed to initialize Yahoo Finance provider: {e}")
 
-        # Alpha Vantage (requires API key, good for forex)
-        try:
-            alpha_provider = AlphaVantageProvider(alpha_vantage_api_key)
-            self.providers.append(alpha_provider)
-            logging.info("Alpha Vantage provider initialized")
-        except Exception as e:
-            logging.warning(f"Failed to initialize Alpha Vantage provider: {e}")
-
     def _setup_priorities(self):
         """Set up provider priorities for different instrument types."""
         self.provider_priorities = {
-            InstrumentType.STOCK: ["Yahoo Finance", "Alpha Vantage"],
-            InstrumentType.ETF: ["Yahoo Finance", "Alpha Vantage"],
+            InstrumentType.STOCK: ["Yahoo Finance"],
+            InstrumentType.ETF: ["Yahoo Finance"],
             InstrumentType.MUTUAL_FUND: ["Yahoo Finance"],
             InstrumentType.CRYPTO: ["Yahoo Finance"],
-            InstrumentType.BOND: [],  # Limited support
+            InstrumentType.BOND: ["Yahoo Finance"],  # Bond ETFs and some individual bonds
             InstrumentType.CASH: [],  # No provider needed
             InstrumentType.OPTION: [],  # Limited support
             InstrumentType.FUTURE: [],  # Limited support
@@ -173,8 +170,18 @@ class DataProviderManager:
     ) -> Optional[InstrumentInfo]:
         """Get instrument information with caching."""
         symbol = self._normalize_symbol(symbol)
+
+        # Check negative cache first
+        if not force_refresh and symbol in self._failed_symbols_cache:
+            cache_time = self._failed_symbols_cache[symbol]
+            if time.time() - cache_time < self._negative_cache_ttl:
+                return None
+
+        # Check positive cache
         if not force_refresh and symbol in self._instrument_cache:
-            return self._instrument_cache[symbol]
+            info, cache_time = self._instrument_cache[symbol]
+            if time.time() - cache_time < self._positive_cache_ttl:
+                return info
 
         for provider in self.providers:
             try:
@@ -183,7 +190,7 @@ class DataProviderManager:
                     logging.debug(
                         f"Got instrument info for {symbol} from {provider.name}"
                     )
-                    self._instrument_cache[symbol] = info
+                    self._instrument_cache[symbol] = (info, time.time())
                     return info
             except Exception as e:
                 logging.warning(
@@ -191,6 +198,8 @@ class DataProviderManager:
                 )
                 continue
 
+        # Cache negative result
+        self._failed_symbols_cache[symbol] = time.time()
         logging.warning(f"Could not get instrument info for {symbol} from any provider")
         return None
 
@@ -345,10 +354,58 @@ class DataProviderManager:
 
         return False
 
+    def search_by_isin(self, isin: str) -> Optional[InstrumentInfo]:
+        """Search for an instrument by ISIN across all providers."""
+        isin = isin.upper().strip()
+
+        # Check negative cache first
+        if isin in self._failed_isins_cache:
+            cache_time = self._failed_isins_cache[isin]
+            if time.time() - cache_time < self._negative_cache_ttl:
+                return None
+
+        # Check positive cache
+        if isin in self._instrument_cache:
+            info, cache_time = self._instrument_cache[isin]
+            if time.time() - cache_time < self._positive_cache_ttl:
+                return info
+
+        # Try direct ISIN lookup first
+        for provider in self.providers:
+            try:
+                if hasattr(provider, 'get_instrument_by_isin'):
+                    info = provider.get_instrument_by_isin(isin)
+                    if info:
+                        self._instrument_cache[isin] = (info, time.time())
+                        return info
+            except Exception as e:
+                logging.warning(f"Error in ISIN lookup from {provider.name}: {e}")
+                continue
+
+        # Fallback: search by ISIN as query
+        try:
+            search_results = self.search_instruments(isin)
+            for result in search_results:
+                if result.isin and result.isin.upper() == isin:
+                    self._instrument_cache[isin] = (result, time.time())
+                    return result
+        except Exception as e:
+            logging.warning(f"Error in ISIN search fallback: {e}")
+
+        # Cache negative result
+        self._failed_isins_cache[isin] = time.time()
+        return None
+
+    def validate_isin(self, isin: str) -> bool:
+        """Validate if an ISIN exists using search_by_isin."""
+        return self.search_by_isin(isin) is not None
+
     def clear_cache(self):
         """Clear all cached data."""
         self._instrument_cache.clear()
         self._exchange_rate_cache.clear()
+        self._failed_symbols_cache.clear()
+        self._failed_isins_cache.clear()
         logging.info("Data provider cache cleared")
 
     def get_provider_status(self) -> Dict[str, bool]:

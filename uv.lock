@@ -98,19 +98,6 @@ wheels = [
 ]
 
 [[package]]
-name = "alpha-vantage"
-version = "3.0.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "aiohttp" },
-    { name = "requests" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/cb/82/21aea0a6a90f4384806d0bcaee3fa87353738f85b8fdd4c9913fe5c98b6f/alpha_vantage-3.0.0.tar.gz", hash = "sha256:f97fe2b8efad2da97580199d54f8556c8007053870c462d10b9eaa815186c484", size = 29970, upload-time = "2024-07-18T14:29:18.065Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/99/54/d9147df53e87c48795918a43c744fd81586201ad46ce558c77536aeb7bc7/alpha_vantage-3.0.0-py3-none-any.whl", hash = "sha256:5c64b3a179cfcd68aa2166bacaf581758522fa4fe06392a0298847d49db9596f", size = 35070, upload-time = "2024-07-18T14:29:16.58Z" },
-]
-
-[[package]]
 name = "altair"
 version = "5.5.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2248,7 +2235,6 @@ name = "portfolio-tracker"
 version = "0.6.3"
 source = { editable = "." }
 dependencies = [
-    { name = "alpha-vantage" },
     { name = "beautifulsoup4" },
     { name = "langchain" },
     { name = "langchain-anthropic" },
@@ -2284,7 +2270,6 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "alpha-vantage", specifier = ">=3.0.0" },
     { name = "beautifulsoup4", specifier = ">=4.13.4" },
     { name = "langchain", specifier = ">=0.3.27" },
     { name = "langchain-anthropic", specifier = ">=0.3.18" },

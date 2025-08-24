@@ -88,7 +88,7 @@ def configure_module_loggers():
 
     # External libraries - reduce noise (suppress yfinance error spam)
     logging.getLogger("yfinance").setLevel(logging.CRITICAL)
-    logging.getLogger("alpha_vantage").setLevel(logging.WARNING)
+
     logging.getLogger("requests").setLevel(logging.WARNING)
     logging.getLogger("urllib3").setLevel(logging.WARNING)
 

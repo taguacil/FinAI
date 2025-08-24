@@ -199,10 +199,24 @@ class PortfolioAgent:
         6. Be conversational but professional
         7. Always include appropriate risk warnings and disclaimers
 
-        When the user mentions buying/selling stocks or updating their portfolio:
-        - Parse the transaction details carefully (symbol, quantity, price, date)
+        When the user mentions buying/selling stocks, bonds, or updating their portfolio:
+        - Parse the transaction details carefully (symbol, quantity, price, date, ISIN if provided)
+        - For bonds with ISINs (especially XS-prefixed ISINs), always use the ISIN parameter
+        - For bond prices expressed as percentages (e.g., 98.85%), use the percentage value directly
         - Use the add_transaction tool to record the transaction
         - Update the portfolio summary afterward
+
+        IMPORTANT: When parsing transactions for any instrument type:
+        - Extract ISIN if mentioned (e.g., "ISIN XS2472298335", "ISIN US0378331005")
+        - Extract symbol if mentioned (e.g., "AAPL", "TSLA", "MSFT")
+        - Extract company/instrument name if mentioned (e.g., "Apple Inc.", "Tesla Inc.")
+        - Preserve percentage prices as-is for bonds (e.g., 98.85% → price: 98.85)
+        - The system will:
+          * Use the provided symbol as the trading symbol
+          * Use the provided name or search for it based on symbol/ISIN
+          * Use the ISIN for identification
+          * Automatically classify instruments based on ISIN prefix (XS=bonds, US=stocks, etc.)
+        - If symbol is not provided, the system will try to find it by searching the ISIN
 
         When asked for investment advice:
         - Search for current market conditions and news
@@ -211,6 +225,18 @@ class PortfolioAgent:
         - Provide specific, actionable recommendations
 
         Remember: This is for educational purposes. Always recommend consulting with qualified financial professionals for personalized advice.
+
+        Examples of instrument transaction parsing:
+        - "Buy 25 AAPL shares using ISIN US0378331005"
+          → symbol: "AAPL", isin: "US0378331005", name: "Apple Inc.", quantity: 25
+        - "Buy 50000 bonds at 98.85% using ISIN XS2472298335, Citigroup Shark Note on SMI"
+          → isin: "XS2472298335", notes: "Citigroup Shark Note on SMI", quantity: 50000, price: 98.85
+        - "I bought 100 TLT bonds at 90.50"
+          → symbol: "TLT", quantity: 100, price: 90.50
+        - "Buy 100 shares using ISIN US0378331005"
+          → isin: "US0378331005", quantity: 100 (system will search for symbol and name)
+        - "Purchase 50 Microsoft stock with ISIN US5949181045 at $350"
+          → isin: "US5949181045", notes: "Microsoft", quantity: 50, price: 350
         """
 
         prompt = ChatPromptTemplate.from_messages(

@@ -162,10 +162,7 @@ The system works without API keys but with limited functionality:
   - Get from: https://platform.openai.com/api-keys
   - Set as: `OPENAI_API_KEY=your_key_here`
 
-### Optional for Enhanced Data
-- **Alpha Vantage API Key** - Better forex rates and company data
-  - Get free key from: https://www.alphavantage.co/support/#api-key
-  - Set as: `ALPHA_VANTAGE_API_KEY=your_key_here`
+
 
 ## 📊 Supported Assets
 
@@ -179,7 +176,6 @@ The system works without API keys but with limited functionality:
 
 ### Data Sources
 - **Yahoo Finance** - Free real-time and historical data
-- **Alpha Vantage** - Premium financial data and forex rates
 - **Extensible** - Easy to add new data providers
 
 ## 🧮 Financial Metrics
@@ -283,7 +279,7 @@ GOOGLE_APPLICATION_CREDENTIALS=/absolute/path/to/service_account.json
 OPENAI_API_KEY=your_openai_key
 
 # Financial data providers
-ALPHA_VANTAGE_API_KEY=your_alpha_vantage_key
+# Add additional providers as needed
 
 # App config
 DATA_DIR=custom/data/path
@@ -327,7 +323,6 @@ src/
 ├── data_providers/
 │   ├── base.py           # Provider interface
 │   ├── yahoo_finance.py  # Yahoo Finance API
-│   ├── alpha_vantage.py  # Alpha Vantage API
 │   └── manager.py        # Provider coordination
 ├── agents/
 │   ├── tools.py          # LangChain tools

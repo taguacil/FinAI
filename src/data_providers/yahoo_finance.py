@@ -150,7 +150,17 @@ class YahooFinanceProvider(BaseDataProvider):
 
             # Map Yahoo Finance quote types to our instrument types
             quote_type = info.get("quoteType", "").upper()
-            if quote_type in ["EQUITY", "STOCK"]:
+            name = (info.get("longName") or info.get("shortName") or "").lower()
+            symbol = symbol.upper()
+
+            # Bond detection logic
+            if (quote_type == "ETF" and any(bond_hint in name for bond_hint in
+                ["bond", "treasury", "government", "corporate", "municipal", "t-bill", "tbill"])):
+                instrument_type = InstrumentType.BOND
+            elif (quote_type == "ETF" and any(bond_hint in symbol for bond_hint in
+                ["BIL", "TLT", "IEF", "TIP", "LQD", "HYG", "EMB", "SHY", "SHV", "BND", "AGG"])):
+                instrument_type = InstrumentType.BOND
+            elif quote_type in ["EQUITY", "STOCK"]:
                 instrument_type = InstrumentType.STOCK
             elif quote_type == "ETF":
                 instrument_type = InstrumentType.ETF
@@ -197,6 +207,20 @@ class YahooFinanceProvider(BaseDataProvider):
         except Exception:
             return []
 
+    def get_instrument_by_isin(self, isin: str) -> Optional[InstrumentInfo]:
+        """Get instrument information by ISIN."""
+        # Yahoo Finance doesn't have direct ISIN lookup, but we can try
+        # to search for it and see if any result matches the ISIN
+        try:
+            # Try to search for the ISIN as a query
+            search_results = self.search_instruments(isin)
+            for result in search_results:
+                if result.isin and result.isin.upper() == isin.upper():
+                    return result
+            return None
+        except Exception:
+            return None
+
     def get_exchange_rate(
         self, from_currency: Currency, to_currency: Currency
     ) -> Optional[Decimal]:
@@ -233,5 +257,6 @@ class YahooFinanceProvider(BaseDataProvider):
             InstrumentType.ETF,
             InstrumentType.MUTUAL_FUND,
             InstrumentType.CRYPTO,  # Limited crypto support
+            InstrumentType.BOND,    # Bond ETFs and some individual bonds
         }
         return instrument_type in supported_types

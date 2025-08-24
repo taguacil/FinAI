@@ -104,34 +104,119 @@ class PortfolioManager:
             logging.error("No portfolio loaded")
             return False
 
-        # Normalize symbol (strip chat-style '$', uppercase)
-        normalized_symbol = symbol.strip().lstrip("$").upper()
+        # Handle ISIN-based transactions first
+        if isin:
+            # Try to get instrument info by ISIN
+            instrument_info = self.data_manager.search_by_isin(isin)
+            if instrument_info:
+                # Use the instrument info from ISIN lookup
+                instrument_info_dict = {
+                    "symbol": instrument_info.symbol,
+                    "name": instrument_info.name,
+                    "instrument_type": instrument_info.instrument_type,
+                    "currency": instrument_info.currency,
+                    "exchange": instrument_info.exchange,
+                    "isin": instrument_info.isin or isin,
+                }
+            else:
+                # ISIN not found, create basic info for all instrument types
+                # We need to find the symbol and name for this instrument
+                if symbol:
+                    # Symbol provided - use it and try to find the name
+                    normalized_symbol = symbol.strip().lstrip("$").upper()
+                    # Try to infer type from symbol or use STOCK as default
+                    inferred_type = InstrumentType.STOCK
+                    # Try to find a better name than the symbol
+                    if symbol.upper() in ['AAPL', 'MSFT', 'GOOGL', 'TSLA', 'AMZN']:
+                        # Common stock symbols - use proper company names
+                        symbol_to_name = {
+                            'AAPL': 'Apple Inc.',
+                            'MSFT': 'Microsoft Corporation',
+                            'GOOGL': 'Alphabet Inc.',
+                            'TSLA': 'Tesla Inc.',
+                            'AMZN': 'Amazon.com Inc.'
+                        }
+                        instrument_name = symbol_to_name.get(symbol.upper(), symbol)
+                    else:
+                        instrument_name = symbol
+                else:
+                    # No symbol provided - try to find it based on ISIN
+                    # First try to search for the instrument by ISIN to get symbol and name
+                    try:
+                        search_results = self.data_manager.search_instruments(isin)
+                        found_instrument = None
+                        for result in search_results:
+                            if result.isin and result.isin.upper() == isin.upper():
+                                found_instrument = result
+                                break
 
-        # Get instrument info from data providers
-        instrument_info = self.data_manager.get_instrument_info(normalized_symbol)
-        if not instrument_info:
-            # Create basic instrument info if not found
-            inferred_type = (
-                InstrumentType.CASH
-                if normalized_symbol == "CASH"
-                else InstrumentType.STOCK
-            )
-            instrument_info_dict = {
-                "symbol": normalized_symbol,
-                "name": "Cash" if normalized_symbol == "CASH" else normalized_symbol,
-                "instrument_type": inferred_type,
-                "currency": currency or Currency.USD,
-                "isin": isin,
-            }
+                        if found_instrument:
+                            # Found the instrument - use its symbol and name
+                            normalized_symbol = found_instrument.symbol
+                            instrument_name = found_instrument.name
+                            inferred_type = found_instrument.instrument_type
+                        else:
+                            # Not found - create placeholder symbol and try to infer type
+                            normalized_symbol = f"ISIN_{isin[:8]}"
+                            # Try to infer type from ISIN prefix
+                            if isin.upper().startswith('XS'):
+                                inferred_type = InstrumentType.BOND
+                            elif isin.upper().startswith('US'):
+                                inferred_type = InstrumentType.STOCK
+                            elif isin.upper().startswith('CH'):
+                                inferred_type = InstrumentType.STOCK
+                            else:
+                                inferred_type = InstrumentType.STOCK
+                            # Create a descriptive name
+                            instrument_name = f"Instrument {isin}"
+                    except Exception as e:
+                        logging.warning(f"Error searching for instrument by ISIN {isin}: {e}")
+                        # Fallback to placeholder
+                        normalized_symbol = f"ISIN_{isin[:8]}"
+                        inferred_type = InstrumentType.STOCK
+                        instrument_name = f"Instrument {isin}"
+
+                instrument_info_dict = {
+                    "symbol": normalized_symbol,
+                    "name": instrument_name,
+                    "instrument_type": inferred_type,
+                    "currency": currency or Currency.USD,
+                    "isin": isin,
+                }
         else:
-            instrument_info_dict = {
-                "symbol": instrument_info.symbol,
-                "name": instrument_info.name,
-                "instrument_type": instrument_info.instrument_type,
-                "currency": instrument_info.currency,
-                "exchange": instrument_info.exchange,
-                "isin": instrument_info.isin or isin,
-            }
+            # No ISIN provided - handle symbol-based transactions
+            if not symbol:
+                logging.error("No symbol or ISIN provided")
+                return False
+
+            # Normalize symbol (strip chat-style '$', uppercase)
+            normalized_symbol = symbol.strip().lstrip("$").upper()
+
+            # Get instrument info from data providers
+            instrument_info = self.data_manager.get_instrument_info(normalized_symbol)
+            if not instrument_info:
+                # Create basic instrument info if not found
+                inferred_type = (
+                    InstrumentType.CASH
+                    if normalized_symbol == "CASH"
+                    else InstrumentType.STOCK
+                )
+                instrument_info_dict = {
+                    "symbol": normalized_symbol,
+                    "name": "Cash" if normalized_symbol == "CASH" else normalized_symbol,
+                    "instrument_type": inferred_type,
+                    "currency": currency or Currency.USD,
+                    "isin": isin,
+                }
+            else:
+                instrument_info_dict = {
+                    "symbol": instrument_info.symbol,
+                    "name": instrument_info.name,
+                    "instrument_type": instrument_info.instrument_type,
+                    "currency": instrument_info.currency,
+                    "exchange": instrument_info.exchange,
+                    "isin": instrument_info.isin or isin,
+                }
 
         instrument = FinancialInstrument(**instrument_info_dict)
 
