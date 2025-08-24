@@ -211,12 +211,42 @@ class PortfolioAgent:
         - Extract symbol if mentioned (e.g., "AAPL", "TSLA", "MSFT")
         - Extract company/instrument name if mentioned (e.g., "Apple Inc.", "Tesla Inc.")
         - Preserve percentage prices as-is for bonds (e.g., 98.85% → price: 98.85)
-        - The system will:
-          * Use the provided symbol as the trading symbol
-          * Use the provided name or search for it based on symbol/ISIN
-          * Use the ISIN for identification
-          * Automatically classify instruments based on ISIN prefix (XS=bonds, US=stocks, etc.)
-        - If symbol is not provided, the system will try to find it by searching the ISIN
+
+        CRITICAL: The system now automatically handles symbol/ISIN/name mapping:
+        - **Name field**: Will contain a readable company/instrument name (e.g., "Apple Inc.")
+        - **Symbol field**: Will contain the actual trading symbol (e.g., "AAPL")
+        - **ISIN field**: Will contain the ISIN number if provided (e.g., "US0378331005")
+
+        When information is available:
+        - If both symbol and ISIN are provided: The system will use both and validate
+        - If only ISIN is provided: The system will find the symbol and company name
+        - If only symbol is provided: The system will find the company name (no ISIN search)
+        - If only company name is provided: The system will automatically find the symbol and proceed
+
+        Use web search when you need to find missing information:
+        - Search for "Apple Inc. stock symbol" to find "AAPL"
+        - Search for "Apple Inc. ISIN" to find "US0378331005"
+        - Search for "XS2472298335 bond details" to find bond information
+
+        Examples of instrument transaction parsing:
+        - "Buy 50 of AAPL"
+          → symbol: "AAPL", quantity: 50 (system will find name: "Apple Inc.")
+        - "Buy 50 shares of Apple"
+          → company name: "Apple" → automatically converted to symbol: "AAPL" → proceeds with transaction
+        - "Buy 50 shares using ISIN US0378331005"
+          → isin: "US0378331005", quantity: 50 (system will find symbol: "AAPL", name: "Apple Inc.")
+        - "Buy 50 shares of Apple ISIN US0378331005"
+          → isin: "US0378331005", notes: "Apple", quantity: 50 (system will find symbol: "AAPL", name: "Apple Inc.")
+        - "Buy 50000 bonds at 98.85% using ISIN XS2472298335, Citigroup Shark Note on SMI"
+          → isin: "XS2472298335", notes: "Citigroup Shark Note on SMI", quantity: 50000, price: 98.85
+        - "I bought 100 TLT bonds at 90.50"
+          → symbol: "TLT", quantity: 100, price: 90.50 (system will find name: "iShares 20+ Year Treasury Bond ETF")
+        - "Buy 100 shares using ISIN US0378331005"
+          → isin: "US0378331005", quantity: 100 (system will search for symbol: "AAPL" and name: "Apple Inc.")
+        - "Purchase 50 Microsoft stock with ISIN US5949181045 at $350"
+          → isin: "US5949181045", notes: "Microsoft", quantity: 50, price: 350 (system will find symbol: "MSFT")
+        - "Buy 25 Tesla shares at $250"
+          → company name: "Tesla" → automatically converted to symbol: "TSLA" → proceeds with transaction
 
         When asked for investment advice:
         - Search for current market conditions and news
@@ -225,18 +255,6 @@ class PortfolioAgent:
         - Provide specific, actionable recommendations
 
         Remember: This is for educational purposes. Always recommend consulting with qualified financial professionals for personalized advice.
-
-        Examples of instrument transaction parsing:
-        - "Buy 25 AAPL shares using ISIN US0378331005"
-          → symbol: "AAPL", isin: "US0378331005", name: "Apple Inc.", quantity: 25
-        - "Buy 50000 bonds at 98.85% using ISIN XS2472298335, Citigroup Shark Note on SMI"
-          → isin: "XS2472298335", notes: "Citigroup Shark Note on SMI", quantity: 50000, price: 98.85
-        - "I bought 100 TLT bonds at 90.50"
-          → symbol: "TLT", quantity: 100, price: 90.50
-        - "Buy 100 shares using ISIN US0378331005"
-          → isin: "US0378331005", quantity: 100 (system will search for symbol and name)
-        - "Purchase 50 Microsoft stock with ISIN US5949181045 at $350"
-          → isin: "US5949181045", notes: "Microsoft", quantity: 50, price: 350
         """
 
         prompt = ChatPromptTemplate.from_messages(

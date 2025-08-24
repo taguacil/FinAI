@@ -104,119 +104,13 @@ class PortfolioManager:
             logging.error("No portfolio loaded")
             return False
 
-        # Handle ISIN-based transactions first
-        if isin:
-            # Try to get instrument info by ISIN
-            instrument_info = self.data_manager.search_by_isin(isin)
-            if instrument_info:
-                # Use the instrument info from ISIN lookup
-                instrument_info_dict = {
-                    "symbol": instrument_info.symbol,
-                    "name": instrument_info.name,
-                    "instrument_type": instrument_info.instrument_type,
-                    "currency": instrument_info.currency,
-                    "exchange": instrument_info.exchange,
-                    "isin": instrument_info.isin or isin,
-                }
-            else:
-                # ISIN not found, create basic info for all instrument types
-                # We need to find the symbol and name for this instrument
-                if symbol:
-                    # Symbol provided - use it and try to find the name
-                    normalized_symbol = symbol.strip().lstrip("$").upper()
-                    # Try to infer type from symbol or use STOCK as default
-                    inferred_type = InstrumentType.STOCK
-                    # Try to find a better name than the symbol
-                    if symbol.upper() in ['AAPL', 'MSFT', 'GOOGL', 'TSLA', 'AMZN']:
-                        # Common stock symbols - use proper company names
-                        symbol_to_name = {
-                            'AAPL': 'Apple Inc.',
-                            'MSFT': 'Microsoft Corporation',
-                            'GOOGL': 'Alphabet Inc.',
-                            'TSLA': 'Tesla Inc.',
-                            'AMZN': 'Amazon.com Inc.'
-                        }
-                        instrument_name = symbol_to_name.get(symbol.upper(), symbol)
-                    else:
-                        instrument_name = symbol
-                else:
-                    # No symbol provided - try to find it based on ISIN
-                    # First try to search for the instrument by ISIN to get symbol and name
-                    try:
-                        search_results = self.data_manager.search_instruments(isin)
-                        found_instrument = None
-                        for result in search_results:
-                            if result.isin and result.isin.upper() == isin.upper():
-                                found_instrument = result
-                                break
-
-                        if found_instrument:
-                            # Found the instrument - use its symbol and name
-                            normalized_symbol = found_instrument.symbol
-                            instrument_name = found_instrument.name
-                            inferred_type = found_instrument.instrument_type
-                        else:
-                            # Not found - create placeholder symbol and try to infer type
-                            normalized_symbol = f"ISIN_{isin[:8]}"
-                            # Try to infer type from ISIN prefix
-                            if isin.upper().startswith('XS'):
-                                inferred_type = InstrumentType.BOND
-                            elif isin.upper().startswith('US'):
-                                inferred_type = InstrumentType.STOCK
-                            elif isin.upper().startswith('CH'):
-                                inferred_type = InstrumentType.STOCK
-                            else:
-                                inferred_type = InstrumentType.STOCK
-                            # Create a descriptive name
-                            instrument_name = f"Instrument {isin}"
-                    except Exception as e:
-                        logging.warning(f"Error searching for instrument by ISIN {isin}: {e}")
-                        # Fallback to placeholder
-                        normalized_symbol = f"ISIN_{isin[:8]}"
-                        inferred_type = InstrumentType.STOCK
-                        instrument_name = f"Instrument {isin}"
-
-                instrument_info_dict = {
-                    "symbol": normalized_symbol,
-                    "name": instrument_name,
-                    "instrument_type": inferred_type,
-                    "currency": currency or Currency.USD,
-                    "isin": isin,
-                }
-        else:
-            # No ISIN provided - handle symbol-based transactions
-            if not symbol:
-                logging.error("No symbol or ISIN provided")
-                return False
-
-            # Normalize symbol (strip chat-style '$', uppercase)
-            normalized_symbol = symbol.strip().lstrip("$").upper()
-
-            # Get instrument info from data providers
-            instrument_info = self.data_manager.get_instrument_info(normalized_symbol)
-            if not instrument_info:
-                # Create basic instrument info if not found
-                inferred_type = (
-                    InstrumentType.CASH
-                    if normalized_symbol == "CASH"
-                    else InstrumentType.STOCK
-                )
-                instrument_info_dict = {
-                    "symbol": normalized_symbol,
-                    "name": "Cash" if normalized_symbol == "CASH" else normalized_symbol,
-                    "instrument_type": inferred_type,
-                    "currency": currency or Currency.USD,
-                    "isin": isin,
-                }
-            else:
-                instrument_info_dict = {
-                    "symbol": instrument_info.symbol,
-                    "name": instrument_info.name,
-                    "instrument_type": instrument_info.instrument_type,
-                    "currency": instrument_info.currency,
-                    "exchange": instrument_info.exchange,
-                    "isin": instrument_info.isin or isin,
-                }
+        # Enhanced instrument information discovery
+        instrument_info_dict = self._discover_instrument_info(
+            symbol, isin, currency, notes
+        )
+        if not instrument_info_dict:
+            logging.error("Failed to discover instrument information")
+            return False
 
         instrument = FinancialInstrument(**instrument_info_dict)
 
@@ -266,7 +160,7 @@ class PortfolioManager:
         self.storage.save_portfolio(self.current_portfolio)
 
         logging.info(
-            f"Added {transaction_type} transaction: {quantity} {normalized_symbol} @ {price}"
+            f"Added {transaction_type} transaction: {quantity} {instrument.symbol} ({instrument.name}) @ {price}"
         )
         return True
 
@@ -1229,3 +1123,467 @@ class PortfolioManager:
             }
 
         return results
+
+    def _discover_instrument_info(
+        self,
+        symbol: Optional[str],
+        isin: Optional[str],
+        currency: Optional[Currency],
+        notes: Optional[str],
+    ) -> Optional[Dict]:
+        """Enhanced instrument information discovery with intelligent fallbacks.
+
+        Note: ISIN is optional. If provided, use it directly. If not provided,
+        work with available symbol/name information without searching for ISIN.
+        Company names can be automatically converted to symbols.
+        """
+
+        # Case 1: Both symbol and ISIN provided
+        if symbol and isin:
+            return self._handle_symbol_and_isin(symbol, isin, currency, notes)
+
+        # Case 2: Only ISIN provided (symbol will be discovered or created)
+        elif isin and not symbol:
+            return self._handle_isin_only(isin, currency, notes)
+
+        # Case 3: Only symbol provided (work with what we have, don't search for ISIN)
+        elif symbol and not isin:
+            return self._handle_symbol_only(symbol, currency, notes)
+
+        # Case 4: Neither provided (invalid)
+        else:
+            logging.error("Neither symbol nor ISIN provided")
+            return None
+
+    def _handle_symbol_and_isin(
+        self, symbol: str, isin: str, currency: Optional[Currency], notes: Optional[str]
+    ) -> Dict:
+        """Handle case where both symbol and ISIN are provided."""
+        normalized_symbol = symbol.strip().lstrip("$").upper()
+
+        # Try to get comprehensive info from data providers
+        instrument_info = self.data_manager.get_instrument_info(normalized_symbol)
+
+        if instrument_info:
+            # Use provider data but ensure ISIN matches
+            return {
+                "symbol": instrument_info.symbol,
+                "name": instrument_info.name,
+                "instrument_type": instrument_info.instrument_type,
+                "currency": currency or instrument_info.currency,
+                "exchange": instrument_info.exchange,
+                "isin": isin.upper(),  # Use provided ISIN
+            }
+        else:
+            # Fallback: create basic info
+            return self._create_basic_instrument_info(
+                normalized_symbol, isin, currency, notes
+            )
+
+    def _handle_isin_only(
+        self, isin: str, currency: Optional[Currency], notes: Optional[str]
+    ) -> Dict:
+        """Handle case where only ISIN is provided (symbol will be discovered or created)."""
+        isin = isin.upper().strip()
+
+        # Try to find instrument by ISIN from our known mappings
+        instrument_info = self.data_manager.search_by_isin(isin)
+
+        if instrument_info:
+            # Found the instrument - use its data
+            return {
+                "symbol": instrument_info.symbol,
+                "name": instrument_info.name,
+                "instrument_type": instrument_info.instrument_type,
+                "currency": currency or instrument_info.currency,
+                "exchange": instrument_info.exchange,
+                "isin": isin,
+            }
+        else:
+            # Not found in known mappings - create placeholder with intelligent defaults
+            return self._create_placeholder_from_isin(isin, currency, notes)
+
+    def _handle_symbol_only(
+        self, symbol: str, currency: Optional[Currency], notes: Optional[str]
+    ) -> Dict:
+        """Handle case where only symbol is provided."""
+        normalized_symbol = symbol.strip().lstrip("$").upper()
+
+        # Check if this might be a company name rather than a symbol
+        if self._is_likely_company_name(normalized_symbol):
+            # Try to find the symbol for this company name
+            found_symbol = self._find_symbol_from_company_name(normalized_symbol)
+            if found_symbol:
+                normalized_symbol = found_symbol
+                logging.info(
+                    f"Converted company name '{symbol}' to symbol '{found_symbol}'"
+                )
+
+        # Get instrument info from data providers
+        instrument_info = self.data_manager.get_instrument_info(normalized_symbol)
+
+        if instrument_info:
+            # Use provider data
+            return {
+                "symbol": instrument_info.symbol,
+                "name": instrument_info.name,
+                "instrument_type": instrument_info.instrument_type,
+                "currency": currency or instrument_info.currency,
+                "exchange": instrument_info.exchange,
+                "isin": instrument_info.isin,
+            }
+        else:
+            # Create basic instrument info if not found
+            return self._create_basic_instrument_info(
+                normalized_symbol, None, currency, notes
+            )
+
+    def _is_likely_company_name(self, text: str) -> bool:
+        """Check if text is likely a company name rather than a stock symbol."""
+        # Common patterns that suggest company names
+        company_indicators = [
+            "inc",
+            "corp",
+            "corporation",
+            "company",
+            "co",
+            "ltd",
+            "limited",
+            "plc",
+            "ag",
+            "sa",
+            "nv",
+            "holdings",
+            "group",
+            "technologies",
+            "systems",
+            "solutions",
+            "services",
+            "international",
+            "global",
+        ]
+
+        text_lower = text.lower()
+
+        # Check for company suffixes
+        for indicator in company_indicators:
+            if indicator in text_lower:
+                return True
+
+        # Check if it's all lowercase (likely company name)
+        if text.islower() and len(text) > 3:
+            return True
+
+        # Check if it contains spaces (likely company name)
+        if " " in text:
+            return True
+
+        # Check if it's not all uppercase (likely company name)
+        if not text.isupper():
+            return True
+
+        # Check if it's a known company name that should be converted
+        known_companies = [
+            "apple",
+            "microsoft",
+            "google",
+            "alphabet",
+            "tesla",
+            "amazon",
+            "meta",
+            "facebook",
+            "nvidia",
+            "netflix",
+            "berkshire",
+            "hathaway",
+            "jpmorgan",
+            "chase",
+            "johnson",
+            "visa",
+            "procter",
+            "gamble",
+            "unitedhealth",
+            "home",
+            "depot",
+            "mastercard",
+            "disney",
+            "walt",
+            "paypal",
+            "asml",
+            "holding",
+            "holdings",
+        ]
+
+        if text_lower in known_companies:
+            return True
+
+        return False
+
+    def _find_symbol_from_company_name(self, company_name: str) -> Optional[str]:
+        """Find stock symbol from company name using known mappings."""
+        # Common company name to symbol mappings
+        company_to_symbol = {
+            "apple": "AAPL",
+            "apple inc": "AAPL",
+            "apple inc.": "AAPL",
+            "apple computer": "AAPL",
+            "microsoft": "MSFT",
+            "microsoft corporation": "MSFT",
+            "microsoft corp": "MSFT",
+            "google": "GOOGL",
+            "alphabet": "GOOGL",
+            "alphabet inc": "GOOGL",
+            "alphabet inc.": "GOOGL",
+            "tesla": "TSLA",
+            "tesla inc": "TSLA",
+            "tesla inc.": "TSLA",
+            "amazon": "AMZN",
+            "amazon.com": "AMZN",
+            "amazon.com inc": "AMZN",
+            "amazon.com inc.": "AMZN",
+            "meta": "META",
+            "meta platforms": "META",
+            "meta platforms inc": "META",
+            "meta platforms inc.": "META",
+            "facebook": "META",
+            "facebook inc": "META",
+            "facebook inc.": "META",
+            "nvidia": "NVDA",
+            "nvidia corporation": "NVDA",
+            "nvidia corp": "NVDA",
+            "netflix": "NFLX",
+            "netflix inc": "NFLX",
+            "netflix inc.": "NFLX",
+            "berkshire hathaway": "BRK.A",
+            "berkshire hathaway inc": "BRK.A",
+            "berkshire hathaway inc.": "BRK.A",
+            "jpmorgan": "JPM",
+            "jpmorgan chase": "JPM",
+            "jpmorgan chase & co": "JPM",
+            "jpmorgan chase & co.": "JPM",
+            "johnson & johnson": "JNJ",
+            "johnson and johnson": "JNJ",
+            "visa": "V",
+            "visa inc": "V",
+            "visa inc.": "V",
+            "procter & gamble": "PG",
+            "procter and gamble": "PG",
+            "procter & gamble co": "PG",
+            "procter & gamble co.": "PG",
+            "unitedhealth": "UNH",
+            "unitedhealth group": "UNH",
+            "unitedhealth group inc": "UNH",
+            "unitedhealth group inc.": "UNH",
+            "home depot": "HD",
+            "the home depot": "HD",
+            "the home depot inc": "HD",
+            "the home depot inc.": "HD",
+            "mastercard": "MA",
+            "mastercard inc": "MA",
+            "mastercard inc.": "MA",
+            "disney": "DIS",
+            "the walt disney company": "DIS",
+            "walt disney": "DIS",
+            "paypal": "PYPL",
+            "paypal holdings": "PYPL",
+            "paypal holdings inc": "PYPL",
+            "paypal holdings inc.": "PYPL",
+            "asml": "ASML",
+            "asml holding": "ASML",
+            "asml holding nv": "ASML",
+            "asml holding n.v.": "ASML",
+            "asml holdings": "ASML",
+            "asml holdings nv": "ASML",
+            "asml holdings n.v.": "ASML",
+        }
+
+        # Try exact match first
+        company_lower = company_name.lower().strip()
+        if company_lower in company_to_symbol:
+            return company_to_symbol[company_lower]
+
+        # Try partial matches
+        for company, symbol in company_to_symbol.items():
+            if company_lower in company or company in company_lower:
+                return symbol
+
+        # If no match found, return None (will use company name as symbol)
+        return None
+
+    def _create_basic_instrument_info(
+        self,
+        symbol: str,
+        isin: Optional[str],
+        currency: Optional[Currency],
+        notes: Optional[str],
+    ) -> Dict:
+        """Create basic instrument info when provider data is unavailable."""
+        # Try to infer type from symbol or use STOCK as default
+        inferred_type = self._infer_instrument_type(symbol, isin)
+
+        # Try to find a better name than the symbol
+        instrument_name = self._find_instrument_name(symbol, isin, notes)
+
+        return {
+            "symbol": symbol.upper(),
+            "name": instrument_name,
+            "instrument_type": inferred_type,
+            "currency": currency or Currency.USD,
+            "exchange": None,
+            "isin": isin,
+        }
+
+    def _create_placeholder_from_isin(
+        self, isin: str, currency: Optional[Currency], notes: Optional[str]
+    ) -> Dict:
+        """Create placeholder instrument info when ISIN lookup fails."""
+        # Try to infer type from ISIN prefix
+        inferred_type = self._infer_instrument_type_from_isin(isin)
+
+        # Create a descriptive name
+        if notes and len(notes) > 10:
+            instrument_name = notes
+        else:
+            instrument_name = f"Instrument {isin}"
+
+        # Create placeholder symbol
+        if isin.upper().startswith("XS"):
+            # Bonds - use ISIN prefix
+            placeholder_symbol = f"BOND_{isin[:8]}"
+        elif isin.upper().startswith("US"):
+            # US instruments - use ISIN prefix
+            placeholder_symbol = f"US_{isin[:8]}"
+        elif isin.upper().startswith("CH"):
+            # Swiss instruments - use ISIN prefix
+            placeholder_symbol = f"CH_{isin[:8]}"
+        else:
+            # Generic - use ISIN prefix
+            placeholder_symbol = f"ISIN_{isin[:8]}"
+
+        return {
+            "symbol": placeholder_symbol,
+            "name": instrument_name,
+            "instrument_type": inferred_type,
+            "currency": currency or Currency.USD,
+            "exchange": None,
+            "isin": isin,
+        }
+
+    def _infer_instrument_type(
+        self, symbol: str, isin: Optional[str]
+    ) -> InstrumentType:
+        """Infer instrument type from symbol and ISIN."""
+        if isin:
+            return self._infer_instrument_type_from_isin(isin)
+
+        # Infer from symbol
+        symbol_upper = symbol.upper()
+
+        # Common bond ETFs
+        bond_symbols = {
+            "TLT",
+            "IEF",
+            "TIP",
+            "LQD",
+            "HYG",
+            "EMB",
+            "SHY",
+            "SHV",
+            "BND",
+            "AGG",
+            "BIL",
+        }
+        if symbol_upper in bond_symbols:
+            return InstrumentType.BOND
+
+        # Common stock symbols
+        stock_symbols = {
+            "AAPL",
+            "MSFT",
+            "GOOGL",
+            "TSLA",
+            "AMZN",
+            "META",
+            "NVDA",
+            "NFLX",
+        }
+        if symbol_upper in stock_symbols:
+            return InstrumentType.STOCK
+
+        # Default to stock
+        return InstrumentType.STOCK
+
+    def _infer_instrument_type_from_isin(self, isin: str) -> InstrumentType:
+        """Infer instrument type from ISIN prefix."""
+        isin_upper = isin.upper()
+
+        if isin_upper.startswith("XS"):
+            return InstrumentType.BOND
+        elif isin_upper.startswith("US"):
+            return InstrumentType.STOCK
+        elif isin_upper.startswith("CH"):
+            return InstrumentType.STOCK
+        elif isin_upper.startswith("IE"):  # Ireland (ETFs)
+            return InstrumentType.ETF
+        elif isin_upper.startswith("LU"):  # Luxembourg (ETFs)
+            return InstrumentType.ETF
+        else:
+            return InstrumentType.STOCK
+
+    def _find_instrument_name(
+        self, symbol: str, isin: Optional[str], notes: Optional[str]
+    ) -> str:
+        """Find a better instrument name than just the symbol."""
+        symbol_upper = symbol.upper()
+
+        # Use notes if provided and meaningful
+        if notes and len(notes) > 5 and not notes.upper().startswith(symbol_upper):
+            return notes
+
+        # Common stock symbols with known names
+        symbol_to_name = {
+            "AAPL": "Apple Inc.",
+            "MSFT": "Microsoft Corporation",
+            "GOOGL": "Alphabet Inc.",
+            "TSLA": "Tesla Inc.",
+            "AMZN": "Amazon.com Inc.",
+            "META": "Meta Platforms Inc.",
+            "NVDA": "NVIDIA Corporation",
+            "NFLX": "Netflix Inc.",
+            "TSLA": "Tesla Inc.",
+            "BRK.A": "Berkshire Hathaway Inc.",
+            "BRK.B": "Berkshire Hathaway Inc.",
+            "JPM": "JPMorgan Chase & Co.",
+            "JNJ": "Johnson & Johnson",
+            "V": "Visa Inc.",
+            "PG": "Procter & Gamble Co.",
+            "UNH": "UnitedHealth Group Inc.",
+            "HD": "The Home Depot Inc.",
+            "MA": "Mastercard Inc.",
+            "DIS": "The Walt Disney Company",
+            "PYPL": "PayPal Holdings Inc.",
+        }
+
+        if symbol_upper in symbol_to_name:
+            return symbol_to_name[symbol_upper]
+
+        # Common bond ETFs
+        bond_symbols = {
+            "TLT": "iShares 20+ Year Treasury Bond ETF",
+            "IEF": "iShares 7-10 Year Treasury Bond ETF",
+            "TIP": "iShares TIPS Bond ETF",
+            "LQD": "iShares iBoxx $ Investment Grade Corporate Bond ETF",
+            "HYG": "iShares iBoxx $ High Yield Corporate Bond ETF",
+            "EMB": "iShares J.P. Morgan USD Emerging Markets Bond ETF",
+            "SHY": "iShares 1-3 Year Treasury Bond ETF",
+            "SHV": "iShares Short Treasury Bond ETF",
+            "BND": "Vanguard Total Bond Market ETF",
+            "AGG": "iShares Core U.S. Aggregate Bond ETF",
+            "BIL": "SPDR Bloomberg 1-3 Month T-Bill ETF",
+        }
+
+        if symbol_upper in bond_symbols:
+            return bond_symbols[symbol_upper]
+
+        # If no better name found, return the symbol
+        return symbol_upper

@@ -154,11 +154,35 @@ class YahooFinanceProvider(BaseDataProvider):
             symbol = symbol.upper()
 
             # Bond detection logic
-            if (quote_type == "ETF" and any(bond_hint in name for bond_hint in
-                ["bond", "treasury", "government", "corporate", "municipal", "t-bill", "tbill"])):
+            if quote_type == "ETF" and any(
+                bond_hint in name
+                for bond_hint in [
+                    "bond",
+                    "treasury",
+                    "government",
+                    "corporate",
+                    "municipal",
+                    "t-bill",
+                    "tbill",
+                ]
+            ):
                 instrument_type = InstrumentType.BOND
-            elif (quote_type == "ETF" and any(bond_hint in symbol for bond_hint in
-                ["BIL", "TLT", "IEF", "TIP", "LQD", "HYG", "EMB", "SHY", "SHV", "BND", "AGG"])):
+            elif quote_type == "ETF" and any(
+                bond_hint in symbol
+                for bond_hint in [
+                    "BIL",
+                    "TLT",
+                    "IEF",
+                    "TIP",
+                    "LQD",
+                    "HYG",
+                    "EMB",
+                    "SHY",
+                    "SHV",
+                    "BND",
+                    "AGG",
+                ]
+            ):
                 instrument_type = InstrumentType.BOND
             elif quote_type in ["EQUITY", "STOCK"]:
                 instrument_type = InstrumentType.STOCK
@@ -257,6 +281,6 @@ class YahooFinanceProvider(BaseDataProvider):
             InstrumentType.ETF,
             InstrumentType.MUTUAL_FUND,
             InstrumentType.CRYPTO,  # Limited crypto support
-            InstrumentType.BOND,    # Bond ETFs and some individual bonds
+            InstrumentType.BOND,  # Bond ETFs and some individual bonds
         }
         return instrument_type in supported_types

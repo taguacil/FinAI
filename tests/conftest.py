@@ -212,8 +212,6 @@ def mock_external_apis(monkeypatch):
     def mock_yfinance_price(*args, **kwargs):
         return Decimal("150.00")
 
-
-
     def mock_exchange_rate(*args, **kwargs):
         return Decimal("1.0")
 

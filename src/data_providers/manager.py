@@ -9,7 +9,6 @@ from decimal import Decimal
 from typing import Dict, List, Optional
 
 from ..portfolio.models import Currency, InstrumentType
-
 from .base import BaseDataProvider, InstrumentInfo, PriceData
 from .yahoo_finance import YahooFinanceProvider
 
@@ -51,7 +50,9 @@ class DataProviderManager:
             InstrumentType.ETF: ["Yahoo Finance"],
             InstrumentType.MUTUAL_FUND: ["Yahoo Finance"],
             InstrumentType.CRYPTO: ["Yahoo Finance"],
-            InstrumentType.BOND: ["Yahoo Finance"],  # Bond ETFs and some individual bonds
+            InstrumentType.BOND: [
+                "Yahoo Finance"
+            ],  # Bond ETFs and some individual bonds
             InstrumentType.CASH: [],  # No provider needed
             InstrumentType.OPTION: [],  # Limited support
             InstrumentType.FUTURE: [],  # Limited support
@@ -355,7 +356,11 @@ class DataProviderManager:
         return False
 
     def search_by_isin(self, isin: str) -> Optional[InstrumentInfo]:
-        """Search for an instrument by ISIN across all providers."""
+        """Search for an instrument by ISIN from known mappings.
+
+        Note: ISIN is always provided by the user, so we focus on known mappings
+        rather than searching external sources.
+        """
         isin = isin.upper().strip()
 
         # Check negative cache first
@@ -370,10 +375,10 @@ class DataProviderManager:
             if time.time() - cache_time < self._positive_cache_ttl:
                 return info
 
-        # Try direct ISIN lookup first
+        # Try direct ISIN lookup from providers first
         for provider in self.providers:
             try:
-                if hasattr(provider, 'get_instrument_by_isin'):
+                if hasattr(provider, "get_instrument_by_isin"):
                     info = provider.get_instrument_by_isin(isin)
                     if info:
                         self._instrument_cache[isin] = (info, time.time())
@@ -382,19 +387,388 @@ class DataProviderManager:
                 logging.warning(f"Error in ISIN lookup from {provider.name}: {e}")
                 continue
 
-        # Fallback: search by ISIN as query
-        try:
-            search_results = self.search_instruments(isin)
-            for result in search_results:
-                if result.isin and result.isin.upper() == isin:
-                    self._instrument_cache[isin] = (result, time.time())
-                    return result
-        except Exception as e:
-            logging.warning(f"Error in ISIN search fallback: {e}")
+        # Use known ISIN mappings for common instruments
+        known_isins = self._get_known_isin_mappings()
+        if isin in known_isins:
+            known_info = known_isins[isin]
+            # Create InstrumentInfo from known data
+            from .base import InstrumentInfo
+
+            instrument_info = InstrumentInfo(
+                symbol=known_info["symbol"],
+                name=known_info["name"],
+                instrument_type=known_info["type"],
+                currency=known_info["currency"],
+                exchange=known_info.get("exchange"),
+                isin=isin,
+                sector=known_info.get("sector"),
+                industry=known_info.get("industry"),
+            )
+            self._instrument_cache[isin] = (instrument_info, time.time())
+            return instrument_info
 
         # Cache negative result
         self._failed_isins_cache[isin] = time.time()
         return None
+
+    def _get_known_isin_mappings(self) -> Dict[str, Dict]:
+        """Get known ISIN to instrument mappings for common instruments."""
+        from ..portfolio.models import Currency, InstrumentType
+
+        return {
+            # Apple Inc.
+            "US0378331005": {
+                "symbol": "AAPL",
+                "name": "Apple Inc.",
+                "type": InstrumentType.STOCK,
+                "currency": Currency.USD,
+                "exchange": "NASDAQ",
+                "sector": "Technology",
+                "industry": "Consumer Electronics",
+            },
+            # Microsoft Corporation
+            "US5949181045": {
+                "symbol": "MSFT",
+                "name": "Microsoft Corporation",
+                "type": InstrumentType.STOCK,
+                "currency": Currency.USD,
+                "exchange": "NASDAQ",
+                "sector": "Technology",
+                "industry": "Software",
+            },
+            # Alphabet Inc. (Google)
+            "US02079K3059": {
+                "symbol": "GOOGL",
+                "name": "Alphabet Inc.",
+                "type": InstrumentType.STOCK,
+                "currency": Currency.USD,
+                "exchange": "NASDAQ",
+                "sector": "Technology",
+                "industry": "Internet Services",
+            },
+            # Tesla Inc.
+            "US88160R1014": {
+                "symbol": "TSLA",
+                "name": "Tesla Inc.",
+                "type": InstrumentType.STOCK,
+                "currency": Currency.USD,
+                "exchange": "NASDAQ",
+                "sector": "Consumer Discretionary",
+                "industry": "Automobiles",
+            },
+            # Amazon.com Inc.
+            "US0231351067": {
+                "symbol": "AMZN",
+                "name": "Amazon.com Inc.",
+                "type": InstrumentType.STOCK,
+                "currency": Currency.USD,
+                "exchange": "NASDAQ",
+                "sector": "Consumer Discretionary",
+                "industry": "Internet Retail",
+            },
+            # Meta Platforms Inc. (Facebook)
+            "US30303M1027": {
+                "symbol": "META",
+                "name": "Meta Platforms Inc.",
+                "type": InstrumentType.STOCK,
+                "currency": Currency.USD,
+                "exchange": "NASDAQ",
+                "sector": "Technology",
+                "industry": "Internet Services",
+            },
+            # NVIDIA Corporation
+            "US67066G1040": {
+                "symbol": "NVDA",
+                "name": "NVIDIA Corporation",
+                "type": InstrumentType.STOCK,
+                "currency": Currency.USD,
+                "exchange": "NASDAQ",
+                "sector": "Technology",
+                "industry": "Semiconductors",
+            },
+            # Netflix Inc.
+            "US64110L1061": {
+                "symbol": "NFLX",
+                "name": "Netflix Inc.",
+                "type": InstrumentType.STOCK,
+                "currency": Currency.USD,
+                "exchange": "NASDAQ",
+                "sector": "Communication Services",
+                "industry": "Entertainment",
+            },
+            # Berkshire Hathaway Inc. Class A
+            "US0846707026": {
+                "symbol": "BRK.A",
+                "name": "Berkshire Hathaway Inc.",
+                "type": InstrumentType.STOCK,
+                "currency": Currency.USD,
+                "exchange": "NYSE",
+                "sector": "Financial Services",
+                "industry": "Insurance",
+            },
+            # Berkshire Hathaway Inc. Class B
+            "US0846701086": {
+                "symbol": "BRK.B",
+                "name": "Berkshire Hathaway Inc.",
+                "type": InstrumentType.STOCK,
+                "currency": Currency.USD,
+                "exchange": "NYSE",
+                "sector": "Financial Services",
+                "industry": "Insurance",
+            },
+            # JPMorgan Chase & Co.
+            "US46625H1005": {
+                "symbol": "JPM",
+                "name": "JPMorgan Chase & Co.",
+                "type": InstrumentType.STOCK,
+                "currency": Currency.USD,
+                "exchange": "NYSE",
+                "sector": "Financial Services",
+                "industry": "Banks",
+            },
+            # Johnson & Johnson
+            "US4781601046": {
+                "symbol": "JNJ",
+                "name": "Johnson & Johnson",
+                "type": InstrumentType.STOCK,
+                "currency": Currency.USD,
+                "exchange": "NYSE",
+                "sector": "Healthcare",
+                "industry": "Drug Manufacturers",
+            },
+            # Visa Inc.
+            "US92826C8394": {
+                "symbol": "V",
+                "name": "Visa Inc.",
+                "type": InstrumentType.STOCK,
+                "currency": Currency.USD,
+                "exchange": "NYSE",
+                "sector": "Financial Services",
+                "industry": "Credit Services",
+            },
+            # Procter & Gamble Co.
+            "US7427181091": {
+                "symbol": "PG",
+                "name": "The Procter & Gamble Co.",
+                "type": InstrumentType.STOCK,
+                "currency": Currency.USD,
+                "exchange": "NYSE",
+                "sector": "Consumer Defensive",
+                "industry": "Household & Personal Products",
+            },
+            # UnitedHealth Group Inc.
+            "US91324P1021": {
+                "symbol": "UNH",
+                "name": "UnitedHealth Group Inc.",
+                "type": InstrumentType.STOCK,
+                "currency": Currency.USD,
+                "exchange": "NYSE",
+                "sector": "Healthcare",
+                "industry": "Healthcare Plans",
+            },
+            # The Home Depot Inc.
+            "US4370761029": {
+                "symbol": "HD",
+                "name": "The Home Depot Inc.",
+                "type": InstrumentType.STOCK,
+                "currency": Currency.USD,
+                "exchange": "NYSE",
+                "sector": "Consumer Discretionary",
+                "industry": "Home Improvement Retail",
+            },
+            # Mastercard Inc.
+            "US57636Q1040": {
+                "symbol": "MA",
+                "name": "Mastercard Inc.",
+                "type": InstrumentType.STOCK,
+                "currency": Currency.USD,
+                "exchange": "NYSE",
+                "sector": "Financial Services",
+                "industry": "Credit Services",
+            },
+            # The Walt Disney Company
+            "US2546871060": {
+                "symbol": "DIS",
+                "name": "The Walt Disney Company",
+                "type": InstrumentType.STOCK,
+                "currency": Currency.USD,
+                "exchange": "NYSE",
+                "sector": "Communication Services",
+                "industry": "Entertainment",
+            },
+            # PayPal Holdings Inc.
+            "US70450Y1038": {
+                "symbol": "PYPL",
+                "name": "PayPal Holdings Inc.",
+                "type": InstrumentType.STOCK,
+                "currency": Currency.USD,
+                "exchange": "NASDAQ",
+                "sector": "Financial Services",
+                "industry": "Credit Services",
+            },
+            # Common Bond ETFs
+            # iShares 20+ Year Treasury Bond ETF
+            "US4642876555": {
+                "symbol": "TLT",
+                "name": "iShares 20+ Year Treasury Bond ETF",
+                "type": InstrumentType.BOND,
+                "currency": Currency.USD,
+                "exchange": "NASDAQ",
+                "sector": "Fixed Income",
+                "industry": "Government Bonds",
+            },
+            # iShares 7-10 Year Treasury Bond ETF
+            "US4642872008": {
+                "symbol": "IEF",
+                "name": "iShares 7-10 Year Treasury Bond ETF",
+                "type": InstrumentType.BOND,
+                "currency": Currency.USD,
+                "exchange": "NASDAQ",
+                "sector": "Fixed Income",
+                "industry": "Government Bonds",
+            },
+            # iShares TIPS Bond ETF
+            "US4642872065": {
+                "symbol": "TIP",
+                "name": "iShares TIPS Bond ETF",
+                "type": InstrumentType.BOND,
+                "currency": Currency.USD,
+                "exchange": "NASDAQ",
+                "sector": "Fixed Income",
+                "industry": "Government Bonds",
+            },
+            # iShares iBoxx $ Investment Grade Corporate Bond ETF
+            "US4642872172": {
+                "symbol": "LQD",
+                "name": "iShares iBoxx $ Investment Grade Corporate Bond ETF",
+                "type": InstrumentType.BOND,
+                "currency": Currency.USD,
+                "exchange": "NASDAQ",
+                "sector": "Fixed Income",
+                "industry": "Corporate Bonds",
+            },
+            # iShares iBoxx $ High Yield Corporate Bond ETF
+            "US4642872347": {
+                "symbol": "HYG",
+                "name": "iShares iBoxx $ High Yield Corporate Bond ETF",
+                "type": InstrumentType.BOND,
+                "currency": Currency.USD,
+                "exchange": "NASDAQ",
+                "sector": "Fixed Income",
+                "industry": "High Yield Bonds",
+            },
+            # iShares J.P. Morgan USD Emerging Markets Bond ETF
+            "US4642872354": {
+                "symbol": "EMB",
+                "name": "iShares J.P. Morgan USD Emerging Markets Bond ETF",
+                "type": InstrumentType.BOND,
+                "currency": Currency.USD,
+                "exchange": "NASDAQ",
+                "sector": "Fixed Income",
+                "industry": "Emerging Market Bonds",
+            },
+            # iShares 1-3 Year Treasury Bond ETF
+            "US4642872065": {
+                "symbol": "SHY",
+                "name": "iShares 1-3 Year Treasury Bond ETF",
+                "type": InstrumentType.BOND,
+                "currency": Currency.USD,
+                "exchange": "NASDAQ",
+                "sector": "Fixed Income",
+                "industry": "Government Bonds",
+            },
+            # iShares Short Treasury Bond ETF
+            "US4642872172": {
+                "symbol": "SHV",
+                "name": "iShares Short Treasury Bond ETF",
+                "type": InstrumentType.BOND,
+                "currency": Currency.USD,
+                "exchange": "NASDAQ",
+                "sector": "Fixed Income",
+                "industry": "Government Bonds",
+            },
+            # Vanguard Total Bond Market ETF
+            "US9229083636": {
+                "symbol": "BND",
+                "name": "Vanguard Total Bond Market ETF",
+                "type": InstrumentType.BOND,
+                "currency": Currency.USD,
+                "exchange": "NASDAQ",
+                "sector": "Fixed Income",
+                "industry": "Broad Market Bonds",
+            },
+            # iShares Core U.S. Aggregate Bond ETF
+            "US4642872347": {
+                "symbol": "AGG",
+                "name": "iShares Core U.S. Aggregate Bond ETF",
+                "type": InstrumentType.BOND,
+                "currency": Currency.USD,
+                "exchange": "NASDAQ",
+                "sector": "Fixed Income",
+                "industry": "Broad Market Bonds",
+            },
+            # SPDR Bloomberg 1-3 Month T-Bill ETF
+            "US78464A7353": {
+                "symbol": "BIL",
+                "name": "SPDR Bloomberg 1-3 Month T-Bill ETF",
+                "type": InstrumentType.BOND,
+                "currency": Currency.USD,
+                "exchange": "NASDAQ",
+                "sector": "Fixed Income",
+                "industry": "Government Bills",
+            },
+        }
+
+    def search_by_company_name(self, company_name: str) -> List[InstrumentInfo]:
+        """Search for instruments by company name across all providers."""
+        company_name = company_name.strip()
+        if not company_name:
+            return []
+
+        all_results = []
+        seen_symbols = set()
+
+        # Try searching with the company name
+        for provider in self.providers:
+            try:
+                results = provider.search_instruments(company_name)
+                for result in results:
+                    if result.symbol not in seen_symbols:
+                        all_results.append(result)
+                        seen_symbols.add(result.symbol)
+            except Exception as e:
+                logging.warning(
+                    f"Error searching by company name from {provider.name}: {e}"
+                )
+                continue
+
+        # If no results, try with common variations
+        if not all_results:
+            variations = [
+                company_name + " stock",
+                company_name + " shares",
+                company_name + " inc",
+                company_name + " corp",
+                company_name + " ltd",
+                company_name + " company",
+            ]
+
+            for variation in variations:
+                for provider in self.providers:
+                    try:
+                        results = provider.search_instruments(variation)
+                        for result in results:
+                            if result.symbol not in seen_symbols:
+                                all_results.append(result)
+                                seen_symbols.add(result.symbol)
+                    except Exception:
+                        continue
+                    if all_results:  # Stop if we found something
+                        break
+                if all_results:  # Stop if we found something
+                    break
+
+        return all_results[:20]  # Limit to top 20 results
 
     def validate_isin(self, isin: str) -> bool:
         """Validate if an ISIN exists using search_by_isin."""

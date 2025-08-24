@@ -64,9 +64,7 @@ class TestDataProviderManager:
         assert price == Decimal("150.00")
         mock_yahoo_provider.get_current_price.assert_called_once_with("AAPL")
 
-    def test_get_current_price_fallback(
-        self, manager, mock_yahoo_provider
-    ):
+    def test_get_current_price_fallback(self, manager, mock_yahoo_provider):
         """Test fallback when provider fails."""
         mock_yahoo_provider.get_current_price.side_effect = Exception("Yahoo error")
 
@@ -75,9 +73,7 @@ class TestDataProviderManager:
         assert price is None
         mock_yahoo_provider.get_current_price.assert_called_once_with("AAPL")
 
-    def test_get_current_price_provider_fails(
-        self, manager, mock_yahoo_provider
-    ):
+    def test_get_current_price_provider_fails(self, manager, mock_yahoo_provider):
         """Test when provider fails."""
         mock_yahoo_provider.get_current_price.side_effect = Exception("Yahoo error")
 
@@ -125,9 +121,7 @@ class TestDataProviderManager:
         # Should be called twice due to force refresh
         assert mock_yahoo_provider.get_instrument_info.call_count == 2
 
-    def test_search_instruments_single_provider(
-        self, manager, mock_yahoo_provider
-    ):
+    def test_search_instruments_single_provider(self, manager, mock_yahoo_provider):
         """Test search results from single provider."""
         yahoo_results = [
             InstrumentInfo(
@@ -180,8 +174,6 @@ class TestDataProviderManager:
 
         # Should be called twice due to force refresh
         assert mock_yahoo_provider.get_exchange_rate.call_count == 2
-
-
 
 
 class TestYahooFinanceProvider:

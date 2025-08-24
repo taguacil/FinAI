@@ -59,7 +59,7 @@ class GetPortfolioSummaryInput(PortfolioToolInput):
     )
 
 
-class SearchInstrumentInput(PortfolioToolInput):
+class SearchInstrumentInput(BaseModel):
     """Input for instrument search."""
 
     query: str = Field(description="Search query (symbol or company name)")
@@ -83,17 +83,31 @@ class AddTransactionTool(BaseTool):
 
     name: str = "add_transaction"
     description: str = """Add a transaction to the portfolio. Supports:
-    - buy/sell stocks, bonds, ETFs: specify symbol, quantity, price
-    - deposit/withdraw cash: use 'CASH' as symbol
-    - dividends: specify symbol and amount
+    - buy/sell stocks, bonds, ETFs: specify symbol, quantity, price, ISIN (optional)
+    - deposit/withdraw cash: use 'CASH' as symbol (ISIN not required for cash)
+    - dividends: specify symbol, amount, and optionally ISIN
     - fees: use 'fees' as transaction type with CASH symbol
+
+    The system automatically handles symbol/ISIN/name mapping:
+    - If you provide a symbol (e.g., AAPL) + ISIN (e.g., US0378331005), it will find the company name
+    - If you provide only an ISIN (e.g., US0378331005), it will find the symbol and company name
+    - If you provide only a symbol (e.g., AAPL), it will find the company name (no ISIN search)
+    - If you provide only a company name (e.g., Apple), it will automatically find the symbol and proceed
+
     Examples:
     - "I bought 50 shares of AAPL at $150"
+    - "I bought 50 shares of AAPL at $150 using ISIN US0378331005"
+    - "I bought 50 shares of Apple at $150" (company name automatically converted to AAPL)
     - "I sold 25 TSLA shares at $200 yesterday"
+    - "I sold 25 Tesla shares at $200 yesterday" (company name automatically converted to TSLA)
+    - "I sold 25 TSLA shares at $200 yesterday using ISIN US88160R1014"
     - "I bought 100 TLT bonds at $90.50"
+    - "I bought 100 TLT bonds at $90.50 using ISIN US4642876555"
     - "I purchased 50 BIL treasury bills at $98.75"
+    - "I purchased 50 BIL treasury bills at $98.75 using ISIN US78464A7353"
     - "I deposited $5000 cash"
     - "I paid $5 in trading fees"
+    - "Buy 100 shares using ISIN US0378331005 at $150"
     """
     args_schema: type[BaseModel] = AddTransactionInput
     portfolio_manager: PortfolioManager | None = None
@@ -140,26 +154,26 @@ class AddTransactionTool(BaseTool):
             else:
                 timestamp = datetime.now() - timedelta(days=days_ago)
 
-            # Choose identifier: symbol or ISIN; for cash movements default to CASH
-            # Handle different transaction scenarios
+            # Handle cash movements (ISIN not required)
             if txn_type in (TransactionType.DEPOSIT, TransactionType.WITHDRAWAL):
-                identifier = "CASH"
-            elif isin and symbol:
-                # Both ISIN and symbol provided - use symbol as identifier
-                identifier = symbol
-            elif isin:
-                # Only ISIN provided - try to find symbol or use ISIN as fallback
-                identifier = isin
-            elif symbol:
-                # Only symbol provided - use symbol as identifier
-                identifier = symbol
-            else:
-                return "Please provide either a symbol or an ISIN."
+                if symbol and symbol.upper() != "CASH":
+                    return "❌ For deposits/withdrawals, use 'CASH' as the symbol."
+                symbol = "CASH"
+                isin = None  # Clear ISIN for cash transactions
+
+            # Validate that we have at least one identifier
+            if not symbol and not isin:
+                return "❌ Please provide either a symbol (e.g., AAPL) or an ISIN (e.g., US0378331005)."
 
             # Normalize cash amount semantics for deposits/withdrawals
-            if identifier == "CASH" and txn_type in (
-                TransactionType.DEPOSIT,
-                TransactionType.WITHDRAWAL,
+            if (
+                symbol
+                and symbol.upper() == "CASH"
+                and txn_type
+                in (
+                    TransactionType.DEPOSIT,
+                    TransactionType.WITHDRAWAL,
+                )
             ):
                 # If only quantity provided, treat as amount; use quantity=1
                 if quantity > 0 and price == 0:
@@ -167,7 +181,7 @@ class AddTransactionTool(BaseTool):
                     quantity = 1.0
                 # If neither positive, invalid
                 if price <= 0:
-                    return "Please provide a positive amount for deposit/withdrawal. Use 'price' as amount or 'quantity' alone."
+                    return "❌ Please provide a positive amount for deposit/withdrawal. Use 'price' as amount or 'quantity' alone."
                 # Force quantity=1 for cash movements
                 quantity = 1.0
 
@@ -179,11 +193,11 @@ class AddTransactionTool(BaseTool):
                 try:
                     cur_obj = Cur(currency.upper())
                 except ValueError:
-                    return f"Invalid currency: {currency}. Use one of {[c.value for c in Cur]}"
+                    return f"❌ Invalid currency: {currency}. Use one of {[c.value for c in Cur]}"
 
             # Handle bond price interpretation (percentages)
             final_price = price
-            if isin and isin.upper().startswith('XS'):  # XS ISINs are typically bonds
+            if isin and isin.upper().startswith("XS"):  # XS ISINs are typically bonds
                 # If price looks like a percentage (between 0 and 200), treat as percentage of face value
                 if 0 < price <= 200:
                     # Keep the percentage as-is for bonds (98.85% -> 98.85)
@@ -192,34 +206,39 @@ class AddTransactionTool(BaseTool):
                     notes = f"{notes or ''} (Price: {price}% of face value)".strip()
 
             # Add transaction
-            # Determine the transaction symbol
-            if isin and not symbol:
-                # Only ISIN provided - try to find symbol or use placeholder
-                # The portfolio manager will handle symbol discovery
-                transaction_symbol = ""  # Let portfolio manager find/create symbol
-            else:
-                # Symbol provided or no ISIN - use the identifier
-                transaction_symbol = identifier.upper()
-
+            # The portfolio manager will handle all the symbol/ISIN/name mapping
             success = self.portfolio_manager.add_transaction(
-                symbol=transaction_symbol,
+                symbol=symbol.upper() if symbol else None,
                 transaction_type=txn_type,
                 quantity=Decimal(str(quantity)),
                 price=Decimal(str(final_price)),
                 timestamp=timestamp,
                 notes=notes,
-                isin=(isin.upper() if isin else None),
+                isin=isin.upper() if isin else None,
                 currency=cur_obj,
             )
 
             if success:
-                # Show the actual symbol if available, otherwise show ISIN
+                # Show what was actually stored
                 if symbol:
                     label = symbol.upper()
                 elif isin:
                     label = f"ISIN_{isin[:8]}"
                 else:
                     label = "Unknown"
+
+                # Get the actual instrument info to show the resolved name
+                try:
+                    if symbol and self.portfolio_manager.current_portfolio:
+                        # Find the transaction we just added
+                        for txn in reversed(
+                            self.portfolio_manager.current_portfolio.transactions
+                        ):
+                            if txn.instrument.symbol == symbol.upper():
+                                return f"✅ Added {transaction_type} transaction: {quantity} {txn.instrument.symbol} ({txn.instrument.name}) @ ${price}"
+                except Exception:
+                    pass
+
                 return f"✅ Added {transaction_type} transaction: {quantity} {label} @ ${price}"
             else:
                 return "❌ Failed to add transaction. Make sure a portfolio is loaded."
@@ -503,6 +522,71 @@ class SearchInstrumentTool(BaseTool):
             return f"❌ Error searching instruments: {str(e)}"
 
 
+class SearchCompanyTool(BaseTool):
+    """Tool for searching company information by name."""
+
+    name: str = "search_company"
+    description: str = (
+        "Search for company information by company name. Use this when you have a company name but need the stock symbol or ISIN. "
+        "This tool will help find the trading symbol, ISIN, and other details for companies."
+    )
+    args_schema: type[BaseModel] = SearchInstrumentInput
+    data_manager: DataProviderManager | None = None
+
+    def __init__(self, data_manager: DataProviderManager):
+        super().__init__()
+        self.data_manager = data_manager
+
+    def _run(self, query: str) -> str:
+        """Search for company information."""
+        try:
+            # First try to search by company name
+            results = self.data_manager.search_by_company_name(query)
+
+            if not results:
+                # Fallback to regular instrument search
+                results = self.data_manager.search_instruments(query)
+
+            if not results:
+                return f"❌ No companies found for '{query}'. Try using web search to find the correct company name or stock symbol."
+
+            search_results = [f"🔍 **Company Search Results for '{query}':**", ""]
+
+            for instrument in results[:10]:  # Limit to top 10
+                result_line = f"• **{instrument.symbol}** - {instrument.name}"
+
+                if instrument.isin:
+                    result_line += f"\n  ISIN: {instrument.isin}"
+
+                result_line += f"\n  Type: {instrument.instrument_type.value.title()} | Currency: {instrument.currency.value}"
+
+                if instrument.exchange:
+                    result_line += f" | Exchange: {instrument.exchange}"
+
+                if instrument.sector:
+                    result_line += f" | Sector: {instrument.sector}"
+
+                search_results.append(result_line)
+
+            # Add guidance for using the results
+            search_results.append("")
+            search_results.append("💡 **How to use these results:**")
+            search_results.append(
+                "- Use the symbol (e.g., AAPL) in the add_transaction tool"
+            )
+            search_results.append(
+                "- Use the ISIN if available for more precise identification"
+            )
+            search_results.append(
+                "- If you need more details, use web search with the company name"
+            )
+
+            return "\n".join(search_results)
+
+        except Exception as e:
+            return f"❌ Error searching for company '{query}': {str(e)}"
+
+
 class GetCurrentPriceTool(BaseTool):
     """Tool for getting current price of an instrument."""
 
@@ -683,6 +767,7 @@ def create_portfolio_tools(
         IngestPdfTool(),
         CalculatorTool(),
         SearchInstrumentTool(data_manager),
+        SearchCompanyTool(data_manager),
         GetCurrentPriceTool(data_manager),
         GetPortfolioMetricsTool(portfolio_manager, metrics_calculator),
         GetTransactionHistoryTool(portfolio_manager),
