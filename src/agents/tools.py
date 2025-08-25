@@ -32,6 +32,10 @@ class AddTransactionInput(PortfolioToolInput):
     isin: Optional[str] = Field(
         default=None, description="ISIN identifier (e.g., US0378331005)"
     )
+    instrument_type: Optional[str] = Field(
+        default=None,
+        description="Type of financial instrument: stock, etf, bond, crypto, cash, mutual_fund, option, future. If not specified, the system will automatically detect the type."
+    )
     transaction_type: str = Field(
         description="Type: buy, sell, dividend, deposit, withdrawal, fees"
     )
@@ -83,10 +87,15 @@ class AddTransactionTool(BaseTool):
 
     name: str = "add_transaction"
     description: str = """Add a transaction to the portfolio. Supports:
-    - buy/sell stocks, bonds, ETFs: specify symbol, quantity, price, ISIN (optional)
+    - buy/sell stocks, bonds, ETFs: specify symbol, quantity, price, ISIN (optional), instrument_type (optional)
     - deposit/withdraw cash: use 'CASH' as symbol (ISIN not required for cash)
     - dividends: specify symbol, amount, and optionally ISIN
     - fees: use 'fees' as transaction type with CASH symbol
+
+    Instrument Type Handling:
+    - You can specify the instrument type (stock, etf, bond, crypto, etc.) to override automatic detection
+    - If not specified, the system automatically detects the type based on symbol patterns and ISIN prefixes
+    - Valid instrument types: stock, etf, bond, crypto, cash, mutual_fund, option, future
 
     The system automatically handles symbol/ISIN/name mapping:
     - If you provide a symbol (e.g., AAPL) + ISIN (e.g., US0378331005), it will find the company name
@@ -95,19 +104,27 @@ class AddTransactionTool(BaseTool):
     - If you provide only a company name (e.g., Apple), it will automatically find the symbol and proceed
 
     Examples:
-    - "I bought 50 shares of AAPL at $150"
-    - "I bought 50 shares of AAPL at $150 using ISIN US0378331005"
-    - "I bought 50 shares of Apple at $150" (company name automatically converted to AAPL)
-    - "I sold 25 TSLA shares at $200 yesterday"
-    - "I sold 25 Tesla shares at $200 yesterday" (company name automatically converted to TSLA)
-    - "I sold 25 TSLA shares at $200 yesterday using ISIN US88160R1014"
-    - "I bought 100 TLT bonds at $90.50"
-    - "I bought 100 TLT bonds at $90.50 using ISIN US4642876555"
-    - "I purchased 50 BIL treasury bills at $98.75"
-    - "I purchased 50 BIL treasury bills at $98.75 using ISIN US78464A7353"
-    - "I deposited $5000 cash"
-    - "I paid $5 in trading fees"
-    - "Buy 100 shares using ISIN US0378331005 at $150"
+    - "I bought 50 shares of AAPL at $150" (type: stock, auto-detected)
+    - "I bought 50 shares of AAPL at $150 using ISIN US0378331005" (type: stock, auto-detected)
+    - "I bought 50 shares of Apple at $150" (company name automatically converted to AAPL, type: stock)
+    - "I sold 25 TSLA shares at $200 yesterday" (type: stock, auto-detected)
+    - "I sold 25 Tesla shares at $200 yesterday" (company name automatically converted to TSLA, type: stock)
+    - "I sold 25 TSLA shares at $200 yesterday using ISIN US88160R1014" (type: stock, auto-detected)
+    - "I bought 100 TLT bonds at $90.50" (type: bond, auto-detected)
+    - "I bought 100 TLT bonds at $90.50 using ISIN US4642876555" (type: bond, auto-detected)
+    - "I purchased 50 BIL treasury bills at $98.75" (type: bond, auto-detected)
+    - "I purchased 50 BIL treasury bills at $98.75 using ISIN US78464A7353" (type: bond, auto-detected)
+    - "I bought 100 SPY at $450" (type: etf, auto-detected)
+    - "I bought 5 BTC at $45000" (type: crypto, auto-detected)
+    - "I deposited $5000 cash" (type: cash, auto-detected)
+    - "I paid $5 in trading fees" (type: cash, auto-detected)
+    - "Buy 100 shares using ISIN US0378331005 at $150" (type: stock, auto-detected)
+
+    Examples with explicit instrument type specification:
+    - "Buy 100 XYZ as a stock at $25" (type: stock, explicitly specified)
+    - "Buy 50 ABC as an etf at $75" (type: etf, explicitly specified)
+    - "Buy 1000 DEF as a bond at 98.5" (type: bond, explicitly specified)
+    - "Buy 10 GHI as crypto at $5000" (type: crypto, explicitly specified)
     """
     args_schema: type[BaseModel] = AddTransactionInput
     portfolio_manager: PortfolioManager | None = None
@@ -120,6 +137,7 @@ class AddTransactionTool(BaseTool):
         self,
         symbol: Optional[str] = None,
         isin: Optional[str] = None,
+        instrument_type: Optional[str] = None,
         transaction_type: str = "buy",
         quantity: float = 0.0,
         price: float = 0.0,
@@ -216,6 +234,7 @@ class AddTransactionTool(BaseTool):
                 notes=notes,
                 isin=isin.upper() if isin else None,
                 currency=cur_obj,
+                instrument_type=instrument_type,
             )
 
             if success:

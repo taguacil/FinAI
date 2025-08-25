@@ -212,15 +212,23 @@ class PortfolioAgent:
         - Extract company/instrument name if mentioned (e.g., "Apple Inc.", "Tesla Inc.")
         - Preserve percentage prices as-is for bonds (e.g., 98.85% → price: 98.85)
 
-        CRITICAL: The system now automatically handles symbol/ISIN/name mapping:
+        CRITICAL: The system now automatically handles symbol/ISIN/name mapping and instrument type detection:
         - **Name field**: Will contain a readable company/instrument name (e.g., "Apple Inc.")
         - **Symbol field**: Will contain the actual trading symbol (e.g., "AAPL")
         - **ISIN field**: Will contain the ISIN number if provided (e.g., "US0378331005")
+        - **Instrument Type**: Automatically detected based on symbol patterns and ISIN prefixes
+
+        Instrument Type Detection:
+        - **Stocks**: Individual company shares (AAPL, MSFT, TSLA)
+        - **ETFs**: Exchange-traded funds (SPY, QQQ, VTI, ARKK)
+        - **Bonds**: Fixed income instruments (TLT, IEF, BND, XS-prefixed ISINs)
+        - **Crypto**: Cryptocurrencies (BTC, ETH, SOL)
+        - **Cash**: Deposits, withdrawals, fees
 
         When information is available:
         - If both symbol and ISIN are provided: The system will use both and validate
         - If only ISIN is provided: The system will find the symbol and company name
-        - If only symbol is provided: The system will find the company name (no ISIN search)
+        - If only symbol is provided: The system will find the company name and detect instrument type
         - If only company name is provided: The system will automatically find the symbol and proceed
 
         Use web search when you need to find missing information:
@@ -228,25 +236,31 @@ class PortfolioAgent:
         - Search for "Apple Inc. ISIN" to find "US0378331005"
         - Search for "XS2472298335 bond details" to find bond information
 
-        Examples of instrument transaction parsing:
+        Examples of instrument transaction parsing with automatic type detection:
         - "Buy 50 of AAPL"
-          → symbol: "AAPL", quantity: 50 (system will find name: "Apple Inc.")
+          → symbol: "AAPL", quantity: 50, type: "stock" (system will find name: "Apple Inc.")
         - "Buy 50 shares of Apple"
-          → company name: "Apple" → automatically converted to symbol: "AAPL" → proceeds with transaction
+          → company name: "Apple" → automatically converted to symbol: "AAPL" → type: "stock" → proceeds
         - "Buy 50 shares using ISIN US0378331005"
-          → isin: "US0378331005", quantity: 50 (system will find symbol: "AAPL", name: "Apple Inc.")
+          → isin: "US0378331005", quantity: 50, type: "stock" (system will find symbol: "AAPL", name: "Apple Inc.")
         - "Buy 50 shares of Apple ISIN US0378331005"
-          → isin: "US0378331005", notes: "Apple", quantity: 50 (system will find symbol: "AAPL", name: "Apple Inc.")
+          → isin: "US0378331005", notes: "Apple", quantity: 50, type: "stock" (system will find symbol: "AAPL", name: "Apple Inc.")
         - "Buy 50000 bonds at 98.85% using ISIN XS2472298335, Citigroup Shark Note on SMI"
-          → isin: "XS2472298335", notes: "Citigroup Shark Note on SMI", quantity: 50000, price: 98.85
+          → isin: "XS2472298335", notes: "Citigroup Shark Note on SMI", quantity: 50000, price: 98.85, type: "bond"
         - "I bought 100 TLT bonds at 90.50"
-          → symbol: "TLT", quantity: 100, price: 90.50 (system will find name: "iShares 20+ Year Treasury Bond ETF")
+          → symbol: "TLT", quantity: 100, price: 90.50, type: "bond" (system will find name: "iShares 20+ Year Treasury Bond ETF")
+        - "Buy 100 SPY at $450"
+          → symbol: "SPY", quantity: 100, price: 450, type: "etf" (system will find name: "SPDR S&P 500 ETF Trust")
+        - "Buy 100 QQQ at $380"
+          → symbol: "QQQ", quantity: 100, price: 380, type: "etf" (system will find name: "Invesco QQQ Trust")
+        - "Buy 5 BTC at $45000"
+          → symbol: "BTC", quantity: 5, price: 45000, type: "crypto" (system will find name: "Bitcoin")
         - "Buy 100 shares using ISIN US0378331005"
-          → isin: "US0378331005", quantity: 100 (system will search for symbol: "AAPL" and name: "Apple Inc.")
+          → isin: "US0378331005", quantity: 100, type: "stock" (system will search for symbol: "AAPL" and name: "Apple Inc.")
         - "Purchase 50 Microsoft stock with ISIN US5949181045 at $350"
-          → isin: "US5949181045", notes: "Microsoft", quantity: 50, price: 350 (system will find symbol: "MSFT")
+          → isin: "US5949181045", notes: "Microsoft", quantity: 50, price: 350, type: "stock" (system will find symbol: "MSFT")
         - "Buy 25 Tesla shares at $250"
-          → company name: "Tesla" → automatically converted to symbol: "TSLA" → proceeds with transaction
+          → company name: "Tesla" → automatically converted to symbol: "TSLA" → type: "stock" → proceeds
 
         When asked for investment advice:
         - Search for current market conditions and news

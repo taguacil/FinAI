@@ -492,6 +492,11 @@ class PortfolioTrackerUI:
         total_value = portfolio_manager.get_portfolio_value()
         positions = portfolio_manager.get_position_summary()
 
+        # Initialize variables (will be populated if positions exist)
+        enriched = []
+        base_currency = portfolio.base_currency
+        start_of_year = date(date.today().year, 1, 1)
+
         # Prepare YTD reference prices from local snapshots (no network)
         ytd_start = date(date.today().year, 1, 1)
         try:
@@ -606,7 +611,6 @@ class PortfolioTrackerUI:
         # YTD performance (time-weighted): remove external cash flows
         try:
             portfolio_id = portfolio_manager.current_portfolio.id
-            start_of_year = date(date.today().year, 1, 1)
             today = date.today()
             ytd_snaps = portfolio_manager.storage.load_snapshots(
                 portfolio_id, start_of_year, today
@@ -617,7 +621,7 @@ class PortfolioTrackerUI:
                 if fetch_live:
                     flows_dec = portfolio_manager.get_external_cash_flows_by_day(
                         start_of_year, today
-                    )
+                )
                 else:
                     # Base-only approximation without FX calls
                     flows_dec = {}
@@ -670,17 +674,11 @@ class PortfolioTrackerUI:
         except Exception:
             ytd_col2.metric("Unrealized P&L (%)", "N/A")
 
-        # Positions by category (card layout)
+        # Positions by category (table layout)
         if positions:
             st.subheader("📈 Current Positions")
 
-            portfolio = portfolio_manager.current_portfolio
-            base_currency = portfolio.base_currency
-
             # Build enriched rows with ISIN, base market value, category, and YTD PnL
-            enriched = []
-            start_of_year = date(date.today().year, 1, 1)
-
             for pos in positions:
                 symbol = pos["symbol"]
                 instrument = (
@@ -788,115 +786,94 @@ class PortfolioTrackerUI:
 
             # No YTD aggregate metrics in overview to avoid external data fetches
 
-            # View toggle: Cards vs Compact Table
-            view_mode = st.radio(
-                "Position View Mode:",
-                ["📊 Compact Table", "🎴 Cards"],
-                horizontal=True,
-                index=0,
-            )
+            # Render by category using separate tables
+            categories = [
+                "Short Term",
+                "Bonds",
+                "Equities",
+                "Alternatives",
+                "Miscellaneous",
+            ]
 
-            if view_mode == "📊 Compact Table":
-                self._render_positions_table(
-                    enriched, base_currency.value, portfolio, portfolio_manager
-                )
-            else:
-                # Render by category using cards
-                categories = [
-                    "Short Term",
-                    "Bonds",
-                    "Equities",
-                    "Alternatives",
-                    "Miscellaneous",
-                ]
-                for cat in categories:
-                    group = [e for e in enriched if e.get("category") == cat]
-                    # Include cash under Short Term as its own items
-                    cash_items = []
-                    if cat == "Short Term" and portfolio.cash_balances:
-                        for curr, amt in portfolio.cash_balances.items():
-                            curr_code = getattr(curr, "value", str(curr))
-                            # FX summary for cash (compat with older cached manager)
-                            fx_summary = self._get_cash_fx_summary(
-                                portfolio_manager
-                            ).get(curr)
-                            amt_base = self._convert_to_base(
-                                portfolio_manager,
-                                Decimal(str(amt)),
-                                curr_code,
-                                base_currency.value,
-                                allow_fetch=True,
+            for cat in categories:
+                group = [e for e in enriched if e.get("category") == cat]
+                # Include cash under Short Term as its own items
+                cash_items = []
+                if cat == "Short Term" and portfolio.cash_balances:
+                    for curr, amt in portfolio.cash_balances.items():
+                        curr_code = getattr(curr, "value", str(curr))
+                        # FX summary for cash (compat with older cached manager)
+                        fx_summary = self._get_cash_fx_summary(portfolio_manager).get(
+                            curr
+                        )
+                        amt_base = self._convert_to_base(
+                            portfolio_manager,
+                            Decimal(str(amt)),
+                            curr_code,
+                            base_currency.value,
+                            allow_fetch=True,
+                        )
+                        # Compute FX P&L percent if base cost available (non-base currency only)
+                        is_base_cur = curr_code == base_currency.value
+                        fx_pnl_base = (
+                            (
+                                fx_summary.get("fx_unrealized_pnl_base")
+                                if fx_summary
+                                else None
                             )
-                            # Compute FX P&L percent if base cost available (non-base currency only)
-                            is_base_cur = curr_code == base_currency.value
-                            fx_pnl_base = (
-                                (
-                                    fx_summary.get("fx_unrealized_pnl_base")
-                                    if fx_summary
-                                    else None
+                            if not is_base_cur
+                            else None
+                        )
+                        base_cost = fx_summary.get("base_cost") if fx_summary else None
+                        fx_pnl_pct = (
+                            (fx_pnl_base / base_cost * 100)
+                            if (not is_base_cur)
+                            and fx_summary
+                            and base_cost not in (None, Decimal("0"))
+                            else None
+                        )
+                        # Robust YTD FX using manager method (respects purchase dates)
+                        ytd_fx_base = None
+                        ytd_fx_pct = None
+                        try:
+                            if hasattr(portfolio_manager, "get_cash_ytd_fx_summary"):
+                                ysum = portfolio_manager.get_cash_ytd_fx_summary().get(
+                                    curr
                                 )
-                                if not is_base_cur
-                                else None
-                            )
-                            base_cost = (
-                                fx_summary.get("base_cost") if fx_summary else None
-                            )
-                            fx_pnl_pct = (
-                                (fx_pnl_base / base_cost * 100)
-                                if (not is_base_cur)
-                                and fx_summary
-                                and base_cost not in (None, Decimal("0"))
-                                else None
-                            )
-                            # Robust YTD FX using manager method (respects purchase dates)
+                                if ysum:
+                                    ytd_fx_base = ysum.get("ytd_fx_pnl_base")
+                                    ytd_fx_pct = ysum.get("ytd_fx_percent")
+                        except Exception:
                             ytd_fx_base = None
                             ytd_fx_pct = None
-                            try:
-                                if hasattr(
-                                    portfolio_manager, "get_cash_ytd_fx_summary"
-                                ):
-                                    ysum = (
-                                        portfolio_manager.get_cash_ytd_fx_summary().get(
-                                            curr
-                                        )
-                                    )
-                                    if ysum:
-                                        ytd_fx_base = ysum.get("ytd_fx_pnl_base")
-                                        ytd_fx_pct = ysum.get("ytd_fx_percent")
-                            except Exception:
-                                ytd_fx_base = None
-                                ytd_fx_pct = None
 
-                            cash_items.append(
-                                {
-                                    "name": f"Cash ({curr_code})",
-                                    "isin": "-",
-                                    "currency": curr_code,
-                                    "instrument_type": "cash",
-                                    "quantity": None,
-                                    "current_price": None,
-                                    "market_value_base": amt_base,
-                                    "market_value": Decimal(str(amt)),
-                                    "unrealized_pnl_base": fx_pnl_base,
-                                    "unrealized_pnl_percent": fx_pnl_pct,
-                                    "ytd_fx_pnl_base": ytd_fx_base,
-                                    "ytd_fx_percent": ytd_fx_pct,
-                                    "ytd_unrealized_pnl": None,
-                                    "ytd_unrealized_pnl_percent": None,
-                                }
-                            )
+                        cash_items.append(
+                            {
+                                "name": f"Cash ({curr_code})",
+                                "isin": "-",
+                                "currency": curr_code,
+                                "instrument_type": "cash",
+                                "quantity": None,
+                                "current_price": None,
+                                "market_value_base": amt_base,
+                                "market_value": Decimal(str(amt)),
+                                "unrealized_pnl_base": fx_pnl_base,
+                                "unrealized_pnl_percent": fx_pnl_pct,
+                                "ytd_fx_pnl_base": ytd_fx_base,
+                                "ytd_fx_percent": ytd_fx_pct,
+                                "ytd_unrealized_pnl": None,
+                                "ytd_unrealized_pnl_percent": None,
+                            }
+                        )
 
-                    if not group and not cash_items:
-                        continue
+                if not group and not cash_items:
+                    continue
 
-                    st.markdown(f"### {cat}")
-                    items = group + cash_items
-                    # Display in rows of 3 cards
-                    for i in range(0, len(items), 3):
-                        cols = st.columns(3)
-                        for col, item in zip(cols, items[i : i + 3]):
-                            with col:
-                                self._render_position_card(item, base_currency.value)
+                st.markdown(f"### {cat}")
+                items = group + cash_items
+
+                # Render compact table for this category
+                self._render_category_table(items, base_currency.value, portfolio, portfolio_manager)
 
         # Allocation charts
         st.subheader("📊 Allocation")
@@ -1052,103 +1029,7 @@ class PortfolioTrackerUI:
         fig.update_layout(height=400)
         st.plotly_chart(fig, use_container_width=True)
 
-    def _render_position_card(self, item: Dict, base_currency_code: str) -> None:
-        """Render a compact, color-coded card (HTML) for a position."""
-        name = item.get("name", "-")
-        isin = item.get("isin", "-")
-        currency = item.get("currency", "-")
-        qty = item.get("quantity")
-        price = item.get("current_price")
-        mv_base = item.get("market_value_base")
-        mv_native = item.get("market_value")
-        pnl_base = item.get("unrealized_pnl_base")
-        pnl_pct = item.get("unrealized_pnl_percent")
-        ytd_mkt_native = item.get("ytd_market_pnl")
-        ytd_mkt_pct = item.get("ytd_market_pnl_percent")
-        total_buy = item.get("total_buy_price")
-        total_buy_base = item.get("total_buy_price_base")
-        avg_cost = item.get("average_cost")
 
-        def fmt_money(val):
-            return f"{float(val):,.2f}" if val is not None else "-"
-
-        def fmt_signed(val):
-            return f"{float(val):+.2f}" if val is not None else "-"
-
-        def colored(val):
-            if val is None:
-                return "-"
-            color = "#23a55a" if float(val) >= 0 else "#f23f43"
-            return f"<span style='color:{color};'>{fmt_signed(val)}</span>"
-
-        qty_price_html = ""
-        if qty is not None and price is not None:
-            qty_price_html = f"<div style='margin-bottom:6px;'>{fmt_money(qty)} @ {fmt_money(price)} {currency}</div>"
-
-        lines = [
-            f"<div style='font-weight:600; margin-bottom:2px;'>{name}</div>",
-            f"<div style='color:#666; font-size:12px; margin-bottom:6px;'>ISIN: {isin}</div>",
-            qty_price_html,
-            # For cash, prefer showing native currency value prominently, with base in parentheses
-            (
-                f"<div><span style='color:#666;'>Value:</span> <strong>{fmt_money(mv_native)} {currency}</strong>"
-                f" <span style='color:#999;'>({fmt_money(mv_base)} {base_currency_code})</span></div>"
-                if (item.get("instrument_type") == "cash" and mv_native is not None)
-                else f"<div><span style='color:#666;'>Market Value:</span> <strong>{fmt_money(mv_base)} {base_currency_code}</strong></div>"
-            ),
-        ]
-        # Show PnL line only when present and meaningful
-        show_pnl = True
-        if item.get("instrument_type") == "cash":
-            # For cash, hide FX PnL when currency equals base (no FX exposure)
-            if currency == base_currency_code:
-                show_pnl = False
-        if show_pnl and pnl_base is not None:
-            lines.append(
-                f"<div><span style='color:#666;'>Unrealized PnL:</span> {colored(pnl_base)} {base_currency_code} ({fmt_signed(pnl_pct)}%)</div>"
-            )
-        # YTD Market/Fx: for cash, compute from Jan 1 FX; for positions, use snapshots (if present)
-        if item.get("instrument_type") == "cash":
-            ytd_fx_base = item.get("ytd_fx_pnl_base")
-            ytd_fx_pct = item.get("ytd_fx_percent")
-            if ytd_fx_base is not None and currency != base_currency_code:
-                ytd_line = (
-                    f"<div style='font-size:13px; margin-top:4px;'><em>YTD FX:</em> "
-                    f"{colored(ytd_fx_base)} {base_currency_code} ({fmt_signed(ytd_fx_pct)}%)</div>"
-                )
-            else:
-                ytd_line = f"<div style='font-size:13px; margin-top:4px;'><em>YTD FX:</em> N/A</div>"
-        else:
-            # Positions: show snapshot-based market YTD in native
-            if ytd_mkt_native is not None:
-                ytd_line = (
-                    f"<div style='font-size:13px; margin-top:4px;'><em>YTD Market:</em> "
-                    f"{colored(ytd_mkt_native)} {currency} ({fmt_signed(ytd_mkt_pct)}%)</div>"
-                )
-            else:
-                ytd_line = f"<div style='font-size:13px; margin-top:4px;'><em>YTD Market:</em> N/A</div>"
-        lines.append(ytd_line)
-        if total_buy is not None:
-            qty_str = fmt_money(qty) if qty is not None else "-"
-            avg_str = fmt_money(avg_cost) if avg_cost is not None else "-"
-            lines.append(
-                f"<div style='margin-top:4px;'><span style='color:#666;'>Total Buy:</span> {qty_str} @ {avg_str} {currency}"
-                f" = {fmt_money(total_buy_base)} {base_currency_code}"
-                f" <span style='color:#999;'>(native: {fmt_money(total_buy)} {currency})</span></div>"
-            )
-        # Purchase date
-        latest_buy = item.get("latest_buy_date")
-        if latest_buy:
-            lines.append(
-                f"<div style='color:#666; font-size:12px; margin-top:2px;'>Last Buy: {latest_buy}</div>"
-            )
-
-        card_html = (
-            "<div style='border:1px solid #e6e6e6; border-radius:8px; padding:10px; margin-bottom:8px; font-size:14px;'>"
-            + "".join([l for l in lines if l])
-            + "</div>"
-        )
-        st.markdown(card_html, unsafe_allow_html=True)
 
     def _convert_to_base(
         self,
@@ -2243,51 +2124,15 @@ class PortfolioTrackerUI:
         """
         )
 
-    def _render_positions_table(
-        self,
-        enriched_positions: List[Dict],
-        base_currency_code: str,
-        portfolio,
-        portfolio_manager,
-    ) -> None:
-        """Render positions in a compact, easy-to-read table format."""
+    def _render_category_table(self, category_items: List[Dict], base_currency_code: str, portfolio, portfolio_manager) -> None:
+        """Render a compact table for a specific category of positions."""
 
-        # Add cash positions to the enriched list
-        all_positions = enriched_positions.copy()
-        if portfolio.cash_balances:
-            for curr, amt in portfolio.cash_balances.items():
-                curr_code = getattr(curr, "value", str(curr))
-                # Convert cash to base currency for display
-                amt_base = self._convert_to_base(
-                    portfolio_manager,
-                    Decimal(str(amt)),
-                    curr_code,
-                    base_currency_code,
-                    allow_fetch=True,
-                )
-
-                all_positions.append(
-                    {
-                        "symbol": f"Cash ({curr_code})",
-                        "name": f"Cash ({curr_code})",
-                        "isin": "-",
-                        "currency": curr_code,
-                        "instrument_type": "cash",
-                        "quantity": None,
-                        "current_price": None,
-                        "market_value_base": amt_base,
-                        "market_value": Decimal(str(amt)),
-                        "unrealized_pnl_base": Decimal("0"),
-                        "unrealized_pnl_percent": Decimal("0"),
-                        "category": "Short Term",
-                        "ytd_market_pnl": None,
-                        "ytd_market_pnl_percent": None,
-                    }
-                )
+        if not category_items:
+            return
 
         # Create a pandas DataFrame for easy table display
         table_data = []
-        for pos in all_positions:
+        for pos in category_items:
             # Format values for display
             def fmt_money(val):
                 if val is None:
@@ -2338,42 +2183,40 @@ class PortfolioTrackerUI:
             else:
                 ytd_display = "-"
 
-            table_data.append(
-                {
-                    "Symbol": pos.get("symbol", "-"),
-                    "Name": pos.get("name", "-"),
-                    "Category": pos.get("category", "-"),
-                    "ISIN": pos.get("isin", "-"),
-                    "Quantity/Price": qty_display,
-                    "Market Value": mv_display,
-                    "Unrealized P&L": pnl_display,
-                    "YTD Performance": ytd_display,
-                    "Currency": pos.get("currency", "-"),
-                }
-            )
+            table_data.append({
+                "Symbol": pos.get("symbol", "-"),
+                "Name": pos.get("name", "-"),
+                "ISIN": pos.get("isin", "-"),
+                "Qty/Price": qty_display,
+                "Market Value": mv_display,
+                "Unrealized P&L": pnl_display,
+                "YTD": ytd_display,
+                "Currency": pos.get("currency", "-"),
+            })
 
         # Create DataFrame and display
         if table_data:
             df = pd.DataFrame(table_data)
 
-            # Add summary row
+            # Add summary row for this category
             total_mv = sum(
-                float(pos.get("market_value_base", 0) or 0) for pos in all_positions
+                float(pos.get("market_value_base", 0) or 0)
+                for pos in category_items
             )
             total_pnl = sum(
-                float(pos.get("unrealized_pnl_base", 0) or 0) for pos in all_positions
+                float(pos.get("unrealized_pnl_base", 0) or 0)
+                for pos in category_items
             )
 
             # Format summary row
             summary_row = {
                 "Symbol": "**TOTAL**",
                 "Name": "",
-                "Category": "",
                 "ISIN": "",
-                "Quantity/Price": "",
+                "Qty/Price": "",
                 "Market Value": f"**{total_mv:,.2f} {base_currency_code}**",
                 "Unrealized P&L": f"**{total_pnl:+.2f} {base_currency_code}**",
-                "YTD Performance": "",
+                "YTD": "",
                 "Currency": "",
             }
 
@@ -2389,51 +2232,36 @@ class PortfolioTrackerUI:
                 column_config={
                     "Symbol": st.column_config.TextColumn("Symbol", width="medium"),
                     "Name": st.column_config.TextColumn("Name", width="large"),
-                    "Category": st.column_config.TextColumn("Category", width="small"),
                     "ISIN": st.column_config.TextColumn("ISIN", width="medium"),
-                    "Quantity/Price": st.column_config.TextColumn(
-                        "Qty/Price", width="medium"
-                    ),
-                    "Market Value": st.column_config.TextColumn(
-                        "Market Value", width="medium"
-                    ),
-                    "Unrealized P&L": st.column_config.TextColumn(
-                        "Unrealized P&L", width="medium"
-                    ),
-                    "YTD Performance": st.column_config.TextColumn(
-                        "YTD", width="small"
-                    ),
+                    "Qty/Price": st.column_config.TextColumn("Qty/Price", width="medium"),
+                    "Market Value": st.column_config.TextColumn("Market Value", width="medium"),
+                    "Unrealized P&L": st.column_config.TextColumn("Unrealized P&L", width="medium"),
+                    "YTD": st.column_config.TextColumn("YTD", width="small"),
                     "Currency": st.column_config.TextColumn("Currency", width="small"),
-                },
+                }
             )
 
-            # Add quick stats below the table
-            col1, col2, col3, col4 = st.columns(4)
+            # Add category summary metrics below the table
+            col1, col2, col3 = st.columns(3)
 
             with col1:
-                positions_count = len(
-                    [p for p in all_positions if p.get("instrument_type") != "cash"]
-                )
+                positions_count = len([p for p in category_items if p.get("instrument_type") != "cash"])
                 st.metric("Positions", positions_count)
 
             with col2:
-                cash_count = len(
-                    [p for p in all_positions if p.get("instrument_type") == "cash"]
-                )
-                st.metric("Cash Accounts", cash_count)
+                cash_count = len([p for p in category_items if p.get("instrument_type") == "cash"])
+                st.metric("Cash Items", cash_count)
 
             with col3:
-                categories = set(p.get("category") for p in all_positions)
-                st.metric("Categories", len(categories))
-
-            with col4:
                 if total_mv > 0:
                     pnl_percent = (total_pnl / total_mv) * 100
                     st.metric("P&L %", f"{pnl_percent:+.2f}%")
                 else:
                     st.metric("P&L %", "N/A")
         else:
-            st.info("No positions to display.")
+            st.info("No items in this category.")
+
+
 
 
 def main():
