@@ -311,7 +311,7 @@ class Portfolio(BaseModel):
     def get_total_value_with_rate_function(
         self, rate_function: Callable[[Currency, Currency], Optional[Decimal]]
     ) -> Decimal:
-        """Calculate total portfolio value using a rate function for on-demand currency conversion."""
+        """Calculate total portfolio value using a rate function for on-demand currency conversion with transaction fallbacks."""
         total = Decimal("0")
 
         # Add cash balances
@@ -323,19 +323,33 @@ class Portfolio(BaseModel):
                 if rate:
                     total += amount * rate
 
-        # Add position values
+        # Add position values with transaction-based fallbacks
         for position in self.positions.values():
-            if position.market_value:
+            position_value = self._get_position_value_with_fallback(position)
+            if position_value:
                 if position.instrument.currency == self.base_currency:
-                    total += position.market_value
+                    total += position_value
                 else:
                     rate = rate_function(
                         position.instrument.currency, self.base_currency
                     )
                     if rate:
-                        total += position.market_value * rate
+                        total += position_value * rate
 
         return total
+
+    def _get_position_value_with_fallback(self, position: 'Position') -> Optional[Decimal]:
+        """Get position value using current price or transaction price as fallback."""
+        # Try current market price first
+        if position.market_value:
+            return position.market_value
+
+        # If no current price, use transaction price as fallback
+        if position.quantity > 0 and position.average_cost:
+            # Use average cost as fallback price
+            return position.quantity * position.average_cost
+
+        return None
 
     def get_positions_by_type(self, instrument_type: InstrumentType) -> List[Position]:
         """Get all positions of a specific instrument type."""

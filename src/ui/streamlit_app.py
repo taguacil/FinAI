@@ -573,6 +573,22 @@ class PortfolioTrackerUI:
         if latest_snapshot:
             st.info(f"🗓️ Latest snapshot: {latest_snapshot.date.isoformat()}")
 
+        # Add refresh snapshots button
+        col1, col2 = st.columns([1, 3])
+        with col1:
+            if st.button("🔄 Refresh Snapshots", help="Update snapshots with current market data"):
+                with st.spinner("Refreshing snapshots..."):
+                    try:
+                        # Refresh snapshots from portfolio creation to current date
+                        refreshed = portfolio_manager.refresh_snapshots_with_current_data()
+                        st.success(f"✅ Refreshed {len(refreshed)} snapshots with current data")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"❌ Failed to refresh snapshots: {str(e)}")
+
+        with col2:
+            st.info("💡 Snapshots use transaction prices as fallbacks when current data is unavailable")
+
         # Key metrics
         col1, col2, col3, col4 = st.columns(4)
 

@@ -229,6 +229,12 @@ class FileBasedStorage:
         snapshots = self.load_snapshots(portfolio_id)
         return snapshots[-1] if snapshots else None
 
+    def get_snapshots_in_range(
+        self, portfolio_id: str, start_date: date, end_date: date
+    ) -> List[PortfolioSnapshot]:
+        """Get snapshots within a specific date range."""
+        return self.load_snapshots(portfolio_id, start_date, end_date)
+
     def backup_portfolio(self, portfolio_id: str) -> str:
         """Create a backup of portfolio data."""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
