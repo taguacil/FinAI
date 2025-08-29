@@ -495,3 +495,210 @@ class TestFinancialMetricsCalculator:
         # Should be identical to no cash flows
         assert twr_returns == twr_returns_none
         assert twr_annualized == twr_annualized_none
+
+    def test_calculate_time_weighted_return_portfolio_starting_from_zero(self):
+        """Test TWR calculation when portfolio starts from zero (edge case)."""
+        # Create snapshots where portfolio starts from zero
+        zero_start_snapshots = []
+        base_date = date(2023, 1, 1)
+
+        # First few snapshots have zero value (portfolio not started yet)
+        for i in range(3):
+            snapshot = PortfolioSnapshot(
+                date=base_date + timedelta(days=i),
+                total_value=Decimal("0"),
+                cash_balance=Decimal("0"),
+                positions_value=Decimal("0"),
+                base_currency=Currency.USD,
+                positions={},
+                cash_balances={Currency.USD: Decimal("0")},
+                total_cost_basis=Decimal("0"),
+                total_unrealized_pnl=Decimal("0"),
+                total_unrealized_pnl_percent=Decimal("0"),
+            )
+            zero_start_snapshots.append(snapshot)
+
+        # Then portfolio gets value
+        for i in range(3, 6):
+            value = Decimal(str(1000 * (i - 2)))  # 1000, 2000, 3000
+            snapshot = PortfolioSnapshot(
+                date=base_date + timedelta(days=i),
+                total_value=value,
+                cash_balance=Decimal("0"),
+                positions_value=value,
+                base_currency=Currency.USD,
+                positions={},
+                cash_balances={Currency.USD: Decimal("0")},
+                total_cost_basis=value,
+                total_unrealized_pnl=Decimal("0"),
+                total_unrealized_pnl_percent=Decimal("0"),
+            )
+            zero_start_snapshots.append(snapshot)
+
+        # This should return some returns (only for periods with positive previous values)
+        returns = self.calculator.calculate_time_weighted_return(zero_start_snapshots)
+        # Should only calculate returns for periods 4->5 and 5->6 (where prev_value > 0)
+        assert len(returns) == 2
+        # From 1000 to 2000 is 100% return (1.0)
+        # From 2000 to 3000 is 50% return (0.5)
+        assert abs(returns[0] - 1.0) < 0.001
+        assert abs(returns[1] - 0.5) < 0.001
+
+        # Test with only one non-zero snapshot at the end
+        single_value_snapshots = []
+        for i in range(4):
+            value = Decimal("1000") if i == 3 else Decimal("0")
+            snapshot = PortfolioSnapshot(
+                date=base_date + timedelta(days=i),
+                total_value=value,
+                cash_balance=Decimal("0"),
+                positions_value=value,
+                base_currency=Currency.USD,
+                positions={},
+                cash_balances={Currency.USD: Decimal("0")},
+                total_cost_basis=value,
+                total_unrealized_pnl=Decimal("0"),
+                total_unrealized_pnl_percent=Decimal("0"),
+            )
+            single_value_snapshots.append(snapshot)
+
+        # This should also return an empty list (can't calculate returns)
+        returns = self.calculator.calculate_time_weighted_return(single_value_snapshots)
+        assert returns == []
+
+    def test_calculate_time_weighted_return_with_valid_progression(self):
+        """Test TWR calculation with a valid progression from zero to positive values."""
+        # Create snapshots with valid progression
+        valid_snapshots = []
+        base_date = date(2023, 1, 1)
+
+        # Start with zero
+        snapshot = PortfolioSnapshot(
+            date=base_date,
+            total_value=Decimal("0"),
+            cash_balance=Decimal("0"),
+            positions_value=Decimal("0"),
+            base_currency=Currency.USD,
+            positions={},
+            cash_balances={Currency.USD: Decimal("0")},
+            total_cost_basis=Decimal("0"),
+            total_unrealized_pnl=Decimal("0"),
+            total_unrealized_pnl_percent=Decimal("0"),
+        )
+        valid_snapshots.append(snapshot)
+
+        # Then get some value
+        snapshot = PortfolioSnapshot(
+            date=base_date + timedelta(days=1),
+            total_value=Decimal("1000"),
+            cash_balance=Decimal("0"),
+            positions_value=Decimal("1000"),
+            base_currency=Currency.USD,
+            positions={},
+            cash_balances={Currency.USD: Decimal("0")},
+            total_cost_basis=Decimal("1000"),
+            total_unrealized_pnl=Decimal("0"),
+            total_unrealized_pnl_percent=Decimal("0"),
+        )
+        valid_snapshots.append(snapshot)
+
+        # Then continue growing
+        for i in range(2, 5):
+            value = Decimal(str(1000 + (i-1) * 100))  # 1100, 1200, 1300
+            snapshot = PortfolioSnapshot(
+                date=base_date + timedelta(days=i),
+                total_value=value,
+                cash_balance=Decimal("0"),
+                positions_value=value,
+                base_currency=Currency.USD,
+                positions={},
+                cash_balances={Currency.USD: Decimal("0")},
+                total_cost_basis=Decimal("1000"),
+                total_unrealized_pnl=value - Decimal("1000"),
+                total_unrealized_pnl_percent=((value - Decimal("1000")) / Decimal("1000")) * Decimal("100"),
+            )
+            valid_snapshots.append(snapshot)
+
+        # This should skip the first period (0 to 1000) but calculate subsequent periods
+        returns = self.calculator.calculate_time_weighted_return(valid_snapshots)
+        assert len(returns) == 3  # 3 valid periods after the initial zero
+        assert all(isinstance(r, float) for r in returns)
+        # Returns should be: 1000->1100 (10%), 1100->1200 (9.09%), 1200->1300 (8.33%)
+        assert abs(returns[0] - 0.1) < 0.001  # 10%
+        assert abs(returns[1] - (100/1100)) < 0.001  # 9.09%
+        assert abs(returns[2] - (100/1200)) < 0.001  # 8.33%
+
+    def test_metrics_consistency_for_one_year_period(self):
+        """Test that total return, annualized return, and YTD calculation are consistent for 1-year periods."""
+        from datetime import date, timedelta
+        from decimal import Decimal
+
+        # Create snapshots for exactly 1 year (365 days)
+        base_date = date(2024, 1, 1)
+        snapshots = []
+
+        for i in range(366):  # 0 to 365 days = 366 snapshots
+            current_date = base_date + timedelta(days=i)
+            # Simulate 20% growth over the year
+            value = 10000 + (2000 * i / 365)  # Linear growth from 10k to 12k
+
+            snapshot = PortfolioSnapshot(
+                date=current_date,
+                total_value=Decimal(str(value)),
+                cash_balance=Decimal("0"),
+                positions_value=Decimal(str(value)),
+                base_currency=Currency.USD,
+                positions={},
+                cash_balances={Currency.USD: Decimal("0")},
+                total_cost_basis=Decimal("10000"),
+                total_unrealized_pnl=Decimal(str(value - 10000)),
+                total_unrealized_pnl_percent=Decimal(str((value - 10000) / 10000 * 100))
+            )
+            snapshots.append(snapshot)
+
+        cash_flows = {}  # No external cash flows
+
+        # Method 1: Manual calculation like in UI (YTD)
+        daily_returns = self.calculator.calculate_time_weighted_return(snapshots, cash_flows)
+        manual_twr = 1.0
+        for r in daily_returns:
+            manual_twr *= 1.0 + r
+        manual_total_return = manual_twr - 1.0
+
+        # Method 2: Portfolio metrics
+        comprehensive_metrics = self.calculator.calculate_portfolio_metrics(
+            snapshots, "SPY", cash_flows
+        )
+
+        total_return = comprehensive_metrics.get("total_return", 0.0)
+        annualized_return = comprehensive_metrics.get("annualized_return", 0.0)
+        time_weighted_annualized = comprehensive_metrics.get("time_weighted_annualized_return", 0.0)
+
+        # Method 3: Direct annualized calculation
+        direct_annualized = self.calculator.calculate_annualized_time_weighted_return(
+            snapshots, cash_flows
+        )
+
+        # All methods should give the same result for a 1-year period
+        tolerance = 0.0001  # 0.01% tolerance
+
+        # YTD manual vs Total return
+        assert abs(manual_total_return - total_return) < tolerance, \
+            f"Manual YTD ({manual_total_return:.6f}) vs Total return ({total_return:.6f}) differ"
+
+        # Total return vs Annualized return (should be same for 1 year)
+        assert abs(total_return - annualized_return) < tolerance, \
+            f"Total return ({total_return:.6f}) vs Annualized return ({annualized_return:.6f}) differ"
+
+        # Annualized return vs Time-weighted annualized
+        assert abs(annualized_return - time_weighted_annualized) < tolerance, \
+            f"Annualized return ({annualized_return:.6f}) vs TWR annualized ({time_weighted_annualized:.6f}) differ"
+
+        # Direct annualized vs Metrics annualized
+        assert abs(direct_annualized - time_weighted_annualized) < tolerance, \
+            f"Direct annualized ({direct_annualized:.6f}) vs Metrics annualized ({time_weighted_annualized:.6f}) differ"
+
+        # Verify the actual return is approximately 20% (our test data growth)
+        expected_return = 0.20  # 20%
+        assert abs(total_return - expected_return) < 0.01, \
+            f"Expected ~20% return, got {total_return:.4f}"

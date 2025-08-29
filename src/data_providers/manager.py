@@ -10,6 +10,7 @@ from typing import Dict, List, Optional
 
 from ..portfolio.models import Currency, InstrumentType
 from .base import BaseDataProvider, InstrumentInfo, PriceData
+from .fx_cache import FXRateCache
 from .yahoo_finance import YahooFinanceProvider
 
 
@@ -32,6 +33,9 @@ class DataProviderManager:
         self._failed_isins_cache: Dict[str, float] = {}
         self._positive_cache_ttl = 3600  # 1 hour for successful lookups
         self._negative_cache_ttl = 86400  # 24 hours for failed lookups
+
+        # Initialize persistent FX rate cache
+        self.fx_cache = FXRateCache()
 
     def _setup_providers(self):
         """Set up available data providers."""
@@ -230,16 +234,27 @@ class DataProviderManager:
         to_currency: Currency,
         force_refresh: bool = False,
     ) -> Optional[Decimal]:
-        """Get exchange rate with caching."""
+        """Get exchange rate with persistent caching."""
         if from_currency == to_currency:
             return Decimal("1")
 
+        # Check persistent cache first (unless force refresh)
+        if not force_refresh:
+            # Try current rate from persistent cache
+            cached_rate = self.fx_cache.get_current_rate(from_currency, to_currency)
+            if cached_rate is not None:
+                logging.debug(f"Got exchange rate {from_currency}->{to_currency} from cache: {cached_rate}")
+                return cached_rate
+
+        # Check in-memory cache
         cache_key = f"{from_currency.value}_{to_currency.value}"
-
         if not force_refresh and cache_key in self._exchange_rate_cache:
-            return self._exchange_rate_cache[cache_key]
+            rate, cached_time = self._exchange_rate_cache[cache_key]
+            # Check if cache is still fresh (1 hour)
+            if time.time() - cached_time < self._positive_cache_ttl:
+                return rate
 
-        # Try providers in order of forex reliability
+        # Fetch from providers
         providers_by_fx_quality = []
         for provider in self.providers:
             if provider.name == "Alpha Vantage":
@@ -256,7 +271,11 @@ class DataProviderManager:
                     logging.debug(
                         f"Got exchange rate {from_currency}->{to_currency} from {provider.name}: {rate}"
                     )
-                    self._exchange_rate_cache[cache_key] = rate
+
+                    # Store in both in-memory and persistent cache
+                    self._exchange_rate_cache[cache_key] = (rate, time.time())
+                    self.fx_cache.store_rate(from_currency, to_currency, date.today(), rate)
+
                     return rate
             except Exception as e:
                 logging.warning(
@@ -272,13 +291,19 @@ class DataProviderManager:
     def get_historical_fx_rate_on(
         self, day: date, from_currency: Currency, to_currency: Currency
     ) -> Optional[Decimal]:
-        """Get historical FX close for a specific day using Yahoo symbol pairs.
+        """Get historical FX close for a specific day using persistent caching.
 
         Attempts direct pair {FROM}{TO}=X; if unavailable, tries inverse and inverts the rate.
         Looks up the exact date; if missing (holiday/weekend), looks ahead up to 3 days for the first available.
         """
         if from_currency == to_currency:
             return Decimal("1")
+
+        # Check persistent cache first
+        cached_rate = self.fx_cache.get_rate(from_currency, to_currency, day)
+        if cached_rate is not None:
+            logging.debug(f"Got historical FX rate {from_currency}->{to_currency} for {day} from cache: {cached_rate}")
+            return cached_rate
 
         pair = f"{from_currency.value}{to_currency.value}=X"
         inverse_pair = f"{to_currency.value}{from_currency.value}=X"
@@ -311,12 +336,16 @@ class DataProviderManager:
         # Exact date
         rate = _extract_close(pair, day, day)
         if rate is not None:
+            # Store in cache for future use
+            self.fx_cache.store_rate(from_currency, to_currency, day, rate)
             return rate
 
         # Try a short lookahead window
         lookahead_end = day + timedelta(days=3)
         rate = _extract_close(pair, day, lookahead_end)
         if rate is not None:
+            # Store in cache for future use
+            self.fx_cache.store_rate(from_currency, to_currency, day, rate)
             return rate
 
         # Try inverse pair and invert
@@ -325,7 +354,10 @@ class DataProviderManager:
             inv = _extract_close(inverse_pair, day, lookahead_end)
         if inv is not None and inv != 0:
             try:
-                return Decimal("1") / inv
+                inverted_rate = Decimal("1") / inv
+                # Store the original pair rate in cache
+                self.fx_cache.store_rate(from_currency, to_currency, day, inverted_rate)
+                return inverted_rate
             except Exception:
                 return None
 
@@ -780,7 +812,17 @@ class DataProviderManager:
         self._exchange_rate_cache.clear()
         self._failed_symbols_cache.clear()
         self._failed_isins_cache.clear()
+        self.fx_cache.clear_cache()
         logging.info("Data provider cache cleared")
+
+    def get_fx_cache_stats(self) -> Dict[str, int]:
+        """Get FX cache statistics."""
+        return self.fx_cache.get_cache_stats()
+
+    def cleanup_old_fx_rates(self, days_to_keep: int = 365):
+        """Remove old FX rates from cache."""
+        self.fx_cache.cleanup_old_rates(days_to_keep)
+        logging.info(f"Cleaned up FX rates older than {days_to_keep} days")
 
     def get_provider_status(self) -> Dict[str, bool]:
         """Get status of all providers."""

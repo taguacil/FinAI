@@ -118,6 +118,21 @@ class Position(BaseModel):
         None, description="When price was last updated"
     )
 
+    def get_effective_price(self, fallback_price: Optional[Decimal] = None) -> Optional[Decimal]:
+        """Get the effective price to use for calculations, with fallback support.
+
+        Args:
+            fallback_price: Price to use if current_price is None (e.g., from snapshots)
+
+        Returns:
+            current_price if available, otherwise fallback_price, otherwise None
+        """
+        if self.current_price is not None:
+            return self.current_price
+        if fallback_price is not None:
+            return fallback_price
+        return None
+
     @property
     def market_value(self) -> Optional[Decimal]:
         """Calculate current market value of the position."""
@@ -125,6 +140,15 @@ class Position(BaseModel):
             return Decimal("0")
         if self.current_price is not None:
             return self.quantity * self.current_price
+        return None
+
+    def get_market_value_with_fallback(self, fallback_price: Optional[Decimal] = None) -> Optional[Decimal]:
+        """Calculate market value using effective price with fallback."""
+        if self.quantity == 0:
+            return Decimal("0")
+        effective_price = self.get_effective_price(fallback_price)
+        if effective_price is not None:
+            return self.quantity * effective_price
         return None
 
     @property
@@ -142,8 +166,30 @@ class Position(BaseModel):
     @property
     def unrealized_pnl_percent(self) -> Optional[Decimal]:
         """Calculate unrealized profit/loss percentage."""
-        if self.current_price is not None and self.cost_basis != 0:
-            return (self.unrealized_pnl / self.cost_basis) * 100
+        if self.current_price is not None:
+            if self.cost_basis != 0:
+                return (self.unrealized_pnl / self.cost_basis) * 100
+            else:
+                # When cost basis is zero, return 0% (no cost, no percentage gain/loss)
+                return Decimal("0")
+        return None
+
+    def get_unrealized_pnl_with_fallback(self, fallback_price: Optional[Decimal] = None) -> Optional[Decimal]:
+        """Calculate unrealized P&L using effective price with fallback."""
+        market_value = self.get_market_value_with_fallback(fallback_price)
+        if market_value is not None:
+            return market_value - self.cost_basis
+        return None
+
+    def get_unrealized_pnl_percent_with_fallback(self, fallback_price: Optional[Decimal] = None) -> Optional[Decimal]:
+        """Calculate unrealized P&L percentage using effective price with fallback."""
+        unrealized_pnl = self.get_unrealized_pnl_with_fallback(fallback_price)
+        if unrealized_pnl is not None:
+            if self.cost_basis != 0:
+                return (unrealized_pnl / self.cost_basis) * 100
+            else:
+                # When cost basis is zero, return 0% (no cost, no percentage gain/loss)
+                return Decimal("0")
         return None
 
 

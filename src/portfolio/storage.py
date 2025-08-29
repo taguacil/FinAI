@@ -3,6 +3,7 @@ Portfolio storage system for persisting data to filesystem.
 """
 
 import json
+import logging
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -155,6 +156,61 @@ class FileBasedStorage:
         except Exception as e:
             raise RuntimeError(
                 f"Failed to save snapshot for portfolio {portfolio_id}: {e}"
+            ) from e
+
+    def save_snapshots_batch(self, portfolio_id: str, snapshots: List[PortfolioSnapshot]) -> None:
+        """Save multiple portfolio snapshots in a single file operation.
+
+        This is much more efficient than calling save_snapshot multiple times
+        as it only reads/writes the file once.
+        """
+        if not snapshots:
+            return
+
+        try:
+            if not portfolio_id.replace("-", "").replace("_", "").isalnum():
+                raise ValueError(f"Invalid portfolio ID: {portfolio_id}")
+
+            consolidated_path = self.snapshots_dir / f"{portfolio_id}.json"
+
+            snapshots_data = []
+            if consolidated_path.exists():
+                with open(consolidated_path, "r") as f:
+                    snapshots_data = json.load(
+                        f, object_hook=PortfolioDecoder.decimal_hook
+                    )
+
+                # Ensure snapshots_data is a list
+                if isinstance(snapshots_data, dict):
+                    # Migrate old single-snapshot structure if encountered
+                    snapshots_data = [snapshots_data]
+
+            # Create a set of dates we're updating for efficient filtering
+            new_snapshot_dates = {snapshot.date.isoformat() for snapshot in snapshots}
+
+            # Remove any existing snapshots for the dates we're updating
+            snapshots_data = [
+                s for s in snapshots_data if s.get("date") not in new_snapshot_dates
+            ]
+
+            # Add all new snapshots
+            for snapshot in snapshots:
+                new_item = snapshot.dict()
+                new_item["date"] = snapshot.date.isoformat()
+                snapshots_data.append(new_item)
+
+            # Sort by date once at the end
+            snapshots_data.sort(key=lambda s: s.get("date"))
+
+            # Write the file once
+            with open(consolidated_path, "w") as f:
+                json.dump(snapshots_data, f, cls=PortfolioEncoder, indent=2)
+
+            logging.info(f"Batch saved {len(snapshots)} snapshots for portfolio {portfolio_id}")
+
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to batch save snapshots for portfolio {portfolio_id}: {e}"
             ) from e
 
     def load_snapshots(

@@ -215,18 +215,15 @@ class PortfolioTrackerUI:
             # Quick actions
             st.sidebar.subheader("🔄 Data Management")
 
-            # Combined update: current prices + snapshots since last
+            # Quick current prices update (no snapshots)
             if st.sidebar.button(
-                "🔄 Update Portfolio (Prices + Snapshots)", type="primary"
+                "💰 Update Current Prices Only", help="Update current prices without creating snapshots"
             ):
-                with st.spinner("Updating prices and snapshots..."):
+                with st.spinner("Updating current prices..."):
                     price_results = portfolio_manager.update_current_prices()
                     success_count = sum(price_results.values())
                     total_count = len(price_results)
-                    snapshots = portfolio_manager.create_snapshots_since_last()
-                    st.sidebar.success(
-                        f"Prices: {success_count}/{total_count} updated | Snapshots created: {len(snapshots)}"
-                    )
+                    st.sidebar.success(f"✅ Updated prices: {success_count}/{total_count}")
                     st.rerun()
 
     def render_chat_interface(self, agent):
@@ -539,26 +536,37 @@ class PortfolioTrackerUI:
         # Enable FX conversion for accurate base-currency views
         fetch_live = True
 
-        # Check data freshness
-        positions_with_prices = [
-            pos for pos in positions if pos.get("current_price") is not None
+        # Check data freshness and fallback usage
+        positions_with_current_prices = [
+            pos for pos in positions if pos.get("has_current_price", False)
         ]
-        positions_without_prices = [
-            pos for pos in positions if pos.get("current_price") is None
+        positions_using_fallback = [
+            pos for pos in positions if pos.get("using_fallback", False)
+        ]
+        positions_without_any_price = [
+            pos for pos in positions
+            if not pos.get("has_current_price", False) and not pos.get("using_fallback", False)
         ]
 
-        # Show data freshness warning
-        if positions_without_prices:
-            st.warning(
-                f"⚠️ {len(positions_without_prices)} positions have no current prices. Use 'Update Current Prices' to fetch latest data."
+        # Show enhanced data freshness information
+        if positions_using_fallback:
+            fallback_symbols = [pos["symbol"] for pos in positions_using_fallback]
+            st.info(
+                f"📊 {len(positions_using_fallback)} positions using fallback prices from snapshots: {', '.join(fallback_symbols[:5])}"
+                + (f" and {len(fallback_symbols) - 5} more" if len(fallback_symbols) > 5 else "")
             )
 
-        if positions_with_prices:
+        if positions_without_any_price:
+            st.warning(
+                f"⚠️ {len(positions_without_any_price)} positions have no price data. Use 'Update Current Prices' to fetch latest data."
+            )
+
+        if positions_with_current_prices:
             # Find the most recent price update
             latest_update = max(
                 (
                     pos.get("last_updated")
-                    for pos in positions_with_prices
+                    for pos in positions_with_current_prices
                     if pos.get("last_updated")
                 ),
                 default=None,
@@ -573,21 +581,28 @@ class PortfolioTrackerUI:
         if latest_snapshot:
             st.info(f"🗓️ Latest snapshot: {latest_snapshot.date.isoformat()}")
 
-        # Add refresh snapshots button
-        col1, col2 = st.columns([1, 3])
+        # Add single update button with duration control
+        col1, col2, col3 = st.columns([1, 1, 2])
         with col1:
-            if st.button("🔄 Refresh Snapshots", help="Update snapshots with current market data"):
-                with st.spinner("Refreshing snapshots..."):
-                    try:
-                        # Refresh snapshots from portfolio creation to current date
-                        refreshed = portfolio_manager.refresh_snapshots_with_current_data()
-                        st.success(f"✅ Refreshed {len(refreshed)} snapshots with current data")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"❌ Failed to refresh snapshots: {str(e)}")
+            days_to_update = st.selectbox(
+                "Update Period",
+                [7, 14, 30, 60, 90, 180, 365],
+                index=2,  # Default to 30 days
+                help="Number of days back to update with fresh market data"
+            )
 
         with col2:
-            st.info("💡 Snapshots use transaction prices as fallbacks when current data is unavailable")
+            if st.button("📈 Update Market Data", help="Fetch fresh market data and update snapshots", type="primary"):
+                with st.spinner(f"Updating market data for last {days_to_update} days..."):
+                    try:
+                        refreshed = portfolio_manager.update_snapshots_with_market_data(days_to_update)
+                        st.success(f"✅ Updated {len(refreshed)} snapshots with fresh market data")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"❌ Failed to update market data: {str(e)}")
+
+        with col3:
+            st.info("💡 This fetches fresh prices and updates snapshots. Transactions automatically update snapshots with existing data.")
 
         # Key metrics
         col1, col2, col3, col4 = st.columns(4)
@@ -619,6 +634,7 @@ class PortfolioTrackerUI:
             total_pnl = sum(
                 float(pos.get("unrealized_pnl", 0) or 0) for pos in positions
             )
+            # Color-coded P&L metric - the delta parameter automatically colors positive green and negative red
             st.metric("Unrealized P&L", f"${total_pnl:,.2f}", delta=f"{total_pnl:,.2f}")
 
         # Additional metrics: YTD Performance (TWR) and Unrealized P&L (%)
@@ -1083,6 +1099,115 @@ class PortfolioTrackerUI:
             pass
         return Decimal(str(amount))
 
+    def _convert_snapshots_to_currency(
+        self, snapshots, target_currency_code: str, portfolio_manager
+    ):
+        """Convert portfolio snapshots to a different currency."""
+        if not snapshots:
+            return snapshots
+
+        from src.portfolio.models import Currency, PortfolioSnapshot
+
+        converted_snapshots = []
+
+        for snapshot in snapshots:
+            # Get the base currency of the snapshot
+            base_currency_code = (
+                snapshot.base_currency.value
+                if hasattr(snapshot.base_currency, "value")
+                else str(snapshot.base_currency)
+            )
+
+            # Skip conversion if currencies are the same
+            if base_currency_code == target_currency_code:
+                converted_snapshots.append(snapshot)
+                continue
+
+            # Get exchange rate for this date
+            try:
+                from_currency = Currency(base_currency_code)
+                to_currency = Currency(target_currency_code)
+
+                # Try to get historical rate for the snapshot date
+                rate = portfolio_manager.data_manager.get_historical_fx_rate_on(
+                    snapshot.date, from_currency, to_currency
+                )
+
+                # Fallback to current rate if historical rate not available
+                if not rate:
+                    rate = portfolio_manager.data_manager.get_exchange_rate(
+                        from_currency, to_currency
+                    )
+
+                # Default to 1.0 if no rate available
+                if not rate:
+                    rate = Decimal("1.0")
+
+                # Convert all monetary values
+                # Use model_copy to avoid Pydantic validation issues with existing Position objects
+                converted_snapshot = snapshot.model_copy(update={
+                    'total_value': snapshot.total_value * rate,
+                    'cash_balance': snapshot.cash_balance * rate,
+                    'positions_value': snapshot.positions_value * rate,
+                    'base_currency': Currency(target_currency_code),
+                    'cash_balances': {Currency(target_currency_code): snapshot.cash_balance * rate},
+                    'total_cost_basis': snapshot.total_cost_basis * rate,
+                    'total_unrealized_pnl': snapshot.total_unrealized_pnl * rate,
+                    # positions and total_unrealized_pnl_percent stay the same
+                })
+
+                converted_snapshots.append(converted_snapshot)
+
+            except Exception as e:
+                # If conversion fails, use original snapshot
+                st.warning(f"Failed to convert snapshot for {snapshot.date}: {e}")
+                converted_snapshots.append(snapshot)
+
+        return converted_snapshots
+
+    def _convert_cash_flows_to_currency(
+        self, cash_flows: dict, from_currency_code: str, target_currency_code: str, portfolio_manager
+    ):
+        """Convert cash flows from one currency to another."""
+        if from_currency_code == target_currency_code:
+            return cash_flows
+
+        if not cash_flows:
+            return cash_flows
+
+        from src.portfolio.models import Currency
+
+        converted_cash_flows = {}
+
+        for flow_date, flow_amount in cash_flows.items():
+            try:
+                from_currency = Currency(from_currency_code)
+                to_currency = Currency(target_currency_code)
+
+                # Get exchange rate for the cash flow date
+                rate = portfolio_manager.data_manager.get_historical_fx_rate_on(
+                    flow_date, from_currency, to_currency
+                )
+
+                # Fallback to current rate if historical rate not available
+                if not rate:
+                    rate = portfolio_manager.data_manager.get_exchange_rate(
+                        from_currency, to_currency
+                    )
+
+                # Default to 1.0 if no rate available
+                if not rate:
+                    rate = Decimal("1.0")
+
+                converted_cash_flows[flow_date] = flow_amount * float(rate)
+
+            except Exception as e:
+                # If conversion fails, use original amount
+                st.warning(f"Failed to convert cash flow for {flow_date}: {e}")
+                converted_cash_flows[flow_date] = flow_amount
+
+        return converted_cash_flows
+
     def _get_cash_fx_summary(self, portfolio_manager) -> Dict:
         """Safely get cash FX summary even if the manager instance is from an older cache.
 
@@ -1412,12 +1537,41 @@ class PortfolioTrackerUI:
             )
 
             if not portfolio_returns_twr:
-                st.error("Could not calculate time-weighted returns")
+                # Check if this is due to portfolio starting from zero
+                nonzero_snapshots = [s for s in snapshots if float(s.total_value) > 0]
+                if len(nonzero_snapshots) < 2:
+                    st.warning("⚠️ Cannot calculate time-weighted returns: Portfolio needs at least 2 snapshots with positive values.")
+                    st.info("💡 This typically happens when:")
+                    st.info("   • Portfolio is just starting (only recent snapshots have value)")
+                    st.info("   • Not enough historical data has been captured")
+                    st.info("   • Portfolio values are zero or negative")
+
+                    # Show snapshot values for context
+                    st.write("**Snapshot values:**")
+                    for i, snapshot in enumerate(snapshots[:5]):  # Show first 5 snapshots
+                        st.write(f"  {snapshot.date}: ${float(snapshot.total_value):,.2f}")
+                    if len(snapshots) > 5:
+                        st.write(f"  ... and {len(snapshots) - 5} more snapshots")
+                else:
+                    st.error(f"Could not calculate time-weighted returns for technical reasons.")
+                    st.error(f"Snapshots: {len(snapshots)}, Date range: {snapshots[0].date} to {snapshots[-1].date}")
+                    st.error(f"Cash flows: {len(cash_flows_float)} entries")
+
                 return
+
+            # Convert snapshots to display currency for accurate metrics
+            display_currency_snapshots = self._convert_snapshots_to_currency(
+                snapshots, display_currency_code, portfolio_manager
+            )
+
+            # Convert cash flows to display currency
+            display_currency_cash_flows = self._convert_cash_flows_to_currency(
+                cash_flows_float, snapshots[0].base_currency.value, display_currency_code, portfolio_manager
+            )
 
             # Calculate comprehensive metrics using the metrics calculator
             comprehensive_metrics = metrics_calculator.calculate_portfolio_metrics(
-                snapshots, benchmark, cash_flows_float
+                display_currency_snapshots, benchmark, display_currency_cash_flows
             )
 
             if "error" in comprehensive_metrics:
@@ -1462,160 +1616,183 @@ class PortfolioTrackerUI:
                 ),
             }
 
-        # Display key metrics with emphasis on time-weighted returns
-        st.subheader("📊 Performance Metrics (Time-Weighted)")
+        # Display unified metrics with descriptions
+        st.subheader("📊 Performance Summary")
 
+        # Core Performance Metrics
         col1, col2, col3, col4 = st.columns(4)
 
         with col1:
             st.metric(
-                "Total Return (TWR)", f"{metrics.get('total_return_twr', 0)*100:.2f}%"
+                "Total Return",
+                f"{metrics.get('total_return_twr', 0)*100:.2f}%"
             )
-            st.metric("Sharpe Ratio", f"{metrics.get('sharpe_ratio', 0):.3f}")
+            st.caption("📏 Total portfolio return for the selected period")
+
+            # YTD Performance
+            try:
+                ytd_start = date(date.today().year, 1, 1)
+                if end_date < ytd_start:
+                    ytd_start = end_date
+                ytd_snaps = portfolio_manager.storage.load_snapshots(
+                    portfolio_manager.current_portfolio.id, ytd_start, end_date
+                )
+
+                if len(ytd_snaps) >= 2:
+                    # Convert YTD snapshots to display currency for accurate YTD performance
+                    ytd_display_currency_snapshots = self._convert_snapshots_to_currency(
+                        ytd_snaps, display_currency_code, portfolio_manager
+                    )
+
+                    ytd_flows = portfolio_manager.get_external_cash_flows_by_day(
+                        ytd_start, end_date
+                    )
+                    ytd_flows_f = {d: float(v) for d, v in ytd_flows.items()}
+
+                    # Convert YTD cash flows to display currency
+                    ytd_display_currency_flows = self._convert_cash_flows_to_currency(
+                        ytd_flows_f, ytd_snaps[0].base_currency.value, display_currency_code, portfolio_manager
+                    )
+
+                    daily_returns = metrics_calculator.calculate_time_weighted_return(
+                        ytd_display_currency_snapshots, ytd_display_currency_flows
+                    )
+
+                    if daily_returns:
+                        twr = 1.0
+                        for r in daily_returns:
+                            twr *= 1.0 + r
+                        ytd_perf_pct = (twr - 1.0) * 100.0
+                        st.metric("YTD Performance", f"{ytd_perf_pct:.2f}%", delta=f"{ytd_perf_pct:.2f}%")
+                    else:
+                        st.metric("YTD Performance", "N/A")
+                else:
+                    st.metric("YTD Performance", "N/A")
+                st.caption("📅 Year-to-date performance")
+            except Exception:
+                st.metric("YTD Performance", "N/A")
+                st.caption("📅 Year-to-date performance")
 
         with col2:
             st.metric(
-                "Annualized Return (TWR)",
+                "Annualized Return",
                 f"{metrics.get('annualized_return_twr', 0)*100:.2f}%",
             )
+            st.caption("📈 Annual equivalent return rate")
+
             st.metric("Volatility", f"{metrics.get('volatility', 0)*100:.2f}%")
+            st.caption("📊 Standard deviation of returns (risk measure)")
 
         with col3:
             st.metric("Max Drawdown", f"{metrics.get('max_drawdown', 0)*100:.2f}%")
-            st.metric("Sortino Ratio", f"{metrics.get('sortino_ratio', 0):.3f}")
+            st.caption("📉 Largest peak-to-trough decline")
+
+            st.metric("Sharpe Ratio", f"{metrics.get('sharpe_ratio', 0):.3f}")
+            st.caption("⚖️ Risk-adjusted return (higher is better)")
 
         with col4:
-            if metrics.get("benchmark_available"):
-                st.metric("Beta", f"{metrics.get('beta', 0):.3f}")
-                st.metric("Alpha", f"{metrics.get('alpha', 0)*100:.2f}%")
-            else:
-                st.info("Benchmark data not available")
+            st.metric("Sortino Ratio", f"{metrics.get('sortino_ratio', 0):.3f}")
+            st.caption("📉 Downside risk-adjusted return")
 
-        # Additional return metrics for comparison
-        st.subheader("📈 Return Calculation Methods Comparison")
+            st.metric("Calmar Ratio", f"{metrics.get('calmar_ratio', 0):.3f}")
+            st.caption("📈 Return vs max drawdown ratio")
+
+        # Risk Metrics Section
+        st.subheader("⚠️ Risk Analysis")
         col1, col2, col3 = st.columns(3)
 
         with col1:
-            st.metric(
-                "Period Total Return (TWR)",
-                f"{metrics.get('total_return_twr', 0)*100:.2f}%",
-            )
-            st.caption("Total return for the selected period using geometric linking")
+            st.metric("Value at Risk (5%)", f"{metrics.get('var_5pct', 0)*100:.3f}%")
+            st.caption("📉 Maximum expected loss in 95% of cases")
 
         with col2:
-            st.metric(
-                "Period Annualized Return (TWR)",
-                f"{metrics.get('annualized_return_twr', 0)*100:.2f}%",
-            )
-            st.caption(
-                "Annualized return for the selected period using geometric linking"
-            )
+            st.metric("Conditional VaR (5%)", f"{metrics.get('cvar_5pct', 0)*100:.3f}%")
+            st.caption("💥 Average loss when VaR threshold is exceeded")
 
         with col3:
-            st.metric(
-                "Time-Weighted Annualized Return",
-                f"{metrics.get('time_weighted_annualized_return', 0)*100:.2f}%",
-            )
-            st.caption("Annualized return using dedicated TWR methodology")
-
-        # Additional time-weighted metrics
-        st.subheader("🔄 Time-Weighted Return Details")
-        col1, col2 = st.columns(2)
-
-        with col1:
             st.metric(
                 "Modified Dietz Return",
                 f"{metrics.get('modified_dietz_return', 0)*100:.2f}%",
             )
-            st.metric("Calmar Ratio", f"{metrics.get('calmar_ratio', 0):.3f}")
+            st.caption("🔄 Alternative return calculation method")
 
-        with col2:
-            st.metric("Value at Risk (5%)", f"{metrics.get('var_5pct', 0)*100:.3f}%")
-            st.metric("Conditional VaR (5%)", f"{metrics.get('cvar_5pct', 0)*100:.3f}%")
-
-        # Comparison between TWR and MWR methodologies
-        st.subheader("📊 Return Methodology Comparison")
-
-        # Calculate money-weighted returns for comparison
-        try:
-            portfolio_returns_mwr = metrics_calculator.calculate_money_weighted_return(
-                snapshots, cash_flows_float
-            )
-            mwr_annualized = (
-                metrics_calculator.calculate_annualized_money_weighted_return(
-                    snapshots, cash_flows_float
-                )
-            )
-
-            col1, col2, col3 = st.columns(3)
+        # Benchmark Comparison (if available)
+        if metrics.get("benchmark_available"):
+            st.subheader(f"📊 Benchmark Comparison ({benchmark})")
+            col1, col2, col3, col4 = st.columns(4)
 
             with col1:
-                st.metric(
-                    "Time-Weighted Return (TWR)",
-                    f"{metrics.get('annualized_return_twr', 0)*100:.2f}%",
-                )
-                st.caption(
-                    "Eliminates cash flow impact - measures pure investment performance"
-                )
+                st.metric("Beta", f"{metrics.get('beta', 0):.3f}")
+                st.caption("📈 Portfolio sensitivity to market movements")
 
             with col2:
-                st.metric("Money-Weighted Return (MWR)", f"{mwr_annualized*100:.2f}%")
-                st.caption(
-                    "Includes cash flow timing - shows investor's actual experience"
-                )
+                st.metric("Alpha", f"{metrics.get('alpha', 0)*100:.2f}%")
+                st.caption("✨ Excess return vs benchmark (skill-based)")
 
             with col3:
-                difference = metrics.get("annualized_return_twr", 0) - mwr_annualized
-                st.metric("TWR vs MWR Difference", f"{difference*100:.2f}%")
-                if abs(difference) > 0.01:  # 1% threshold
-                    if difference > 0:
-                        st.caption("TWR > MWR: Cash flows helped performance")
+                st.metric("Information Ratio", f"{metrics.get('information_ratio', 0):.3f}")
+                st.caption("🎯 Active return per unit of tracking error")
+
+            with col4:
+                st.metric("Benchmark Return", f"{metrics.get('benchmark_return', 0)*100:.2f}%")
+                st.caption(f"📊 {benchmark} return for comparison")
+        else:
+            st.info(f"💡 Benchmark data for {benchmark} is not available for comparison metrics")
+
+        # Time-Weighted vs Money-Weighted Return Comparison
+        with st.expander("🔍 Advanced: Return Methodology Comparison"):
+            st.markdown("**Understanding Different Return Calculation Methods**")
+
+            try:
+                                # Calculate MWR using IRR (Internal Rate of Return) for accurate money-weighted return
+                # IRR expects deposits as negative values (investor outflows)
+                irr_cash_flows = {d: -v for d, v in cash_flows_float.items()} if cash_flows_float else {}
+                irr_annual = metrics_calculator.calculate_internal_rate_of_return(
+                    snapshots, irr_cash_flows
+                )
+
+                # Convert annual IRR to period return for comparison with TWR
+                start_date_calc = snapshots[0].date
+                end_date_calc = snapshots[-1].date
+                days = (end_date_calc - start_date_calc).days
+                years = days / 365.25
+
+                if years > 0 and irr_annual != 0:
+                    # Convert annual IRR to period return: (1 + annual_irr)^years - 1
+                    mwr_period_pct = ((1 + irr_annual) ** years - 1) * 100.0
+                else:
+                    mwr_period_pct = 0.0
+
+                # Use the same TWR calculation as YTD (total return for period, not annualized)
+                twr_period_pct = metrics.get('total_return_twr', 0) * 100
+
+                col1, col2, col3 = st.columns(3)
+
+                with col1:
+                    st.metric(
+                        "Time-Weighted Return",
+                        f"{twr_period_pct:.2f}%",
+                    )
+                    st.caption("🎯 Pure investment performance (eliminates cash flow timing)")
+
+                with col2:
+                    st.metric("Money-Weighted Return", f"{mwr_period_pct:.2f}%")
+                    st.caption("👤 Your actual experience (includes cash flow timing)")
+
+                with col3:
+                    difference_pct = twr_period_pct - mwr_period_pct
+                    st.metric("Difference", f"{difference_pct:.2f}%")
+                    if abs(difference_pct) > 1.0:  # 1% threshold
+                        if difference_pct > 0:
+                            st.caption("✅ Good timing: Added money during gains")
+                        else:
+                            st.caption("⚠️ Poor timing: Added money during losses")
                     else:
-                        st.caption("TWR < MWR: Cash flows hurt performance")
-                else:
-                    st.caption("TWR ≈ MWR: Minimal cash flow impact")
+                        st.caption("➖ Minimal impact from cash flow timing")
 
-        except Exception as e:
-            st.warning(
-                f"Could not calculate money-weighted returns for comparison: {e}"
-            )
-            st.info(
-                "Time-weighted returns are shown above. Money-weighted returns require additional data processing."
-            )
-
-        # YTD Time-Weighted Performance
-        try:
-            ytd_start = date(date.today().year, 1, 1)
-            if end_date < ytd_start:
-                ytd_start = end_date  # guard
-            ytd_snaps = portfolio_manager.storage.load_snapshots(
-                portfolio_manager.current_portfolio.id, ytd_start, end_date
-            )
-
-            if len(ytd_snaps) >= 2:
-                ytd_flows = portfolio_manager.get_external_cash_flows_by_day(
-                    ytd_start, end_date
-                )
-                ytd_flows_f = {d: float(v) for d, v in ytd_flows.items()}
-
-                # Calculate YTD time-weighted return using the same method as Portfolio tab
-                daily_returns = metrics_calculator.calculate_time_weighted_return(
-                    ytd_snaps, ytd_flows_f
-                )
-
-                if daily_returns:
-                    # Geometric aggregation for period return (same as Portfolio tab)
-                    twr = 1.0
-                    for r in daily_returns:
-                        twr *= 1.0 + r
-                    ytd_perf_pct = (twr - 1.0) * 100.0
-                    st.metric("YTD Performance (TWR)", f"{ytd_perf_pct:.2f}%")
-                else:
-                    st.metric("YTD Performance (TWR)", "N/A")
-            else:
-                st.metric("YTD Performance (TWR)", "N/A")
-        except Exception:
-            st.metric("YTD Performance (TWR)", "N/A")
+            except Exception as e:
+                st.warning(f"Could not calculate money-weighted returns: {e}")
+                st.info("💡 Money-weighted returns require additional data processing.")
 
         # Prepare benchmark series (aligned to snapshot dates)
         bench_map: Dict[date, float] = {}
@@ -1640,7 +1817,7 @@ class PortfolioTrackerUI:
 
         # Portfolio value chart with category overlays and benchmark in selected currency
         self.plot_portfolio_and_categories(
-            snapshots,
+            display_currency_snapshots,  # Use converted snapshots for charts
             display_currency_code,
             portfolio_manager,
             start_date,
@@ -1650,32 +1827,38 @@ class PortfolioTrackerUI:
             portfolio_returns_twr=portfolio_returns_twr,  # Pass TWR returns for plotting
         )
 
-        # Risk metrics
-        st.subheader("⚠️ Risk Analysis")
-        col1, col2 = st.columns(2)
 
-        with col1:
-            st.metric("Value at Risk (5%)", f"{metrics.get('var_5pct', 0)*100:.3f}%")
-            st.metric("Conditional VaR (5%)", f"{metrics.get('cvar_5pct', 0)*100:.3f}%")
 
-        with col2:
-            st.metric("Calmar Ratio", f"{metrics.get('calmar_ratio', 0):.3f}")
-            if metrics.get("benchmark_available"):
-                st.metric(
-                    "Information Ratio", f"{metrics.get('information_ratio', 0):.3f}"
-                )
+        # Methodology explanation
+        with st.expander("💡 Understanding Your Metrics"):
+            st.markdown("""
+            **Performance Metrics Explained:**
 
-        # Add explanation of time-weighted methodology
-        st.info(
-            "💡 **Time-Weighted Returns (TWR)**: All performance metrics above use time-weighted returns, "
-            "which eliminate the impact of external cash flows (deposits/withdrawals) to measure pure investment performance. "
-            "This applies to both the overall portfolio and individual asset categories, providing consistent and "
-            "comparable performance measurement across all components."
-        )
+            📈 **Returns**: All returns use Time-Weighted Return (TWR) methodology, which eliminates the impact of cash flows to measure pure investment performance.
+
+            ⚖️ **Risk-Adjusted Ratios**:
+            - **Sharpe Ratio**: Measures excess return per unit of total risk (higher is better)
+            - **Sortino Ratio**: Like Sharpe but only considers downside risk (higher is better)
+            - **Calmar Ratio**: Annual return divided by maximum drawdown (higher is better)
+
+            📉 **Risk Metrics**:
+            - **Volatility**: Standard deviation of returns (lower means more stable)
+            - **Max Drawdown**: Largest peak-to-trough decline (lower is better)
+            - **VaR (5%)**: Expected maximum loss in 95% of cases
+            - **Conditional VaR**: Average loss when VaR threshold is exceeded
+
+            📊 **Benchmark Metrics** (when available):
+            - **Beta**: Portfolio's sensitivity to market movements (1.0 = same as market)
+            - **Alpha**: Excess return vs benchmark after adjusting for risk
+            - **Information Ratio**: Active return per unit of tracking error
+            """)
+
+        # Charts section header
+        st.subheader("📈 Visual Analysis")
 
         # Daily time-weighted returns chart
         if portfolio_returns_twr:
-            st.subheader("📈 Daily Time-Weighted Returns")
+            st.markdown("**Daily Returns Distribution**")
 
             # Convert returns to percentages for better readability
             daily_returns_pct = [r * 100 for r in portfolio_returns_twr]
@@ -2056,9 +2239,9 @@ class PortfolioTrackerUI:
             if st.button("Export Data"):
                 st.info("Export functionality would be implemented here")
 
-        st.subheader("📊 Snapshot Management")
+        st.subheader("📊 Data Management")
         st.info(
-            "Update portfolio snapshots with current market data and create historical snapshots."
+            "Market data updates are now handled in the main portfolio view. Use the '📈 Update Market Data' button there to refresh snapshots with current prices."
         )
 
         # Get current portfolio
@@ -2073,46 +2256,21 @@ class PortfolioTrackerUI:
 
             st.write(f"**Current Portfolio:** {portfolio_name}")
 
-            # Days to create snapshots for (support up to 1 year)
-            days_to_snapshot = st.slider(
-                "Days of historical snapshots to create", 30, 365, 365
-            )
+            # Show latest snapshot info
+            latest_snapshot = portfolio_manager.storage.get_latest_snapshot(portfolio_id)
+            if latest_snapshot:
+                st.write(f"**Latest Snapshot:** {latest_snapshot.date.isoformat()}")
+                st.write(f"**Snapshot Value:** ${latest_snapshot.total_value:,.2f}")
+            else:
+                st.warning("No snapshots found for this portfolio")
 
-            if st.button("🔄 Update Portfolio Snapshots", type="primary"):
+            # Keep a simple button for emergency data refresh but discourage its use
+            if st.button("🔄 Emergency Data Refresh", help="Only use if the main update button isn't working"):
                 with st.spinner("Updating snapshots..."):
                     try:
-                        from src.utils.initializer import PortfolioInitializer
-
-                        initializer = PortfolioInitializer()
-
-                        # Update snapshots
-                        result = initializer.update_portfolio_snapshots(
-                            portfolio_id, days_to_snapshot
-                        )
-
-                        if result.get("success"):
-                            st.success(f"✅ Successfully updated snapshots!")
-                            st.write(
-                                f"**Snapshots created:** {result['snapshots_created']}"
-                            )
-                            st.write(
-                                f"**Failed snapshots:** {result['failed_snapshots']}"
-                            )
-                            st.write(
-                                f"**Current portfolio value:** ${result['current_value']:,.2f}"
-                            )
-
-                            # Show price update results
-                            price_results = result.get("price_update_results", {})
-                            if price_results:
-                                st.write("**Price update results:**")
-                                for symbol, success in price_results.items():
-                                    status = "✅" if success else "❌"
-                                    st.write(f"  {status} {symbol}")
-                        else:
-                            st.error(
-                                f"❌ Failed to update snapshots: {result.get('error', 'Unknown error')}"
-                            )
+                        # Use the new unified method with 30 days default
+                        refreshed = portfolio_manager.update_snapshots_with_market_data(30)
+                        st.success(f"✅ Updated {len(refreshed)} snapshots with fresh market data")
 
                     except Exception as e:
                         st.error(f"❌ Error updating snapshots: {e}")
@@ -2165,6 +2323,44 @@ class PortfolioTrackerUI:
                     return "-"
                 return f"{float(val):+.2f}%"
 
+            def fmt_signed_colored(val):
+                """Format signed value (color applied via pandas styling)."""
+                if val is None:
+                    return "-"
+                num_val = float(val)
+                if num_val > 0:
+                    return f"+{num_val:,.2f}"
+                elif num_val < 0:
+                    return f"{num_val:,.2f}"
+                else:
+                    return f"{num_val:,.2f}"
+
+            def fmt_percent_colored(val):
+                """Format percentage (color applied via pandas styling)."""
+                if val is None:
+                    return "-"
+                num_val = float(val)
+                if num_val > 0:
+                    return f"+{num_val:.2f}%"
+                elif num_val < 0:
+                    return f"{num_val:.2f}%"
+                else:
+                    return f"{num_val:.2f}%"
+
+            def fmt_pnl_colored(pnl_val, pct_val, currency_code):
+                """Format P&L with both absolute and percentage values (color applied via pandas styling)."""
+                if pnl_val is None or pnl_val == 0:
+                    return "-"
+                pnl_num = float(pnl_val)
+                pct_num = float(pct_val) if pct_val is not None else 0
+
+                if pnl_num > 0:
+                    return f"+{pnl_num:,.2f} {currency_code} (+{pct_num:.2f}%)"
+                elif pnl_num < 0:
+                    return f"{pnl_num:,.2f} {currency_code} ({pct_num:.2f}%)"
+                else:
+                    return f"{pnl_num:,.2f} {currency_code} ({pct_num:.2f}%)"
+
             # Determine quantity display
             qty = pos.get("quantity")
             price = pos.get("current_price")
@@ -2183,19 +2379,25 @@ class PortfolioTrackerUI:
             else:
                 mv_display = f"{fmt_money(mv_base)} {base_currency_code}"
 
-            # P&L display
+            # P&L display with color coding
             pnl_base = pos.get("unrealized_pnl_base")
             pnl_pct = pos.get("unrealized_pnl_percent")
             if pnl_base is not None and pnl_base != 0:
-                pnl_display = f"{fmt_signed(pnl_base)} {base_currency_code} ({fmt_percent(pnl_pct)})"
+                pnl_display = fmt_pnl_colored(pnl_base, pnl_pct, base_currency_code)
             else:
                 pnl_display = "-"
 
-            # YTD performance
+            # YTD performance with color coding
             ytd_val = pos.get("ytd_market_pnl")
             ytd_pct = pos.get("ytd_market_pnl_percent")
             if ytd_val is not None and ytd_val != 0:
-                ytd_display = f"{fmt_signed(ytd_val)} ({fmt_percent(ytd_pct)})"
+                # Format YTD with color coding
+                if float(ytd_val) > 0:
+                    ytd_display = f"{float(ytd_val):,.2f} (+{float(ytd_pct):.2f}%)" if ytd_pct else f"{float(ytd_val):,.2f}"
+                elif float(ytd_val) < 0:
+                    ytd_display = f"{float(ytd_val):,.2f} ({float(ytd_pct):.2f}%)" if ytd_pct else f"{float(ytd_val):,.2f}"
+                else:
+                    ytd_display = f"{float(ytd_val):,.2f} ({float(ytd_pct):.2f}%)" if ytd_pct else f"{float(ytd_val):,.2f}"
             else:
                 ytd_display = "-"
 
@@ -2224,14 +2426,21 @@ class PortfolioTrackerUI:
                 for pos in category_items
             )
 
-            # Format summary row
+            # Format summary row with color coding for P&L
+            if total_pnl > 0:
+                pnl_summary = f"{total_pnl:,.2f} {base_currency_code}"
+            elif total_pnl < 0:
+                pnl_summary = f"{total_pnl:,.2f} {base_currency_code}"
+            else:
+                pnl_summary = f"{total_pnl:,.2f} {base_currency_code}"
+
             summary_row = {
-                "Symbol": "**TOTAL**",
+                "Symbol": "TOTAL",
                 "Name": "",
                 "ISIN": "",
                 "Qty/Price": "",
-                "Market Value": f"**{total_mv:,.2f} {base_currency_code}**",
-                "Unrealized P&L": f"**{total_pnl:+.2f} {base_currency_code}**",
+                "Market Value": f"{total_mv:,.2f} {base_currency_code}",
+                "Unrealized P&L": pnl_summary,
                 "YTD": "",
                 "Currency": "",
             }
@@ -2240,9 +2449,48 @@ class PortfolioTrackerUI:
             df_summary = pd.DataFrame([summary_row])
             df_final = pd.concat([df, df_summary], ignore_index=True)
 
-            # Display the table with custom styling
+            # Create styled dataframe using pandas styling for colors
+            def apply_pnl_color(val):
+                """Apply color styling to P&L values."""
+                if pd.isna(val) or val == "-":
+                    return ""
+
+                # Extract numeric value from formatted string
+                val_str = str(val)
+                if val_str.startswith("+") or ("+" in val_str and not val_str.startswith("-")):
+                    # Contains positive P&L
+                    return "color: green; font-weight: bold"
+                elif val_str.startswith("-"):
+                    # Contains negative P&L
+                    return "color: red; font-weight: bold"
+                return ""
+
+            def apply_ytd_color(val):
+                """Apply color styling to YTD values."""
+                if pd.isna(val) or val == "-":
+                    return ""
+
+                val_str = str(val)
+                if "+" in val_str:
+                    return "color: green; font-weight: bold"
+                elif val_str.startswith("-"):
+                    return "color: red; font-weight: bold"
+                return ""
+
+            # Apply styling to the dataframe
+            styled_df = df_final.style.map(
+                apply_pnl_color, subset=["Unrealized P&L"]
+            ).map(
+                apply_ytd_color, subset=["YTD"]
+            ).set_table_styles([
+                {'selector': 'th', 'props': [('font-weight', 'bold'), ('text-align', 'center')]},
+                {'selector': 'td', 'props': [('text-align', 'left'), ('padding', '8px')]},
+                {'selector': 'tr:last-child', 'props': [('font-weight', 'bold'), ('border-top', '2px solid #ccc')]}  # Style summary row
+            ])
+
+            # Display the styled table
             st.dataframe(
-                df_final,
+                styled_df,
                 use_container_width=True,
                 hide_index=True,
                 column_config={
@@ -2271,7 +2519,13 @@ class PortfolioTrackerUI:
             with col3:
                 if total_mv > 0:
                     pnl_percent = (total_pnl / total_mv) * 100
-                    st.metric("P&L %", f"{pnl_percent:+.2f}%")
+                    # Add color coding to the P&L percentage metric
+                    if pnl_percent > 0:
+                        st.metric("P&L %", f"+{pnl_percent:.2f}%", delta=f"+{pnl_percent:.2f}%")
+                    elif pnl_percent < 0:
+                        st.metric("P&L %", f"{pnl_percent:.2f}%", delta=f"{pnl_percent:.2f}%")
+                    else:
+                        st.metric("P&L %", f"{pnl_percent:.2f}%")
                 else:
                     st.metric("P&L %", "N/A")
         else:

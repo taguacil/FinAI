@@ -86,45 +86,44 @@ class AddTransactionTool(BaseTool):
     """Tool for adding transactions to the portfolio."""
 
     name: str = "add_transaction"
-    description: str = """Add a transaction to the portfolio. Supports:
-    - buy/sell stocks, bonds, ETFs: specify symbol, quantity, price, ISIN (optional), instrument_type (optional)
+    description: str = """Add a transaction to the portfolio. CRITICAL: Follow user specifications exactly!
+
+    PRIORITY RULES:
+    1. If user specifies instrument_type (bond, stock, etf, etc.), use that EXACTLY
+    2. If user specifies currency (EUR, USD, etc.), use that EXACTLY
+    3. If user specifies symbol, isin, or notes, use those EXACTLY
+    4. Only auto-detect when user doesn't specify
+
+    Supports:
+    - buy/sell stocks, bonds, ETFs: specify symbol, quantity, price, ISIN (optional), instrument_type (if specified by user)
     - deposit/withdraw cash: use 'CASH' as symbol (ISIN not required for cash)
     - dividends: specify symbol, amount, and optionally ISIN
     - fees: use 'fees' as transaction type with CASH symbol
 
     Instrument Type Handling:
-    - You can specify the instrument type (stock, etf, bond, crypto, etc.) to override automatic detection
-    - If not specified, the system automatically detects the type based on symbol patterns and ISIN prefixes
+    - ALWAYS use user-specified instrument_type if provided (bond, stock, etf, crypto, etc.)
+    - Only auto-detect type when user doesn't specify
     - Valid instrument types: stock, etf, bond, crypto, cash, mutual_fund, option, future
 
-    The system automatically handles symbol/ISIN/name mapping:
+    The system handles symbol/ISIN/name mapping while respecting user specifications:
     - If you provide a symbol (e.g., AAPL) + ISIN (e.g., US0378331005), it will find the company name
     - If you provide only an ISIN (e.g., US0378331005), it will find the symbol and company name
     - If you provide only a symbol (e.g., AAPL), it will find the company name (no ISIN search)
     - If you provide only a company name (e.g., Apple), it will automatically find the symbol and proceed
 
-    Examples:
-    - "I bought 50 shares of AAPL at $150" (type: stock, auto-detected)
-    - "I bought 50 shares of AAPL at $150 using ISIN US0378331005" (type: stock, auto-detected)
-    - "I bought 50 shares of Apple at $150" (company name automatically converted to AAPL, type: stock)
-    - "I sold 25 TSLA shares at $200 yesterday" (type: stock, auto-detected)
-    - "I sold 25 Tesla shares at $200 yesterday" (company name automatically converted to TSLA, type: stock)
-    - "I sold 25 TSLA shares at $200 yesterday using ISIN US88160R1014" (type: stock, auto-detected)
-    - "I bought 100 TLT bonds at $90.50" (type: bond, auto-detected)
-    - "I bought 100 TLT bonds at $90.50 using ISIN US4642876555" (type: bond, auto-detected)
-    - "I purchased 50 BIL treasury bills at $98.75" (type: bond, auto-detected)
-    - "I purchased 50 BIL treasury bills at $98.75 using ISIN US78464A7353" (type: bond, auto-detected)
-    - "I bought 100 SPY at $450" (type: etf, auto-detected)
-    - "I bought 5 BTC at $45000" (type: crypto, auto-detected)
-    - "I deposited $5000 cash" (type: cash, auto-detected)
-    - "I paid $5 in trading fees" (type: cash, auto-detected)
-    - "Buy 100 shares using ISIN US0378331005 at $150" (type: stock, auto-detected)
+    Examples with USER SPECIFICATIONS (follow exactly):
+    - "I bought 50 AAPL bonds in EUR at 95%" → instrument_type="bond", currency="EUR" (user said "bonds"!)
+    - "Buy 100 TLT as equity at $90" → instrument_type="stock" (user said "equity"!)
+    - "Purchase 1000 EUR bonds with ISIN XS2472298335" → instrument_type="bond", currency="EUR"
+    - "Add 50 Microsoft stock in USD" → instrument_type="stock", currency="USD"
+    - "Buy 25 Tesla bonds at 98.5%" → instrument_type="bond" (user said "bonds"!)
 
-    Examples with explicit instrument type specification:
-    - "Buy 100 XYZ as a stock at $25" (type: stock, explicitly specified)
-    - "Buy 50 ABC as an etf at $75" (type: etf, explicitly specified)
-    - "Buy 1000 DEF as a bond at 98.5" (type: bond, explicitly specified)
-    - "Buy 10 GHI as crypto at $5000" (type: crypto, explicitly specified)
+    Examples with AUTO-DETECTION (when user doesn't specify):
+    - "I bought 50 shares of AAPL at $150" (auto-detect: type=stock)
+    - "I bought 100 TLT at $90.50" (auto-detect: type=bond based on TLT pattern)
+    - "I bought 100 SPY at $450" (auto-detect: type=etf)
+    - "I bought 5 BTC at $45000" (auto-detect: type=crypto)
+    - "Buy 100 using ISIN XS2472298335 at 98.5%" (auto-detect: type=bond based on XS prefix)
     """
     args_schema: type[BaseModel] = AddTransactionInput
     portfolio_manager: PortfolioManager | None = None

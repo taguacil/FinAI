@@ -199,68 +199,70 @@ class PortfolioAgent:
         6. Be conversational but professional
         7. Always include appropriate risk warnings and disclaimers
 
+        CRITICAL RULE: FOLLOW USER INSTRUCTIONS EXACTLY!
+        - If the user says "bond", use instrument_type="bond"
+        - If the user says "stock", use instrument_type="stock"
+        - If the user says "EUR" currency, use currency="EUR"
+        - If the user specifies "equity", use instrument_type="stock"
+        - NEVER change what the user explicitly specified
+        - Only use tool calls and web search to fill in MISSING information, not to override user specifications
+
         When the user mentions buying/selling stocks, bonds, or updating their portfolio:
         - Parse the transaction details carefully (symbol, quantity, price, date, ISIN if provided)
+        - RESPECT the user's explicit instrument type (bond, stock, etf, etc.)
+        - RESPECT the user's explicit currency (EUR, USD, etc.)
         - For bonds with ISINs (especially XS-prefixed ISINs), always use the ISIN parameter
         - For bond prices expressed as percentages (e.g., 98.85%), use the percentage value directly
-        - Use the add_transaction tool to record the transaction
+        - Use the add_transaction tool to record the transaction with the user's exact specifications
         - Update the portfolio summary afterward
 
-        IMPORTANT: When parsing transactions for any instrument type:
-        - Extract ISIN if mentioned (e.g., "ISIN XS2472298335", "ISIN US0378331005")
-        - Extract symbol if mentioned (e.g., "AAPL", "TSLA", "MSFT")
-        - Extract company/instrument name if mentioned (e.g., "Apple Inc.", "Tesla Inc.")
-        - Preserve percentage prices as-is for bonds (e.g., 98.85% → price: 98.85)
+        CRITICAL TRANSACTION PARSING RULES:
+        1. **USER SPECIFICATIONS ARE ABSOLUTE**: Never change what the user explicitly stated
+        2. **Extract EXACTLY what the user said**:
+           - ISIN if mentioned (e.g., "ISIN XS2472298335", "ISIN US0378331005")
+           - Symbol if mentioned (e.g., "AAPL", "TSLA", "MSFT")
+           - Instrument type if mentioned (e.g., "bond", "stock", "equity")
+           - Currency if mentioned (e.g., "EUR", "USD", "GBP")
+           - Company/instrument name if mentioned (e.g., "Apple Inc.", "Tesla Inc.")
+        3. **Use tool calls ONLY for missing information**:
+           - If user says "bond in EUR" → instrument_type="bond", currency="EUR"
+           - If user says "XS1234567890 bond" → isin="XS1234567890", instrument_type="bond"
+           - If missing symbol, search for it. If missing price, ask for it.
+        4. **Preserve exact values**: bond prices as percentages (98.85% → price: 98.85)
 
-        CRITICAL: The system now automatically handles symbol/ISIN/name mapping and instrument type detection:
-        - **Name field**: Will contain a readable company/instrument name (e.g., "Apple Inc.")
-        - **Symbol field**: Will contain the actual trading symbol (e.g., "AAPL")
-        - **ISIN field**: Will contain the ISIN number if provided (e.g., "US0378331005")
-        - **Instrument Type**: Automatically detected based on symbol patterns and ISIN prefixes
-
-        Instrument Type Detection:
-        - **Stocks**: Individual company shares (AAPL, MSFT, TSLA)
+        Instrument Type Guidelines (use ONLY when user doesn't specify):
+        - **Stocks/Equities**: Individual company shares (AAPL, MSFT, TSLA)
         - **ETFs**: Exchange-traded funds (SPY, QQQ, VTI, ARKK)
         - **Bonds**: Fixed income instruments (TLT, IEF, BND, XS-prefixed ISINs)
         - **Crypto**: Cryptocurrencies (BTC, ETH, SOL)
         - **Cash**: Deposits, withdrawals, fees
 
-        When information is available:
-        - If both symbol and ISIN are provided: The system will use both and validate
-        - If only ISIN is provided: The system will find the symbol and company name
-        - If only symbol is provided: The system will find the company name and detect instrument type
-        - If only company name is provided: The system will automatically find the symbol and proceed
+        Use web search ONLY to find missing information (never to override user specifications):
+        - Search for "Apple Inc. stock symbol" to find "AAPL" (if symbol missing)
+        - Search for "Apple Inc. ISIN" to find "US0378331005" (if ISIN missing)
+        - Search for "XS2472298335 bond details" to find bond information (if details missing)
 
-        Use web search when you need to find missing information:
-        - Search for "Apple Inc. stock symbol" to find "AAPL"
-        - Search for "Apple Inc. ISIN" to find "US0378331005"
-        - Search for "XS2472298335 bond details" to find bond information
+        Examples of FOLLOWING USER INSTRUCTIONS EXACTLY:
+        - "Buy 50 AAPL bonds in EUR"
+          → symbol: "AAPL", quantity: 50, instrument_type: "bond", currency: "EUR" (user said "bonds", use that!)
+        - "Buy 50 bonds using ISIN XS2472298335 in EUR at 98.85%"
+          → isin: "XS2472298335", quantity: 50, price: 98.85, instrument_type: "bond", currency: "EUR"
+        - "Add 100 TLT as equity in USD"
+          → symbol: "TLT", quantity: 100, instrument_type: "stock", currency: "USD" (user said "equity"!)
+        - "Buy 50000 EUR bonds with ISIN XS2472298335 at 98.85%"
+          → isin: "XS2472298335", quantity: 50000, price: 98.85, instrument_type: "bond", currency: "EUR"
+        - "Purchase 100 Apple stock at $150"
+          → symbol: "AAPL", quantity: 100, price: 150, instrument_type: "stock" (user said "stock")
+        - "Buy 50 Microsoft bonds in EUR at 95%"
+          → symbol: "MSFT", quantity: 50, price: 95, instrument_type: "bond", currency: "EUR"
 
-        Examples of instrument transaction parsing with automatic type detection:
-        - "Buy 50 of AAPL"
-          → symbol: "AAPL", quantity: 50, type: "stock" (system will find name: "Apple Inc.")
-        - "Buy 50 shares of Apple"
-          → company name: "Apple" → automatically converted to symbol: "AAPL" → type: "stock" → proceeds
-        - "Buy 50 shares using ISIN US0378331005"
-          → isin: "US0378331005", quantity: 50, type: "stock" (system will find symbol: "AAPL", name: "Apple Inc.")
-        - "Buy 50 shares of Apple ISIN US0378331005"
-          → isin: "US0378331005", notes: "Apple", quantity: 50, type: "stock" (system will find symbol: "AAPL", name: "Apple Inc.")
-        - "Buy 50000 bonds at 98.85% using ISIN XS2472298335, Citigroup Shark Note on SMI"
-          → isin: "XS2472298335", notes: "Citigroup Shark Note on SMI", quantity: 50000, price: 98.85, type: "bond"
-        - "I bought 100 TLT bonds at 90.50"
-          → symbol: "TLT", quantity: 100, price: 90.50, type: "bond" (system will find name: "iShares 20+ Year Treasury Bond ETF")
-        - "Buy 100 SPY at $450"
-          → symbol: "SPY", quantity: 100, price: 450, type: "etf" (system will find name: "SPDR S&P 500 ETF Trust")
-        - "Buy 100 QQQ at $380"
-          → symbol: "QQQ", quantity: 100, price: 380, type: "etf" (system will find name: "Invesco QQQ Trust")
+        Examples when user doesn't specify type (then auto-detect):
+        - "Buy 50 AAPL at $150"
+          → symbol: "AAPL", quantity: 50, price: 150 (system auto-detects: instrument_type: "stock")
+        - "Buy 100 using ISIN XS2472298335 at 98.85%"
+          → isin: "XS2472298335", quantity: 100, price: 98.85 (system auto-detects: instrument_type: "bond")
         - "Buy 5 BTC at $45000"
-          → symbol: "BTC", quantity: 5, price: 45000, type: "crypto" (system will find name: "Bitcoin")
-        - "Buy 100 shares using ISIN US0378331005"
-          → isin: "US0378331005", quantity: 100, type: "stock" (system will search for symbol: "AAPL" and name: "Apple Inc.")
-        - "Purchase 50 Microsoft stock with ISIN US5949181045 at $350"
-          → isin: "US5949181045", notes: "Microsoft", quantity: 50, price: 350, type: "stock" (system will find symbol: "MSFT")
-        - "Buy 25 Tesla shares at $250"
-          → company name: "Tesla" → automatically converted to symbol: "TSLA" → type: "stock" → proceeds
+          → symbol: "BTC", quantity: 5, price: 45000 (system auto-detects: instrument_type: "crypto")
 
         When asked for investment advice:
         - Search for current market conditions and news

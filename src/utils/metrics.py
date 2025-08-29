@@ -68,6 +68,7 @@ class FinancialMetricsCalculator:
             List of daily time-weighted returns
         """
         if len(snapshots) < 2:
+            logging.warning(f"Insufficient snapshots for TWR calculation: {len(snapshots)}")
             return []
 
         returns = []
@@ -87,6 +88,30 @@ class FinancialMetricsCalculator:
             if prev_value > 0:
                 daily_return = (curr_value - prev_value - external_cf) / prev_value
                 returns.append(daily_return)
+            elif prev_value == 0 and curr_value > 0:
+                # Portfolio started from zero value - this represents the start of the investment
+                # We can't calculate a percentage return from zero, so we skip this period
+                # but don't log it as an error since it's a normal case
+                logging.info(f"Portfolio started from zero on {snapshots[i].date}, skipping TWR for this period")
+                continue
+            else:
+                # Negative portfolio value - this is unusual and should be investigated
+                logging.warning(f"Unusual portfolio value for TWR calculation on {snapshots[i].date}: prev_value={prev_value}, curr_value={curr_value}")
+                continue
+
+        if not returns and len(snapshots) >= 2:
+            # If we have enough snapshots but no returns, check if this is a portfolio starting from zero
+            first_nonzero_idx = None
+            for i, snapshot in enumerate(snapshots):
+                if float(snapshot.total_value) > 0:
+                    first_nonzero_idx = i
+                    break
+
+            if first_nonzero_idx is not None and first_nonzero_idx == len(snapshots) - 1:
+                # Only the last snapshot has value - can't calculate returns yet
+                logging.info("Portfolio only has value in the most recent snapshot - insufficient data for TWR calculation")
+            else:
+                logging.warning(f"No valid TWR calculations possible despite having {len(snapshots)} snapshots")
 
         return returns
 
@@ -175,6 +200,11 @@ class FinancialMetricsCalculator:
 
         if years <= 0:
             return 0.0
+
+        # For periods very close to 1 year, return the total return to avoid
+        # artificial differences due to leap year calculations
+        if abs(years - 1.0) < 0.01:  # Within ~3.6 days of exactly 1 year
+            return float(total_return)
 
         # Annualize using the formula: (1 + total_return)^(1/years) - 1
         annualized_return = (1 + total_return) ** (1 / years) - 1
@@ -529,6 +559,11 @@ class FinancialMetricsCalculator:
 
         if years <= 0:
             return 0.0
+
+        # For periods very close to 1 year, return the total return to avoid
+        # artificial differences due to leap year calculations
+        if abs(years - 1.0) < 0.01:  # Within ~3.6 days of exactly 1 year
+            return float(total_return)
 
         # Annualize using the formula: (1 + total_return)^(1/years) - 1
         annualized_return = (1 + total_return) ** (1 / years) - 1
