@@ -498,6 +498,478 @@ class SimulateWhatIfTool(BaseTool):
             return f"❌ Error running simulation: {str(e)}"
 
 
+class AdvancedWhatIfTool(BaseTool):
+    """Advanced what-if tool for specific portfolio modifications and Monte Carlo scenarios."""
+
+    name: str = "advanced_what_if"
+    description: str = (
+        "Run advanced what-if analysis with specific portfolio modifications, position adjustments, "
+        "or hypothetical additions. Supports Monte Carlo simulations with custom market assumptions."
+    )
+    portfolio_manager: PortfolioManager | None = None
+
+    def __init__(self, portfolio_manager: PortfolioManager):
+        super().__init__()
+        self.portfolio_manager = portfolio_manager
+
+    def _run(
+        self,
+        scenario_type: str = "custom",
+        projection_years: float = 2.0,
+        monte_carlo_runs: int = 1000,
+        modify_positions: str = "",
+        add_positions: str = "",
+        market_return: float = 0.08,
+        market_volatility: float = 0.20,
+        recurring_deposits: float = 0.0,
+        stress_test: bool = False,
+    ) -> str:
+        """Run advanced what-if analysis with portfolio modifications.
+
+        Args:
+            scenario_type: Type of scenario (optimistic, likely, pessimistic, stress, custom)
+            projection_years: Years to project (1-10)
+            monte_carlo_runs: Number of simulations (100-5000)
+            modify_positions: JSON-like string of position modifications, e.g.,
+                            "AAPL:+50%,MSFT:-25%,GOOGL:=150" (increase by 50%, decrease by 25%, set to 150 shares)
+            add_positions: JSON-like string of new positions to add, e.g.,
+                         "NVDA:100@$800,TSLA:50@$250" (100 shares at $800, 50 shares at $250)
+            market_return: Expected annual market return (as decimal, e.g., 0.08 for 8%)
+            market_volatility: Market volatility (as decimal, e.g., 0.20 for 20%)
+            recurring_deposits: Monthly recurring deposits in USD
+            stress_test: Whether to apply stress testing conditions
+        """
+        try:
+            from src.portfolio.scenarios import (
+                PortfolioScenarioEngine, ScenarioConfiguration, ScenarioType,
+                MarketAssumptions, AssetClassAssumptions
+            )
+            from src.portfolio.models import PortfolioSnapshot, Position, FinancialInstrument, InstrumentType, Currency
+            from datetime import date
+            import copy
+
+            if not self.portfolio_manager.current_portfolio:
+                return "❌ No portfolio loaded."
+
+            # Validate parameters
+            projection_years = max(0.5, min(10.0, projection_years))
+            monte_carlo_runs = max(100, min(5000, monte_carlo_runs))
+            market_return = max(-0.5, min(1.0, market_return))
+            market_volatility = max(0.01, min(2.0, market_volatility))
+
+            # Create current portfolio snapshot
+            current_snapshot = self.portfolio_manager.create_snapshot(save=False)
+
+            # Apply portfolio modifications
+            modified_snapshot = self._apply_portfolio_modifications(
+                current_snapshot, modify_positions, add_positions
+            )
+
+            # Create scenario configuration
+            scenario_config = self._create_scenario_config(
+                scenario_type, projection_years, monte_carlo_runs,
+                market_return, market_volatility, recurring_deposits, stress_test
+            )
+
+            # Run simulation
+            engine = PortfolioScenarioEngine(random_seed=42)
+            result = engine.run_scenario_simulation(modified_snapshot, scenario_config)
+
+            # Format results
+            return self._format_advanced_results(
+                result, current_snapshot, modified_snapshot,
+                modify_positions, add_positions
+            )
+
+        except Exception as e:
+            return f"❌ Error running advanced what-if analysis: {str(e)}"
+
+    def _apply_portfolio_modifications(self, snapshot, modify_positions, add_positions):
+        """Apply position modifications and additions to the portfolio snapshot."""
+        from src.portfolio.models import Position, FinancialInstrument, InstrumentType, Currency
+        from decimal import Decimal
+        import copy
+
+        # Create a copy of the snapshot to modify
+        modified_snapshot = copy.deepcopy(snapshot)
+
+        # Parse and apply position modifications
+        if modify_positions:
+            modifications = self._parse_position_modifications(modify_positions)
+            for symbol, change in modifications.items():
+                if symbol in modified_snapshot.positions:
+                    position = modified_snapshot.positions[symbol]
+                    if change['type'] == 'percent':
+                        # Percentage change
+                        multiplier = 1.0 + change['value'] / 100.0
+                        position.quantity = position.quantity * Decimal(str(multiplier))
+                    elif change['type'] == 'absolute':
+                        # Absolute quantity
+                        position.quantity = Decimal(str(change['value']))
+                    elif change['type'] == 'delta':
+                        # Add/subtract shares
+                        position.quantity = position.quantity + Decimal(str(change['value']))
+
+                    # Ensure quantity doesn't go negative
+                    position.quantity = max(Decimal("0"), position.quantity)
+
+        # Parse and apply new positions
+        if add_positions:
+            new_positions = self._parse_new_positions(add_positions)
+            for symbol, position_data in new_positions.items():
+                if symbol not in modified_snapshot.positions:
+                    # Create new position
+                    instrument = FinancialInstrument(
+                        symbol=symbol,
+                        name=f"{symbol} Corporation",
+                        instrument_type=InstrumentType.STOCK,  # Default to stock
+                        currency=Currency.USD,
+                        isin=f"US{symbol}123456"  # Placeholder ISIN
+                    )
+
+                    new_position = Position(
+                        instrument=instrument,
+                        quantity=Decimal(str(position_data['quantity'])),
+                        average_cost=Decimal(str(position_data['price'])),
+                        current_price=Decimal(str(position_data['price'])),
+                        last_updated=snapshot.date
+                    )
+
+                    modified_snapshot.positions[symbol] = new_position
+
+        # Recalculate snapshot totals
+        self._recalculate_snapshot_totals(modified_snapshot)
+
+        return modified_snapshot
+
+    def _parse_position_modifications(self, modify_string):
+        """Parse position modification string like 'AAPL:+50%,MSFT:-25%,GOOGL:=150'."""
+        modifications = {}
+        if not modify_string:
+            return modifications
+
+        for item in modify_string.split(','):
+            if ':' not in item:
+                continue
+
+            symbol, change_str = item.strip().split(':', 1)
+            symbol = symbol.strip().upper()
+            change_str = change_str.strip()
+
+            if change_str.endswith('%'):
+                # Percentage change
+                value = float(change_str[:-1])
+                modifications[symbol] = {'type': 'percent', 'value': value}
+            elif change_str.startswith('='):
+                # Absolute value
+                value = float(change_str[1:])
+                modifications[symbol] = {'type': 'absolute', 'value': value}
+            elif change_str.startswith('+') or change_str.startswith('-'):
+                # Delta change
+                value = float(change_str)
+                modifications[symbol] = {'type': 'delta', 'value': value}
+            else:
+                # Default to absolute
+                value = float(change_str)
+                modifications[symbol] = {'type': 'absolute', 'value': value}
+
+        return modifications
+
+    def _parse_new_positions(self, add_string):
+        """Parse new position string like 'NVDA:100@$800,TSLA:50@$250'."""
+        new_positions = {}
+        if not add_string:
+            return new_positions
+
+        for item in add_string.split(','):
+            if ':' not in item or '@' not in item:
+                continue
+
+            symbol, details = item.strip().split(':', 1)
+            symbol = symbol.strip().upper()
+
+            if '@' in details:
+                quantity_str, price_str = details.split('@', 1)
+                quantity = float(quantity_str.strip())
+                price = float(price_str.strip().replace('$', ''))
+
+                new_positions[symbol] = {
+                    'quantity': quantity,
+                    'price': price
+                }
+
+        return new_positions
+
+    def _recalculate_snapshot_totals(self, snapshot):
+        """Recalculate snapshot totals after position modifications."""
+        from decimal import Decimal
+
+        total_positions_value = Decimal("0")
+        total_cost_basis = Decimal("0")
+        total_unrealized_pnl = Decimal("0")
+
+        for position in snapshot.positions.values():
+            if position.quantity > 0:
+                position_value = position.quantity * position.current_price
+                position_cost = position.quantity * position.average_cost
+
+                total_positions_value += position_value
+                total_cost_basis += position_cost
+                total_unrealized_pnl += (position_value - position_cost)
+
+        snapshot.positions_value = total_positions_value
+        snapshot.total_cost_basis = total_cost_basis
+        snapshot.total_unrealized_pnl = total_unrealized_pnl
+        snapshot.total_value = snapshot.cash_balance + total_positions_value
+
+        if total_cost_basis > 0:
+            snapshot.total_unrealized_pnl_percent = (total_unrealized_pnl / total_cost_basis) * Decimal("100")
+        else:
+            snapshot.total_unrealized_pnl_percent = Decimal("0")
+
+    def _create_scenario_config(self, scenario_type, projection_years, monte_carlo_runs,
+                              market_return, market_volatility, recurring_deposits, stress_test):
+        """Create a scenario configuration based on parameters."""
+        from src.portfolio.scenarios import ScenarioConfiguration, ScenarioType, MarketAssumptions, AssetClassAssumptions
+        from src.portfolio.models import InstrumentType
+
+        # Map scenario type
+        scenario_type_map = {
+            "optimistic": ScenarioType.OPTIMISTIC,
+            "likely": ScenarioType.LIKELY,
+            "pessimistic": ScenarioType.PESSIMISTIC,
+            "stress": ScenarioType.STRESS,
+            "custom": ScenarioType.CUSTOM
+        }
+
+        mapped_scenario_type = scenario_type_map.get(scenario_type.lower(), ScenarioType.CUSTOM)
+
+        # Adjust parameters for stress test
+        if stress_test or mapped_scenario_type == ScenarioType.STRESS:
+            market_return = min(market_return, -0.02)  # At least -2% return
+            market_volatility = max(market_volatility, 0.35)  # At least 35% volatility
+
+        # Create market assumptions
+        market_assumptions = MarketAssumptions(
+            expected_return=market_return,
+            volatility=market_volatility,
+            equity_correlation=0.7 if not stress_test else 0.9,
+            bond_correlation=0.3 if not stress_test else 0.5,
+            equity_bond_correlation=-0.1 if not stress_test else 0.2,
+            inflation_rate=0.025,
+            risk_free_rate=0.02
+        )
+
+        # Create asset class assumptions
+        asset_assumptions = {
+            "STOCK": AssetClassAssumptions(
+                asset_class=InstrumentType.STOCK,
+                expected_return=market_return + 0.02,
+                volatility=market_volatility + 0.05,
+                dividend_yield=0.02
+            ),
+            "ETF": AssetClassAssumptions(
+                asset_class=InstrumentType.ETF,
+                expected_return=market_return,
+                volatility=market_volatility,
+                expense_ratio=0.007
+            ),
+            "BOND": AssetClassAssumptions(
+                asset_class=InstrumentType.BOND,
+                expected_return=max(0.01, market_return - 0.03),
+                volatility=market_volatility * 0.3,
+                dividend_yield=0.035
+            )
+        }
+
+        return ScenarioConfiguration(
+            scenario_type=mapped_scenario_type,
+            name=f"Custom {scenario_type.title()} Scenario",
+            description=f"Custom scenario with {market_return*100:.1f}% return and {market_volatility*100:.1f}% volatility",
+            projection_years=projection_years,
+            monte_carlo_runs=monte_carlo_runs,
+            market_assumptions=market_assumptions,
+            asset_class_assumptions=asset_assumptions,
+            recurring_deposits=recurring_deposits
+        )
+
+    def _format_advanced_results(self, result, original_snapshot, modified_snapshot,
+                                modify_positions, add_positions):
+        """Format the advanced what-if results for display."""
+        stats = result.get_summary_stats()
+
+        # Calculate changes from original
+        original_value = float(original_snapshot.total_value)
+        modified_start_value = float(modified_snapshot.total_value)
+        mean_final_value = stats['mean_final_value']
+
+        # Calculate portfolio modification impact
+        modification_impact = modified_start_value - original_value
+
+        # Build result string
+        lines = [
+            f"🔮 Advanced What-If Analysis",
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            f"",
+            f"📊 Portfolio Modifications Applied:",
+        ]
+
+        if modify_positions:
+            lines.append(f"   🔧 Position Changes: {modify_positions}")
+        if add_positions:
+            lines.append(f"   ➕ New Positions: {add_positions}")
+        if modification_impact != 0:
+            lines.append(f"   📈 Immediate Impact: {modification_impact:+,.2f} ({modification_impact/original_value*100:+.1f}%)")
+
+        lines.extend([
+            f"",
+            f"🎯 Scenario: {result.scenario_config.name}",
+            f"   • Projection Period: {result.scenario_config.projection_years:.1f} years",
+            f"   • Monte Carlo Runs: {result.scenario_config.monte_carlo_runs:,}",
+            f"   • Market Return: {result.scenario_config.market_assumptions.expected_return*100:.1f}%",
+            f"   • Market Volatility: {result.scenario_config.market_assumptions.volatility*100:.1f}%",
+            f"",
+            f"📈 Projection Results:",
+            f"   • Starting Value: ${modified_start_value:,.2f}",
+            f"   • Mean Final Value: ${mean_final_value:,.2f}",
+            f"   • Median Final Value: ${stats['median_final_value']:,.2f}",
+            f"   • Best Case (95%): ${stats.get('percentile_95', mean_final_value):,.2f}",
+            f"   • Worst Case (5%): ${stats.get('percentile_25', mean_final_value):,.2f}",
+            f"",
+            f"⚡ Performance Metrics:",
+            f"   • Mean Annual Return: {stats['mean_annualized_return']*100:.1f}%",
+            f"   • Probability of Loss: {stats['probability_of_loss']*100:.1f}%",
+            f"   • Probability of Doubling: {stats['probability_of_doubling']*100:.1f}%",
+            f"   • Mean Sharpe Ratio: {stats['mean_sharpe_ratio']:.2f}",
+            f"",
+            f"⚠️ Risk Analysis:",
+            f"   • Mean Max Drawdown: {stats['mean_max_drawdown']*100:.1f}%",
+            f"   • Standard Deviation: ${stats['std_final_value']:,.2f}",
+            f"   • Value at Risk (95%): ${stats.get('var_95', 0):,.2f}",
+            f"",
+            f"💡 Key Insights:",
+            f"   • Total Return Potential: {(mean_final_value/modified_start_value - 1)*100:+.1f}%",
+            f"   • Annualized Growth: {((mean_final_value/modified_start_value)**(1/result.scenario_config.projection_years) - 1)*100:.1f}%",
+            f"   • Risk-Adjusted Score: {stats['mean_sharpe_ratio']:.2f} (higher is better)",
+        ])
+
+        if stats['probability_of_loss'] > 0.3:
+            lines.append(f"   ⚠️ High Risk: {stats['probability_of_loss']*100:.0f}% chance of loss - consider risk management")
+        elif stats['probability_of_doubling'] > 0.2:
+            lines.append(f"   🚀 High Growth Potential: {stats['probability_of_doubling']*100:.0f}% chance of doubling")
+
+        return "\n".join(lines)
+
+
+class HypotheticalPositionTool(BaseTool):
+    """Tool for testing hypothetical positions without modifying the actual portfolio."""
+
+    name: str = "test_hypothetical_position"
+    description: str = (
+        "Test adding a hypothetical position to your portfolio and see how it would perform "
+        "under different market scenarios. Useful for exploring new investment opportunities."
+    )
+    portfolio_manager: PortfolioManager | None = None
+
+    def __init__(self, portfolio_manager: PortfolioManager):
+        super().__init__()
+        self.portfolio_manager = portfolio_manager
+
+    def _run(
+        self,
+        symbol: str,
+        quantity: float,
+        purchase_price: float,
+        investment_amount: str = "",
+        scenario: str = "likely",
+        time_horizon: float = 1.0,
+    ) -> str:
+        """Test a hypothetical position in the portfolio.
+
+        Args:
+            symbol: Stock symbol to test (e.g., "AAPL", "MSFT")
+            quantity: Number of shares to hypothetically purchase (use 0 if using investment_amount)
+            purchase_price: Price per share for the hypothetical purchase
+            investment_amount: Alternative to quantity - dollar amount to invest (e.g., "$5000")
+            scenario: Market scenario to test (optimistic, likely, pessimistic, stress)
+            time_horizon: Years to project the investment (0.5 to 5.0)
+        """
+        try:
+            if not self.portfolio_manager.current_portfolio:
+                return "❌ No portfolio loaded."
+
+            # Parse investment amount if provided
+            if investment_amount:
+                amount_str = investment_amount.replace('$', '').replace(',', '')
+                try:
+                    amount = float(amount_str)
+                    quantity = amount / purchase_price
+                except ValueError:
+                    return f"❌ Invalid investment amount: {investment_amount}"
+
+            if quantity <= 0:
+                return "❌ Quantity must be positive"
+
+            # Validate parameters
+            time_horizon = max(0.5, min(5.0, time_horizon))
+            symbol = symbol.upper().strip()
+
+            # Get current portfolio value for context
+            current_snapshot = self.portfolio_manager.create_snapshot(save=False)
+            current_value = float(current_snapshot.total_value)
+            investment_value = quantity * purchase_price
+
+            # Create scenario for the hypothetical position
+            add_position_str = f"{symbol}:{quantity}@${purchase_price}"
+
+            # Use the advanced what-if tool
+            advanced_tool = AdvancedWhatIfTool(self.portfolio_manager)
+
+            # Map scenario to market parameters
+            scenario_params = {
+                "optimistic": {"market_return": 0.12, "market_volatility": 0.16},
+                "likely": {"market_return": 0.08, "market_volatility": 0.20},
+                "pessimistic": {"market_return": 0.03, "market_volatility": 0.28},
+                "stress": {"market_return": -0.05, "market_volatility": 0.40}
+            }
+
+            params = scenario_params.get(scenario.lower(), scenario_params["likely"])
+
+            # Run the analysis
+            result = advanced_tool._run(
+                scenario_type=scenario,
+                projection_years=time_horizon,
+                monte_carlo_runs=1000,
+                add_positions=add_position_str,
+                market_return=params["market_return"],
+                market_volatility=params["market_volatility"]
+            )
+
+            # Add hypothetical-specific formatting
+            investment_pct = (investment_value / current_value) * 100
+
+            header = [
+                f"🧪 Hypothetical Position Analysis",
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+                f"",
+                f"💼 Hypothetical Investment:",
+                f"   • Symbol: {symbol}",
+                f"   • Quantity: {quantity:,.0f} shares",
+                f"   • Purchase Price: ${purchase_price:,.2f}",
+                f"   • Total Investment: ${investment_value:,.2f} ({investment_pct:.1f}% of portfolio)",
+                f"   • Scenario: {scenario.title()}",
+                f"   • Time Horizon: {time_horizon:.1f} years",
+                f"",
+                f"📊 Impact on Portfolio:",
+                ""
+            ]
+
+            return "\n".join(header) + result.split("📊 Portfolio Modifications Applied:")[1] if "📊 Portfolio Modifications Applied:" in result else result
+
+        except Exception as e:
+            return f"❌ Error testing hypothetical position: {str(e)}"
+
+
 class SearchInstrumentTool(BaseTool):
     """Tool for searching financial instruments."""
 
@@ -782,6 +1254,8 @@ def create_portfolio_tools(
         GetPortfolioSummaryTool(portfolio_manager, metrics_calculator),
         GetTransactionsTool(portfolio_manager),
         SimulateWhatIfTool(portfolio_manager),
+        AdvancedWhatIfTool(portfolio_manager),
+        HypotheticalPositionTool(portfolio_manager),
         IngestPdfTool(),
         CalculatorTool(),
         SearchInstrumentTool(data_manager),

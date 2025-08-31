@@ -99,8 +99,8 @@ class PortfolioTrackerUI:
         self.render_sidebar(portfolio_manager)
 
         # Main content tabs
-        tab1, tab2, tab3, tab4 = st.tabs(
-            ["💬 AI Chat", "📊 Portfolio", "📈 Analytics", "⚙️ Settings"]
+        tab1, tab2, tab3, tab4, tab5 = st.tabs(
+            ["💬 AI Chat", "📊 Portfolio", "📈 Analytics", "🔮 Scenarios", "⚙️ Settings"]
         )
 
         with tab1:
@@ -113,6 +113,9 @@ class PortfolioTrackerUI:
             self.render_analytics(portfolio_manager, metrics_calculator)
 
         with tab4:
+            self.render_scenarios(portfolio_manager, metrics_calculator)
+
+        with tab5:
             self.render_settings()
 
     def init_session_state(self):
@@ -2214,6 +2217,635 @@ class PortfolioTrackerUI:
         )
         fig2.update_xaxes(range=[start_date, end_date])
         st.plotly_chart(fig2, use_container_width=True)
+
+    def render_scenarios(self, portfolio_manager, metrics_calculator):
+        """Render portfolio scenarios and what-if analysis."""
+        st.header("🔮 Portfolio Scenarios")
+
+        if not st.session_state.portfolio_loaded:
+            st.warning("Please load a portfolio to run scenario analysis.")
+            return
+
+        if not portfolio_manager.current_portfolio:
+            st.warning("No portfolio currently loaded. Please load or create a portfolio first.")
+            return
+
+        # Import here to avoid circular imports
+        from src.portfolio.scenarios import PortfolioScenarioEngine, ScenarioType
+
+        st.markdown("""
+        Explore how your portfolio might perform under different market conditions.
+        Our Monte Carlo simulations project potential outcomes based on various economic scenarios.
+        """)
+
+        # Initialize scenario engine
+        if "scenario_engine" not in st.session_state:
+            st.session_state.scenario_engine = PortfolioScenarioEngine(random_seed=42)
+
+        engine = st.session_state.scenario_engine
+
+        # Get current portfolio snapshot
+        try:
+            current_portfolio = portfolio_manager.create_snapshot(save=False)
+        except Exception as e:
+            st.error(f"Could not create current portfolio snapshot: {e}")
+            return
+
+        # Configuration sidebar
+        with st.sidebar:
+            st.header("🔧 Scenario Settings")
+
+            # Time horizon
+            projection_years = st.slider("Projection Period (Years)", 1.0, 10.0, 5.0, 0.5)
+
+            # Simulation parameters
+            monte_carlo_runs = st.selectbox(
+                "Monte Carlo Runs",
+                [500, 1000, 2500, 5000],
+                index=1,
+                help="More runs = more accurate but slower"
+            )
+
+            confidence_levels = st.multiselect(
+                "Confidence Intervals (%)",
+                [5, 10, 25, 50, 75, 90, 95],
+                default=[5, 25, 50, 75, 95],
+                help="Percentiles to show in charts"
+            )
+
+            # Cash flow assumptions
+            st.subheader("💰 Cash Flows")
+            recurring_deposits = st.number_input(
+                "Monthly Deposits ($)",
+                min_value=0.0,
+                value=0.0,
+                step=100.0,
+                help="Regular monthly contributions"
+            )
+            recurring_withdrawals = st.number_input(
+                "Monthly Withdrawals ($)",
+                min_value=0.0,
+                value=0.0,
+                step=100.0,
+                help="Regular monthly withdrawals"
+            )
+
+        # Convert confidence levels to decimals
+        confidence_intervals = [c / 100.0 for c in confidence_levels]
+
+        # Scenario selection
+        st.subheader("📋 Select Scenarios to Compare")
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            run_optimistic = st.checkbox("🟢 **Optimistic** - Bull Market Growth", value=True)
+            run_likely = st.checkbox("🟡 **Likely** - Historical Average", value=True)
+
+        with col2:
+            run_pessimistic = st.checkbox("🟠 **Pessimistic** - Economic Downturn", value=True)
+            run_stress = st.checkbox("🔴 **Stress** - Market Crash", value=False)
+
+        # Run simulations button
+        if st.button("🚀 Run Scenario Analysis", type="primary"):
+
+            # Get predefined scenarios
+            scenarios = engine.create_predefined_scenarios(current_portfolio.total_value)
+
+            # Filter selected scenarios
+            selected_scenarios = {}
+            if run_optimistic:
+                selected_scenarios["optimistic"] = scenarios["optimistic"]
+            if run_likely:
+                selected_scenarios["likely"] = scenarios["likely"]
+            if run_pessimistic:
+                selected_scenarios["pessimistic"] = scenarios["pessimistic"]
+            if run_stress:
+                selected_scenarios["stress"] = scenarios["stress"]
+
+            if not selected_scenarios:
+                st.error("Please select at least one scenario to run.")
+                return
+
+            # Update scenario configurations with user settings
+            for scenario_config in selected_scenarios.values():
+                scenario_config.projection_years = projection_years
+                scenario_config.monte_carlo_runs = monte_carlo_runs
+                scenario_config.confidence_intervals = confidence_intervals
+                scenario_config.recurring_deposits = recurring_deposits
+                scenario_config.recurring_withdrawals = recurring_withdrawals
+
+            # Run simulations with progress bar
+            simulation_results = {}
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+
+            for i, (name, config) in enumerate(selected_scenarios.items()):
+                status_text.text(f"Running {config.name} scenario...")
+                progress_bar.progress((i + 1) / len(selected_scenarios))
+
+                try:
+                    result = engine.run_scenario_simulation(current_portfolio, config)
+                    simulation_results[name] = result
+                except Exception as e:
+                    st.error(f"Error running {name} scenario: {e}")
+                    continue
+
+            progress_bar.empty()
+            status_text.empty()
+
+            if not simulation_results:
+                st.error("No scenarios completed successfully.")
+                return
+
+            # Store results in session state
+            st.session_state.simulation_results = simulation_results
+            st.success(f"✅ Completed {len(simulation_results)} scenario(s)")
+
+        # Display results if available
+        if "simulation_results" in st.session_state and st.session_state.simulation_results:
+            self._render_scenario_results(st.session_state.simulation_results, current_portfolio)
+
+        # Add advanced what-if capabilities section
+        st.markdown("---")
+        self._render_advanced_what_if_section(portfolio_manager, current_portfolio)
+
+    def _render_scenario_results(self, simulation_results, current_portfolio):
+        """Render the results of scenario simulations."""
+        st.header("📊 Scenario Analysis Results")
+
+        # Summary comparison table
+        st.subheader("📋 Scenario Comparison")
+
+        from src.portfolio.scenarios import PortfolioScenarioEngine
+        engine = PortfolioScenarioEngine()
+        comparison = engine.compare_scenarios(simulation_results)
+
+        # Create comparison DataFrame
+        comparison_data = []
+        for scenario_name, stats in comparison.items():
+            scenario_result = simulation_results[scenario_name]
+            comparison_data.append({
+                "Scenario": scenario_result.scenario_config.name,
+                "Type": scenario_result.scenario_config.scenario_type.value.title(),
+                "Final Value (Mean)": f"${stats['mean_final_value']:,.0f}",
+                "Final Value (Median)": f"${stats['median_final_value']:,.0f}",
+                "Annualized Return": f"{stats['mean_annualized_return']*100:.1f}%",
+                "Probability of Loss": f"{stats['probability_of_loss']*100:.1f}%",
+                "Max Drawdown": f"{stats['mean_max_drawdown']*100:.1f}%",
+                "Sharpe Ratio": f"{stats['mean_sharpe_ratio']:.2f}"
+            })
+
+        comparison_df = pd.DataFrame(comparison_data)
+        st.dataframe(comparison_df, use_container_width=True)
+
+        # Portfolio value projections chart
+        st.subheader("📈 Portfolio Value Projections")
+
+        # Create chart data
+        fig = go.Figure()
+
+        # Color mapping for scenarios
+        scenario_colors = {
+            "optimistic": "#00ff00",
+            "likely": "#ffff00",
+            "pessimistic": "#ff8000",
+            "stress": "#ff0000"
+        }
+
+        for scenario_name, result in simulation_results.items():
+            color = scenario_colors.get(scenario_name, "#666666")
+
+            # Add mean trajectory
+            fig.add_trace(go.Scatter(
+                x=result.dates,
+                y=result.mean_trajectory,
+                mode='lines',
+                name=f"{result.scenario_config.name} (Mean)",
+                line=dict(color=color, width=3)
+            ))
+
+            # Add confidence bands
+            if 0.25 in result.percentiles and 0.75 in result.percentiles:
+                fig.add_trace(go.Scatter(
+                    x=result.dates + result.dates[::-1],
+                    y=result.percentiles[0.75] + result.percentiles[0.25][::-1],
+                    fill='tonexty',
+                    fillcolor=f'rgba{tuple(list(int(color[i:i+2], 16) for i in (1, 3, 5)) + [0.2])}',
+                    line=dict(color='rgba(255,255,255,0)'),
+                    name=f"{result.scenario_config.name} (25%-75%)",
+                    showlegend=False
+                ))
+
+            # Add extreme confidence bands
+            if 0.05 in result.percentiles and 0.95 in result.percentiles:
+                fig.add_trace(go.Scatter(
+                    x=result.dates + result.dates[::-1],
+                    y=result.percentiles[0.95] + result.percentiles[0.05][::-1],
+                    fill='tonexty',
+                    fillcolor=f'rgba{tuple(list(int(color[i:i+2], 16) for i in (1, 3, 5)) + [0.1])}',
+                    line=dict(color='rgba(255,255,255,0)'),
+                    name=f"{result.scenario_config.name} (5%-95%)",
+                    showlegend=False
+                ))
+
+        # Add starting value line
+        fig.add_hline(
+            y=float(current_portfolio.total_value),
+            line_dash="dash",
+            line_color="gray",
+            annotation_text="Current Value"
+        )
+
+        fig.update_layout(
+            title="Portfolio Value Projections",
+            xaxis_title="Date",
+            yaxis_title="Portfolio Value ($)",
+            hovermode='x unified',
+            height=500
+        )
+
+        st.plotly_chart(fig, use_container_width=True)
+
+        # Final value distributions
+        st.subheader("📊 Final Value Distributions")
+
+        fig_hist = go.Figure()
+
+        for scenario_name, result in simulation_results.items():
+            color = scenario_colors.get(scenario_name, "#666666")
+
+            fig_hist.add_trace(go.Histogram(
+                x=result.final_values,
+                name=result.scenario_config.name,
+                opacity=0.7,
+                nbinsx=50,
+                marker_color=color
+            ))
+
+        fig_hist.update_layout(
+            title="Distribution of Final Portfolio Values",
+            xaxis_title="Final Portfolio Value ($)",
+            yaxis_title="Frequency",
+            barmode='overlay',
+            height=400
+        )
+
+        st.plotly_chart(fig_hist, use_container_width=True)
+
+        # Risk metrics
+        st.subheader("⚠️ Risk Analysis")
+
+        # Create risk metrics for each scenario
+        for scenario_name, result in simulation_results.items():
+            with st.expander(f"📋 {result.scenario_config.name} - Detailed Metrics"):
+
+                col1, col2, col3 = st.columns(3)
+
+                with col1:
+                    st.metric("Mean Final Value", f"${result.get_summary_stats()['mean_final_value']:,.0f}")
+                    st.metric("Probability of Loss", f"{result.probability_of_loss*100:.1f}%")
+                    st.metric("Probability of Doubling", f"{result.probability_of_doubling*100:.1f}%")
+
+                with col2:
+                    st.metric("Mean Annual Return", f"{result.get_summary_stats()['mean_annualized_return']*100:.1f}%")
+                    st.metric("Mean Sharpe Ratio", f"{result.get_summary_stats()['mean_sharpe_ratio']:.2f}")
+                    st.metric("Mean Max Drawdown", f"{result.get_summary_stats()['mean_max_drawdown']*100:.1f}%")
+
+                with col3:
+                    st.metric("Best Case (95%)", f"${result.percentiles[0.95][-1]:,.0f}" if 0.95 in result.percentiles else "N/A")
+                    st.metric("Worst Case (5%)", f"${result.percentiles[0.05][-1]:,.0f}" if 0.05 in result.percentiles else "N/A")
+                    st.metric("Standard Deviation", f"${result.get_summary_stats()['std_final_value']:,.0f}")
+
+                # Show scenario assumptions
+                st.markdown("**Market Assumptions:**")
+                assumptions = result.scenario_config.market_assumptions
+                st.write(f"• Expected Return: {assumptions.expected_return*100:.1f}%")
+                st.write(f"• Volatility: {assumptions.volatility*100:.1f}%")
+                st.write(f"• Inflation Rate: {assumptions.inflation_rate*100:.1f}%")
+
+        # Key insights
+        st.subheader("💡 Key Insights")
+
+        # Find best and worst performing scenarios
+        mean_final_values = {name: result.get_summary_stats()['mean_final_value'] for name, result in simulation_results.items()}
+        best_scenario = max(mean_final_values.keys(), key=lambda k: mean_final_values[k])
+        worst_scenario = min(mean_final_values.keys(), key=lambda k: mean_final_values[k])
+
+        st.markdown(f"""
+        **Scenario Comparison:**
+        - 🏆 **Best Performing**: {simulation_results[best_scenario].scenario_config.name} with mean final value of ${mean_final_values[best_scenario]:,.0f}
+        - 📉 **Worst Performing**: {simulation_results[worst_scenario].scenario_config.name} with mean final value of ${mean_final_values[worst_scenario]:,.0f}
+        - 📊 **Spread**: ${mean_final_values[best_scenario] - mean_final_values[worst_scenario]:,.0f} difference between best and worst scenarios
+
+        **Risk Considerations:**
+        - Higher expected returns typically come with higher volatility
+        - Diversification across asset classes can help reduce overall portfolio risk
+        - Regular contributions can help smooth out market volatility through dollar-cost averaging
+        """)
+
+    def _render_advanced_what_if_section(self, portfolio_manager, current_portfolio):
+        """Render the advanced what-if analysis section."""
+        st.header("🔧 Advanced What-If Analysis")
+
+        st.markdown("""
+        Go beyond predefined scenarios with **precise portfolio modifications** and **custom market assumptions**.
+        Perfect for testing specific investment ideas or allocation changes.
+        """)
+
+        # Import here to avoid circular imports
+        from src.agents.tools import AdvancedWhatIfTool, HypotheticalPositionTool
+
+        # Create tabs for different types of analysis
+        tab1, tab2 = st.tabs(["🔧 Portfolio Modifications", "🧪 Hypothetical Positions"])
+
+        with tab1:
+            self._render_portfolio_modifications_tab(portfolio_manager, current_portfolio)
+
+        with tab2:
+            self._render_hypothetical_positions_tab(portfolio_manager, current_portfolio)
+
+    def _render_portfolio_modifications_tab(self, portfolio_manager, current_portfolio):
+        """Render the portfolio modifications tab."""
+        st.subheader("🔧 Portfolio Modifications")
+        st.markdown("Modify your existing positions and add new ones to see how your portfolio would perform.")
+
+        # Portfolio modification inputs
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.markdown("**📊 Modify Existing Positions**")
+            modify_help = """
+            Format: SYMBOL:CHANGE
+
+            Examples:
+            • AAPL:+50% (increase by 50%)
+            • MSFT:-25% (decrease by 25%)
+            • GOOGL:=150 (set to exactly 150 shares)
+            • TSLA:+100 (add 100 shares)
+            • AMZN:-50 (remove 50 shares)
+
+            Multiple: AAPL:+50%,MSFT:-25%,GOOGL:=150
+            """
+            modify_positions = st.text_area(
+                "Position Modifications",
+                placeholder="e.g., AAPL:+50%,MSFT:-25%",
+                help=modify_help
+            )
+
+        with col2:
+            st.markdown("**➕ Add New Positions**")
+            add_help = """
+            Format: SYMBOL:QUANTITY@PRICE
+
+            Examples:
+            • NVDA:100@$800 (100 shares at $800)
+            • TSLA:50@$250 (50 shares at $250)
+
+            Multiple: NVDA:100@$800,TSLA:50@$250
+            """
+            add_positions = st.text_area(
+                "New Positions",
+                placeholder="e.g., NVDA:100@$800,TSLA:50@$250",
+                help=add_help
+            )
+
+        # Market assumptions
+        st.markdown("**📈 Market Assumptions**")
+        col1, col2, col3 = st.columns(3)
+
+        with col1:
+            market_return = st.slider(
+                "Expected Annual Return (%)",
+                min_value=-20.0, max_value=30.0, value=8.0, step=0.5,
+                help="Expected market return per year"
+            ) / 100.0
+
+            projection_years = st.slider(
+                "Projection Period (Years)",
+                min_value=0.5, max_value=10.0, value=2.0, step=0.5
+            )
+
+        with col2:
+            market_volatility = st.slider(
+                "Market Volatility (%)",
+                min_value=5.0, max_value=80.0, value=20.0, step=1.0,
+                help="Annual volatility/risk level"
+            ) / 100.0
+
+            monte_carlo_runs = st.selectbox(
+                "Simulation Runs",
+                [500, 1000, 2500, 5000],
+                index=1,
+                help="More runs = more accurate but slower"
+            )
+
+        with col3:
+            recurring_deposits = st.number_input(
+                "Monthly Deposits ($)",
+                min_value=0.0, value=0.0, step=100.0,
+                help="Regular monthly contributions"
+            )
+
+            stress_test = st.checkbox(
+                "Apply Stress Test Conditions",
+                help="Force negative returns and high volatility"
+            )
+
+        # Run analysis button
+        if st.button("🚀 Run Advanced What-If Analysis", type="primary", key="advanced_whatif"):
+            if not modify_positions and not add_positions:
+                st.error("Please specify position modifications or new positions to add.")
+                return
+
+            try:
+                # Import and run the advanced tool
+                from src.agents.tools import AdvancedWhatIfTool
+
+                tool = AdvancedWhatIfTool(portfolio_manager)
+
+                with st.spinner("Running advanced Monte Carlo simulation..."):
+                    result = tool._run(
+                        scenario_type="custom",
+                        projection_years=projection_years,
+                        monte_carlo_runs=monte_carlo_runs,
+                        modify_positions=modify_positions,
+                        add_positions=add_positions,
+                        market_return=market_return,
+                        market_volatility=market_volatility,
+                        recurring_deposits=recurring_deposits,
+                        stress_test=stress_test
+                    )
+
+                # Display results
+                if "Error" in result:
+                    st.error(result)
+                else:
+                    st.success("✅ Analysis complete!")
+
+                    # Format and display the result
+                    st.markdown("### 📊 Analysis Results")
+
+                    # Split result into sections for better formatting
+                    sections = result.split("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                    if len(sections) > 1:
+                        # Display the formatted result
+                        for section in sections[1:]:  # Skip the title
+                            lines = section.strip().split('\n')
+                            for line in lines:
+                                if line.startswith('📊') or line.startswith('🎯') or line.startswith('📈') or line.startswith('⚡') or line.startswith('⚠️') or line.startswith('💡'):
+                                    st.markdown(f"**{line}**")
+                                elif line.startswith('   •'):
+                                    st.markdown(line)
+                                elif line.strip():
+                                    st.markdown(line)
+                    else:
+                        st.code(result)
+
+            except Exception as e:
+                st.error(f"Error running analysis: {e}")
+
+    def _render_hypothetical_positions_tab(self, portfolio_manager, current_portfolio):
+        """Render the hypothetical positions tab."""
+        st.subheader("🧪 Hypothetical Position Testing")
+        st.markdown("Test adding a single new investment to see how it would impact your portfolio.")
+
+        # Input controls
+        col1, col2 = st.columns(2)
+
+        with col1:
+            symbol = st.text_input(
+                "Stock Symbol",
+                placeholder="e.g., NVDA, TSLA, AMZN",
+                help="Enter the stock symbol you want to test"
+            ).upper()
+
+            investment_type = st.radio(
+                "Investment Method",
+                ["Dollar Amount", "Share Quantity"],
+                help="Choose how to specify the investment size"
+            )
+
+            if investment_type == "Dollar Amount":
+                investment_amount = st.number_input(
+                    "Investment Amount ($)",
+                    min_value=100.0, value=5000.0, step=100.0
+                )
+                purchase_price = st.number_input(
+                    "Expected Purchase Price ($)",
+                    min_value=0.01, value=100.0, step=0.01,
+                    help="Price per share you expect to pay"
+                )
+                quantity = investment_amount / purchase_price if purchase_price > 0 else 0
+                st.info(f"This equals approximately {quantity:.1f} shares")
+            else:
+                quantity = st.number_input(
+                    "Number of Shares",
+                    min_value=1.0, value=100.0, step=1.0
+                )
+                purchase_price = st.number_input(
+                    "Purchase Price per Share ($)",
+                    min_value=0.01, value=100.0, step=0.01
+                )
+                investment_amount = quantity * purchase_price
+                st.info(f"Total investment: ${investment_amount:,.2f}")
+
+        with col2:
+            scenario = st.selectbox(
+                "Market Scenario",
+                ["optimistic", "likely", "pessimistic", "stress"],
+                index=1,
+                help="Choose the market conditions to test under"
+            )
+
+            time_horizon = st.slider(
+                "Time Horizon (Years)",
+                min_value=0.5, max_value=5.0, value=1.0, step=0.5,
+                help="How long to project the investment"
+            )
+
+            # Show scenario details
+            scenario_details = {
+                "optimistic": "🟢 Bull market: 12% return, 16% volatility",
+                "likely": "🟡 Historical average: 8% return, 20% volatility",
+                "pessimistic": "🟠 Economic downturn: 3% return, 28% volatility",
+                "stress": "🔴 Market crash: -5% return, 40% volatility"
+            }
+            st.info(scenario_details[scenario])
+
+            # Portfolio impact preview
+            current_value = float(current_portfolio.total_value)
+            allocation_pct = (investment_amount / current_value) * 100
+            st.metric(
+                "Portfolio Allocation",
+                f"{allocation_pct:.1f}%",
+                help=f"This investment would be {allocation_pct:.1f}% of your current portfolio"
+            )
+
+        # Run analysis button
+        if st.button("🧪 Test Hypothetical Position", type="primary", key="hypothetical_test"):
+            if not symbol:
+                st.error("Please enter a stock symbol.")
+                return
+
+            if quantity <= 0 or purchase_price <= 0:
+                st.error("Please enter valid quantity and price values.")
+                return
+
+            try:
+                # Import and run the hypothetical tool
+                from src.agents.tools import HypotheticalPositionTool
+
+                tool = HypotheticalPositionTool(portfolio_manager)
+
+                with st.spinner(f"Testing {symbol} investment under {scenario} scenario..."):
+                    result = tool._run(
+                        symbol=symbol,
+                        quantity=quantity,
+                        purchase_price=purchase_price,
+                        scenario=scenario,
+                        time_horizon=time_horizon
+                    )
+
+                # Display results
+                if "Error" in result:
+                    st.error(result)
+                else:
+                    st.success("✅ Hypothetical analysis complete!")
+
+                    # Format and display the result
+                    st.markdown("### 🧪 Hypothetical Position Results")
+
+                    # Split result into sections for better formatting
+                    sections = result.split("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                    if len(sections) > 1:
+                        # Display the formatted result
+                        for section in sections[1:]:  # Skip the title
+                            lines = section.strip().split('\n')
+                            for line in lines:
+                                if line.startswith('💼') or line.startswith('📊') or line.startswith('🎯') or line.startswith('📈') or line.startswith('⚡') or line.startswith('⚠️') or line.startswith('💡'):
+                                    st.markdown(f"**{line}**")
+                                elif line.startswith('   •'):
+                                    st.markdown(line)
+                                elif line.strip():
+                                    st.markdown(line)
+                    else:
+                        st.code(result)
+
+                    # Add comparison with portfolio
+                    original_value = float(current_portfolio.total_value)
+                    st.markdown("### 📊 Portfolio Impact Summary")
+
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("Current Portfolio", f"${original_value:,.0f}")
+                    with col2:
+                        st.metric("Investment Amount", f"${investment_amount:,.0f}")
+                    with col3:
+                        st.metric("New Allocation", f"{allocation_pct:.1f}%")
+
+            except Exception as e:
+                st.error(f"Error running hypothetical analysis: {e}")
 
     def render_settings(self):
         """Render settings and configuration."""
