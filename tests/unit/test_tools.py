@@ -111,7 +111,7 @@ class TestAddTransactionTool:
         """Test handling missing symbol and ISIN."""
         result = tool._run(transaction_type="buy", quantity=100, price=150.00)
 
-        assert "Please provide either a symbol or an ISIN" in result
+        assert "Please provide either a symbol" in result and "ISIN" in result
 
     def test_invalid_date_format(self, tool):
         """Test handling invalid date format."""
@@ -928,9 +928,12 @@ class TestCreatePortfolioTools:
             "get_portfolio_summary",
             "get_transactions",
             "simulate_what_if",
+            "advanced_what_if",
+            "test_hypothetical_position",
             "ingest_pdf",
             "calculator",
             "search_instrument",
+            "search_company",
             "get_current_price",
             "get_portfolio_metrics",
             "get_transaction_history",

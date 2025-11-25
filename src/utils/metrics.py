@@ -640,8 +640,10 @@ class FinancialMetricsCalculator:
                 peak = value
                 current_duration = 0
             else:
-                drawdown = (peak - value) / peak
-                max_drawdown = max(max_drawdown, drawdown)
+                # Only calculate drawdown if peak is not zero
+                if peak > 0:
+                    drawdown = (peak - value) / peak
+                    max_drawdown = max(max_drawdown, drawdown)
                 current_duration += 1
                 max_duration = max(max_duration, current_duration)
 

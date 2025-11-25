@@ -9,6 +9,7 @@ from decimal import Decimal
 from typing import Dict, List, Optional
 
 from ..data_providers.manager import DataProviderManager
+from .analyzer import PortfolioAnalyzer
 from .models import (
     Currency,
     FinancialInstrument,
@@ -33,6 +34,7 @@ class PortfolioManager:
         """Initialize portfolio manager."""
         self.storage = storage or FileBasedStorage()
         self.data_manager = data_manager or DataProviderManager()
+        self.analyzer = PortfolioAnalyzer(self.data_manager, self.storage)
         self.current_portfolio: Optional[Portfolio] = None
 
     def create_portfolio(
@@ -159,15 +161,6 @@ class PortfolioManager:
 
         self.current_portfolio.add_transaction(transaction)
         self.storage.save_portfolio(self.current_portfolio)
-
-        # Create/update snapshots from transaction date to current date WITHOUT calling data providers
-        try:
-            transaction_date = transaction.timestamp.date()
-            if transaction_date <= date.today():
-                self.create_transaction_based_snapshots(transaction_date)
-                logging.info(f"Updated snapshots from {transaction_date} to {date.today()} using transaction data only")
-        except Exception as e:
-            logging.warning(f"Failed to update snapshots: {e}")
 
         logging.info(
             f"Added {transaction_type} transaction: {quantity} {instrument.symbol} ({instrument.name}) @ {price}"
@@ -407,200 +400,35 @@ class PortfolioManager:
         rate = self.data_manager.get_exchange_rate(from_currency, to_currency)
         return rate
 
-    def _get_historical_exchange_rate_fallback(
-        self, from_currency: Currency, to_currency: Currency
-    ) -> Optional[Decimal]:
-        """Get historical exchange rate from transactions as fallback when current rates unavailable."""
-        if from_currency == to_currency:
-            return Decimal("1")
 
-        if not self.current_portfolio:
-            return None
 
-        # Look for the most recent transaction involving the from_currency
-        # and try to get historical rate from that date
-        for transaction in reversed(self.current_portfolio.transactions):
-            if transaction.currency == from_currency:
-                # Try to get historical rate from the transaction date
-                try:
-                    historical_rate = self.data_manager.get_historical_fx_rate_on(
-                        transaction.timestamp.date(), from_currency, to_currency
-                    )
-                    if historical_rate:
-                        return historical_rate
-                except Exception:
-                    pass
-
-        # If no historical rate found, return None
-        return None
-
-    def get_portfolio_value(self, use_transaction_fallbacks: bool = True) -> Decimal:
-        """Get total portfolio value in base currency with transaction-based fallbacks."""
+    def get_portfolio_value(self) -> Decimal:
+        """Get total portfolio value in base currency."""
         if not self.current_portfolio:
             return Decimal("0")
 
-        # Create a function that fetches exchange rates on-demand with fallbacks
-        def get_rate_with_fallback(
-            from_currency: Currency, to_currency: Currency
-        ) -> Optional[Decimal]:
-            # Try to get current exchange rate
-            rate = self._get_exchange_rate(from_currency, to_currency)
-            if rate:
-                return rate
-
-            # If fallbacks enabled, try to get historical rate from transactions
-            if use_transaction_fallbacks:
-                return self._get_historical_exchange_rate_fallback(from_currency, to_currency)
-
-            return None
-
-        return self.current_portfolio.get_total_value_with_rate_function(get_rate_with_fallback)
+        return self.analyzer._calculate_portfolio_value(self.current_portfolio)
 
     def create_snapshot(
         self, snapshot_date: Optional[date] = None, save: bool = True
     ) -> PortfolioSnapshot:
-        """Create a comprehensive portfolio snapshot for the given date."""
+        """Create a comprehensive portfolio snapshot for the given date.
+
+        If creating a snapshot for today, fetches fresh current prices first.
+        For historical dates, uses existing prices on the portfolio.
+        """
         if not self.current_portfolio:
             raise ValueError("No portfolio loaded")
 
-        snapshot_date = snapshot_date or date.today()
+        # Determine the target date
+        target_date = snapshot_date or date.today()
 
-        # Note: Prices are not automatically updated when creating snapshots
-        # Users should manually update prices via the UI if needed
+        # For today's snapshot, fetch fresh current prices
+        if target_date == date.today():
+            logging.info("Fetching fresh current prices for today's snapshot")
+            self.update_current_prices()
 
-        total_value = self.get_portfolio_value()
-
-        # Calculate cash balance in base currency using on-demand rate fetching
-        cash_balance = Decimal("0")
-        for currency, amount in self.current_portfolio.cash_balances.items():
-            if currency == self.current_portfolio.base_currency:
-                cash_balance += amount
-            else:
-                rate = self._get_exchange_rate(
-                    currency, self.current_portfolio.base_currency
-                )
-                if rate:
-                    cash_balance += amount * rate
-
-        positions_value = total_value - cash_balance
-
-        # Calculate performance metrics
-        total_cost_basis = Decimal("0")
-        total_unrealized_pnl = Decimal("0")
-
-        for position in self.current_portfolio.positions.values():
-            total_cost_basis += position.cost_basis
-            if position.unrealized_pnl is not None:
-                total_unrealized_pnl += position.unrealized_pnl
-
-        total_unrealized_pnl_percent = (
-            (total_unrealized_pnl / total_cost_basis * 100)
-            if total_cost_basis > 0
-            else Decimal("0")
-        )
-
-        # Create deep copy of positions for snapshot
-        snapshot_positions = {}
-        for symbol, position in self.current_portfolio.positions.items():
-            snapshot_positions[symbol] = Position(
-                instrument=position.instrument,
-                quantity=position.quantity,
-                average_cost=position.average_cost,
-                current_price=position.current_price,
-                last_updated=position.last_updated,
-            )
-
-        # Create deep copy of cash balances
-        snapshot_cash_balances = {}
-        for currency, amount in self.current_portfolio.cash_balances.items():
-            snapshot_cash_balances[currency] = amount
-
-        snapshot = PortfolioSnapshot(
-            date=snapshot_date,
-            total_value=total_value,
-            cash_balance=cash_balance,
-            positions_value=positions_value,
-            base_currency=self.current_portfolio.base_currency,
-            positions=snapshot_positions,
-            cash_balances=snapshot_cash_balances,
-            total_cost_basis=total_cost_basis,
-            total_unrealized_pnl=total_unrealized_pnl,
-            total_unrealized_pnl_percent=total_unrealized_pnl_percent,
-        )
-
-        # Save snapshot
-        if save:
-            self.storage.save_snapshot(self.current_portfolio.id, snapshot)
-        return snapshot
-
-    def create_snapshots_since_last(
-        self, end_date: Optional[date] = None
-    ) -> List[PortfolioSnapshot]:
-        """Create snapshots for all dates since the last snapshot up to the end_date."""
-        if not self.current_portfolio:
-            raise ValueError("No portfolio loaded")
-
-        end_date = end_date or date.today()
-
-        # Get the last snapshot date
-        last_snapshot = self.storage.get_latest_snapshot(self.current_portfolio.id)
-        start_date = None
-
-        if last_snapshot:
-            start_date = last_snapshot.date + timedelta(days=1)
-        else:
-            # If no previous snapshots, start from portfolio creation date
-            start_date = self.current_portfolio.created_at.date()
-
-        if start_date > end_date:
-            return []  # No dates to snapshot
-
-        # Build a union of symbols that may exist across this period
-        all_symbols = set()
-        for txn in self.current_portfolio.transactions:
-            if (
-                txn.instrument.symbol != "CASH"
-                and start_date <= txn.timestamp.date() <= end_date
-            ):
-                all_symbols.add(txn.instrument.symbol)
-
-        price_map = self._build_historical_price_map(
-            sorted(all_symbols), start_date, end_date
-        )
-
-        snapshots = []
-        current_date = start_date
-
-        while current_date <= end_date:
-            try:
-                # Create a temporary portfolio state for this date
-                temp_portfolio = self._get_portfolio_state_for_date(
-                    current_date, price_map
-                )
-
-                # Temporarily set current portfolio to the historical state
-                original_portfolio = self.current_portfolio
-                try:
-                    self.current_portfolio = temp_portfolio
-
-                    # Create snapshot for this date (don't save yet, we'll batch save)
-                    snapshot = self.create_snapshot(current_date, save=False)
-                    snapshots.append(snapshot)
-                finally:
-                    # Always restore original portfolio even if snapshot creation fails
-                    self.current_portfolio = original_portfolio
-
-            except Exception as e:
-                logging.warning(f"Failed to create snapshot for {current_date}: {e}")
-
-            current_date += timedelta(days=1)
-
-        # Batch save all snapshots at once for efficiency
-        if snapshots:
-            self.storage.save_snapshots_batch(self.current_portfolio.id, snapshots)
-            logging.info(f"Batch saved {len(snapshots)} snapshots since last from {start_date} to {end_date}")
-
-        return snapshots
+        return self.analyzer.create_snapshot(self.current_portfolio, target_date, save)
 
     def create_snapshots_for_range(
         self, start_date: date, end_date: date, save: bool = True
@@ -609,52 +437,9 @@ class PortfolioManager:
         if not self.current_portfolio:
             raise ValueError("No portfolio loaded")
 
-        if start_date > end_date:
-            raise ValueError("Start date must be before or equal to end date")
-
-        # Build a union of symbols that may exist across this period
-        all_symbols = set()
-        for txn in self.current_portfolio.transactions:
-            if txn.instrument.symbol != "CASH" and txn.timestamp.date() <= end_date:
-                all_symbols.add(txn.instrument.symbol)
-
-        price_map = self._build_historical_price_map(
-            sorted(all_symbols), start_date, end_date
+        return self.analyzer.create_snapshots_for_range(
+            self.current_portfolio, start_date, end_date, save
         )
-
-        snapshots = []
-        current_date = start_date
-
-        while current_date <= end_date:
-            try:
-                # Create a temporary portfolio state for this date
-                temp_portfolio = self._get_portfolio_state_for_date(
-                    current_date, price_map
-                )
-
-                # Temporarily set current portfolio to the historical state
-                original_portfolio = self.current_portfolio
-                try:
-                    self.current_portfolio = temp_portfolio
-
-                    # Create snapshot for this date (don't save yet if we're batch saving)
-                    snapshot = self.create_snapshot(current_date, save=False)
-                    snapshots.append(snapshot)
-                finally:
-                    # Always restore original portfolio even if snapshot creation fails
-                    self.current_portfolio = original_portfolio
-
-            except Exception as e:
-                logging.warning(f"Failed to create snapshot for {current_date}: {e}")
-
-            current_date += timedelta(days=1)
-
-        # Batch save all snapshots if save=True and we have snapshots
-        if save and snapshots:
-            self.storage.save_snapshots_batch(self.current_portfolio.id, snapshots)
-            logging.info(f"Batch saved {len(snapshots)} snapshots for range {start_date} to {end_date}")
-
-        return snapshots
 
     def simulate_snapshots_for_range(
         self,
@@ -700,246 +485,38 @@ class PortfolioManager:
         for currency, amount in original_portfolio.cash_balances.items():
             temp_portfolio.cash_balances[currency] = amount
 
-        # Swap in temp, create snapshots without saving, restore original
-        self.current_portfolio = temp_portfolio
-        try:
-            simulated = self.create_snapshots_for_range(
-                start_date, end_date, save=False
-            )
-        finally:
-            self.current_portfolio = original_portfolio
+        # Create snapshots using the temp portfolio without swapping global state
+        simulated = self.create_snapshots_for_range(
+            start_date, end_date, save=False, portfolio=temp_portfolio
+        )
 
         return simulated
 
-    def get_snapshot_summary(self, portfolio_id: Optional[str] = None) -> Dict:
-        """Get a summary of all snapshots for a portfolio."""
-        if not portfolio_id:
-            if not self.current_portfolio:
-                raise ValueError("No portfolio loaded")
-            portfolio_id = self.current_portfolio.id
 
-        snapshots = self.storage.load_snapshots(portfolio_id)
-
-        if not snapshots:
-            return {
-                "total_snapshots": 0,
-                "date_range": None,
-                "latest_snapshot": None,
-                "earliest_snapshot": None,
-            }
-
-        return {
-            "total_snapshots": len(snapshots),
-            "date_range": {
-                "start": snapshots[0].date.isoformat(),
-                "end": snapshots[-1].date.isoformat(),
-            },
-            "latest_snapshot": {
-                "date": snapshots[-1].date.isoformat(),
-                "total_value": float(snapshots[-1].total_value),
-                "total_pnl": float(snapshots[-1].total_unrealized_pnl),
-                "total_pnl_percent": float(snapshots[-1].total_unrealized_pnl_percent),
-            },
-            "earliest_snapshot": {
-                "date": snapshots[0].date.isoformat(),
-                "total_value": float(snapshots[0].total_value),
-                "total_pnl": float(snapshots[0].total_unrealized_pnl),
-                "total_pnl_percent": float(snapshots[0].total_unrealized_pnl_percent),
-            },
-        }
-
-    def _get_portfolio_state_for_date(
-        self,
-        target_date: date,
-        price_map: Optional[Dict[str, Dict[date, Decimal]]] = None,
-    ) -> Portfolio:
-        """Get portfolio state as it was on a specific date.
-
-        If price_map is provided, use it to set position prices deterministically for the target date.
-        """
-        if not self.current_portfolio:
-            raise ValueError("No portfolio loaded")
-
-        # Create a copy of the current portfolio
-        portfolio_copy = Portfolio(
-            id=self.current_portfolio.id,
-            name=self.current_portfolio.name,
-            base_currency=self.current_portfolio.base_currency,
-            created_at=self.current_portfolio.created_at,
-            transactions=[],
-            positions={},
-            cash_balances={},
-        )
-
-        # Replay transactions up to the target date
-        for transaction in sorted(
-            self.current_portfolio.transactions, key=lambda t: t.timestamp
-        ):
-            if transaction.timestamp.date() <= target_date:
-                portfolio_copy.add_transaction(transaction)
-
-        # Update prices for the target date
-        if price_map is not None:
-            self._apply_price_map_for_date(portfolio_copy, price_map, target_date)
-        else:
-            if target_date == date.today():
-                self._update_portfolio_prices(portfolio_copy)
-            else:
-                self._update_portfolio_prices_for_date(portfolio_copy, target_date)
-
-        return portfolio_copy
-
-    def _update_portfolio_prices(self, portfolio: Portfolio) -> None:
-        """Update current prices for all positions in a portfolio."""
-        for position in portfolio.positions.values():
-            try:
-                price = self.data_manager.get_current_price(position.instrument.symbol)
-                if price:
-                    position.current_price = price
-                    position.last_updated = datetime.now()
-            except Exception as e:
-                logging.warning(
-                    f"Failed to update price for {position.instrument.symbol}: {e}"
-                )
-
-    def _build_historical_price_map(
-        self, symbols: List[str], start_date: date, end_date: date
-    ) -> Dict[str, Dict[date, Decimal]]:
-        """Build a symbol -> {date: price} map for a date range with forward-fill for missing non-trading days."""
-        price_map: Dict[str, Dict[date, Decimal]] = {}
-        for symbol in symbols:
-            try:
-                series = self.data_manager.get_historical_prices(
-                    symbol, start_date, end_date
-                )
-                daily: Dict[date, Decimal] = {}
-                for pd_item in series:
-                    px = (
-                        pd_item.close_price
-                        or pd_item.open_price
-                        or pd_item.high_price
-                        or pd_item.low_price
-                    )
-                    if px is not None:
-                        daily[pd_item.date] = px
-
-                # Forward-fill through the calendar window
-                current = start_date
-                last_px: Optional[Decimal] = None
-                while current <= end_date:
-                    if current in daily:
-                        last_px = daily[current]
-                    elif last_px is not None:
-                        daily[current] = last_px
-                    current += timedelta(days=1)
-
-                if daily:
-                    price_map[symbol] = daily
-            except Exception as e:
-                logging.warning(f"Failed building price map for {symbol}: {e}")
-
-        return price_map
-
-    def _apply_price_map_for_date(
-        self,
-        portfolio: Portfolio,
-        price_map: Dict[str, Dict[date, Decimal]],
-        target_date: date,
-    ) -> None:
-        """Apply precomputed historical prices to a portfolio for a given date."""
-        for position in portfolio.positions.values():
-            symbol = position.instrument.symbol
-            if symbol in price_map and target_date in price_map[symbol]:
-                position.current_price = price_map[symbol][target_date]
-                position.last_updated = datetime.combine(
-                    target_date, datetime.min.time()
-                )
-            else:
-                # Fallback to on-demand per-date logic
-                self._update_portfolio_prices_for_date(portfolio, target_date)
-
-    def _update_portfolio_prices_for_date(
-        self, portfolio: Portfolio, target_date: date
-    ) -> None:
-        """Update prices for all positions using historical data for a specific date.
-
-        Uses the close price for target_date when available. Falls back to the most
-        recent available price in the range [target_date-3d, target_date] if the
-        specific date is missing (weekends/holidays). As a last resort, attempts
-        to get the current price.
-        """
-        for position in portfolio.positions.values():
-            symbol = position.instrument.symbol
-            try:
-                # Try exact date first
-                prices = self.data_manager.get_historical_prices(
-                    symbol, target_date, target_date
-                )
-                selected_price: Optional[Decimal] = None
-
-                if prices:
-                    # Take the first/only entry for that date
-                    pd0 = prices[0]
-                    selected_price = (
-                        pd0.close_price
-                        or pd0.open_price
-                        or pd0.high_price
-                        or pd0.low_price
-                    )
-
-                # If nothing for that exact date (e.g., weekend), look back a few days
-                if selected_price is None:
-                    lookback_start = target_date - timedelta(days=3)
-                    prices = self.data_manager.get_historical_prices(
-                        symbol, lookback_start, target_date
-                    )
-                    # choose the last available (closest to target_date)
-                    if prices:
-                        last = prices[-1]
-                        selected_price = (
-                            last.close_price
-                            or last.open_price
-                            or last.high_price
-                            or last.low_price
-                        )
-
-                # Final fallback to current price
-                if selected_price is None:
-                    selected_price = self.data_manager.get_current_price(symbol)
-
-                if selected_price is not None:
-                    position.current_price = selected_price
-                    # stamp last_updated as target_date at end of day for clarity
-                    position.last_updated = datetime.combine(
-                        target_date, datetime.min.time()
-                    )
-            except Exception as e:
-                logging.warning(
-                    f"Failed to set historical price for {symbol} on {target_date}: {e}"
-                )
 
     def get_position_summary(self) -> List[Dict]:
-        """Get summary of all positions with fallback pricing from snapshots.
-
-        This method now includes fallback prices from snapshots when current market
-        prices are not available, ensuring that positions always have usable price data.
-        """
+        """Get summary of current positions."""
         if not self.current_portfolio:
             return []
 
-        # Get fallback prices from snapshots
-        fallback_prices = self.get_fallback_prices_from_snapshots()
-
         summary = []
         for symbol, position in self.current_portfolio.positions.items():
-            # Get fallback price for this symbol
-            fallback_price = fallback_prices.get(symbol)
+            if position.quantity == 0:
+                continue
 
-            # Calculate values using fallback if needed
-            effective_price = position.get_effective_price(fallback_price)
-            market_value = position.get_market_value_with_fallback(fallback_price)
-            unrealized_pnl = position.get_unrealized_pnl_with_fallback(fallback_price)
-            unrealized_pnl_percent = position.get_unrealized_pnl_percent_with_fallback(fallback_price)
+            current_price = position.current_price
+            market_value = (
+                position.quantity * current_price if current_price else Decimal("0")
+            )
+
+            # Calculate unrealized P&L
+            unrealized_pnl = Decimal("0")
+            unrealized_pnl_percent = Decimal("0")
+
+            if current_price and position.average_cost > 0:
+                cost_basis = position.quantity * position.average_cost
+                unrealized_pnl = market_value - cost_basis
+                unrealized_pnl_percent = (unrealized_pnl / cost_basis) * 100
 
             summary.append(
                 {
@@ -947,18 +524,13 @@ class PortfolioManager:
                     "name": position.instrument.name,
                     "quantity": position.quantity,
                     "average_cost": position.average_cost,
-                    "current_price": effective_price,  # Use effective price (current or fallback)
-                    "original_current_price": position.current_price,  # Keep original for reference
-                    "fallback_price": fallback_price,
+                    "current_price": current_price,
                     "market_value": market_value,
-                    "cost_basis": position.cost_basis,
                     "unrealized_pnl": unrealized_pnl,
                     "unrealized_pnl_percent": unrealized_pnl_percent,
                     "currency": position.instrument.currency.value,
-                    "instrument_type": position.instrument.instrument_type.value,
-                    "has_current_price": position.current_price is not None,
-                    "using_fallback": position.current_price is None and fallback_price is not None,
                     "last_updated": position.last_updated,
+                    "has_current_price": current_price is not None,
                 }
             )
 
@@ -995,94 +567,17 @@ class PortfolioManager:
         """Get basic performance metrics."""
         if not self.current_portfolio:
             return {}
-
-        # Get snapshots for the period
-        end_date = date.today()
-        start_date = end_date - timedelta(days=days)
-        snapshots = self.storage.load_snapshots(
-            self.current_portfolio.id, start_date, end_date
-        )
-
-        if len(snapshots) < 2:
-            return {"error": "Insufficient historical data"}
-
-        first_value = snapshots[0].total_value
-        last_value = snapshots[-1].total_value
-
-        total_return = (
-            ((last_value - first_value) / first_value * 100)
-            if first_value > 0
-            else Decimal("0")
-        )
-
-        # Calculate daily returns for volatility
-        daily_returns = []
-        for i in range(1, len(snapshots)):
-            prev_value = snapshots[i - 1].total_value
-            curr_value = snapshots[i].total_value
-            if prev_value > 0:
-                daily_return = (curr_value - prev_value) / prev_value
-                daily_returns.append(float(daily_return))
-
-        volatility = Decimal("0")
-        if len(daily_returns) > 1:
-            import statistics
-
-            volatility = Decimal(
-                str(statistics.stdev(daily_returns) * (252**0.5) * 100)
-            )  # Annualized
-
-        return {
-            "total_return_percent": total_return,
-            "annualized_volatility_percent": volatility,
-            "current_value": last_value,
-            "period_start_value": first_value,
-            "days_analyzed": len(snapshots),
-        }
+        return self.analyzer.get_performance_metrics(self.current_portfolio, days)
 
     def get_external_cash_flows_by_day(
         self, start_date: date, end_date: date
     ) -> Dict[date, Decimal]:
-        """Compute net external cash flows (deposits/withdrawals) per day in base currency.
-
-        Deposits are positive contributions; withdrawals are negative. Other transaction
-        types (buy/sell/dividend/interest) are ignored as they are internal.
-        Uses historical FX on the transaction date when available.
-        """
+        """Compute net external cash flows (deposits/withdrawals) per day in base currency."""
         if not self.current_portfolio:
             return {}
-
-        flows: Dict[date, Decimal] = {}
-        base = self.current_portfolio.base_currency
-
-        for txn in self.current_portfolio.transactions:
-            txn_date = txn.timestamp.date()
-            if txn_date < start_date or txn_date > end_date:
-                continue
-            if txn.transaction_type not in [
-                TransactionType.DEPOSIT,
-                TransactionType.WITHDRAWAL,
-            ]:
-                continue
-
-            # Amount in txn currency
-            amount = txn.total_value
-
-            # Convert to base using historical FX
-            if txn.currency == base:
-                amount_base = amount
-            else:
-                rate = self.data_manager.get_historical_fx_rate_on(
-                    txn_date, txn.currency, base
-                )
-                amount_base = amount * rate if rate else amount
-
-            if txn.transaction_type == TransactionType.WITHDRAWAL:
-                amount_base = -amount_base
-
-            flows[txn_date] = flows.get(txn_date, Decimal("0")) + amount_base
-
-        return flows
+        return self.analyzer.get_external_cash_flows_by_day(
+            self.current_portfolio, start_date, end_date
+        )
 
     def get_cash_fx_summary(self) -> Dict[Currency, Dict[str, Decimal]]:
         """Compute FX summary for cash balances per currency.
@@ -1662,6 +1157,10 @@ class PortfolioManager:
         # Infer from symbol
         symbol_upper = symbol.upper()
 
+        # Check for CASH
+        if symbol_upper == "CASH":
+            return InstrumentType.CASH
+
         # Common ETF symbols (check ETFs first to avoid conflicts)
         etf_symbols = {
             "SPY", "QQQ", "IWM", "DIA", "VTI", "VOO", "VEA", "VWO", "VXUS", "VT",
@@ -1853,6 +1352,9 @@ class PortfolioManager:
         """Find a better instrument name than just the symbol."""
         symbol_upper = symbol.upper()
 
+        if symbol_upper == "CASH":
+            return "Cash"
+
         # Use notes if provided and meaningful
         if notes and len(notes) > 5 and not notes.upper().startswith(symbol_upper):
             return notes
@@ -1905,515 +1407,4 @@ class PortfolioManager:
         # If no better name found, return the symbol
         return symbol_upper
 
-    def create_prefilled_snapshots_from_transaction(
-        self, transaction_date: date, end_date: Optional[date] = None
-    ) -> List[PortfolioSnapshot]:
-        """Create prefilled snapshots from transaction date to current date.
 
-        This method creates snapshots for each day from the transaction date to the end date,
-        using transaction prices and historical data to ensure accurate portfolio values.
-        """
-        if not self.current_portfolio:
-            raise ValueError("No portfolio loaded")
-
-        end_date = end_date or date.today()
-        if transaction_date > end_date:
-            return []
-
-        snapshots = []
-        current_date = transaction_date
-
-        while current_date <= end_date:
-            try:
-                # Create snapshot for this date using transaction-based fallbacks
-                snapshot = self.create_snapshot_for_date_with_fallbacks(current_date)
-                snapshots.append(snapshot)
-                current_date += timedelta(days=1)
-            except Exception as e:
-                logging.warning(f"Failed to create snapshot for {current_date}: {e}")
-                current_date += timedelta(days=1)
-                continue
-
-        return snapshots
-
-    def create_transaction_based_snapshots(
-        self, transaction_date: date, end_date: Optional[date] = None
-    ) -> List[PortfolioSnapshot]:
-        """Create snapshots using only transaction data, no data provider calls.
-
-        This method is used when adding transactions to avoid fetching external data.
-        Uses batch saving for efficiency - creates all snapshots in memory first,
-        then saves them all at once to avoid multiple file I/O operations.
-        """
-        if not self.current_portfolio:
-            raise ValueError("No portfolio loaded")
-
-        end_date = end_date or date.today()
-        if transaction_date > end_date:
-            return []
-
-        snapshots = []
-        current_date = transaction_date
-
-        while current_date <= end_date:
-            try:
-                # Create snapshot for this date using only transaction data (without saving to disk)
-                snapshot = self.create_snapshot_for_date_transaction_only(current_date, save=False)
-                snapshots.append(snapshot)
-                current_date += timedelta(days=1)
-            except Exception as e:
-                logging.warning(f"Failed to create transaction-based snapshot for {current_date}: {e}")
-                current_date += timedelta(days=1)
-                continue
-
-        # Batch save all snapshots at once for efficiency
-        if snapshots:
-            self.storage.save_snapshots_batch(self.current_portfolio.id, snapshots)
-            logging.info(f"Batch created {len(snapshots)} transaction-based snapshots from {transaction_date} to {end_date}")
-
-        return snapshots
-
-    def create_snapshot_for_date_transaction_only(
-        self, snapshot_date: date, save: bool = True
-    ) -> PortfolioSnapshot:
-        """Create a snapshot for a specific date using ONLY transaction data, no external calls."""
-        if not self.current_portfolio:
-            raise ValueError("No portfolio loaded")
-
-        # Reconstruct portfolio state as of this date
-        portfolio_state = self._reconstruct_portfolio_state_as_of(snapshot_date)
-
-        # Calculate total value using only transaction-based prices
-        total_value = self._calculate_portfolio_value_transaction_only(snapshot_date, portfolio_state)
-
-        # Calculate cash balance using only transaction-based exchange rates
-        cash_balance = Decimal("0")
-        for currency, amount in portfolio_state['cash_balances'].items():
-            if currency == self.current_portfolio.base_currency:
-                cash_balance += amount
-            else:
-                # Use fallback rate from transactions only (no external data)
-                rate = self._get_transaction_based_exchange_rate(
-                    snapshot_date, currency, self.current_portfolio.base_currency
-                )
-                if rate:
-                    cash_balance += amount * rate
-
-        positions_value = total_value - cash_balance
-
-        # Calculate performance metrics
-        total_cost_basis = sum(pos.cost_basis for pos in portfolio_state['positions'].values())
-        total_unrealized_pnl = sum(
-            pos.unrealized_pnl or Decimal("0")
-            for pos in portfolio_state['positions'].values()
-        )
-
-        total_unrealized_pnl_percent = (
-            (total_unrealized_pnl / total_cost_basis * 100)
-            if total_cost_basis > 0
-            else Decimal("0")
-        )
-
-        # Create snapshot
-        snapshot = PortfolioSnapshot(
-            date=snapshot_date,
-            total_value=total_value,
-            cash_balance=cash_balance,
-            positions_value=positions_value,
-            base_currency=self.current_portfolio.base_currency,
-            positions=portfolio_state['positions'],
-            cash_balances=portfolio_state['cash_balances'],
-            total_cost_basis=total_cost_basis,
-            total_unrealized_pnl=total_unrealized_pnl,
-            total_unrealized_pnl_percent=total_unrealized_pnl_percent,
-        )
-
-        # Save snapshot only if requested (for batch operations, save=False)
-        if save:
-            self.storage.save_snapshot(self.current_portfolio.id, snapshot)
-        return snapshot
-
-    def _calculate_portfolio_value_transaction_only(
-        self, target_date: date, portfolio_state: Dict[str, any]
-    ) -> Decimal:
-        """Calculate portfolio value using only transaction-based data."""
-        total = Decimal("0")
-
-        # Add cash balances
-        for currency, amount in portfolio_state['cash_balances'].items():
-            if currency == self.current_portfolio.base_currency:
-                total += amount
-            else:
-                # Use transaction-based exchange rate only
-                rate = self._get_transaction_based_exchange_rate(
-                    target_date, currency, self.current_portfolio.base_currency
-                )
-                if rate:
-                    total += amount * rate
-
-        # Add position values using transaction prices only
-        for symbol, position in portfolio_state['positions'].items():
-            if position.quantity > 0:
-                # Use current_price if available, otherwise use average_cost as fallback
-                price = position.current_price if position.current_price is not None else position.average_cost
-                if price is not None:
-                    position_value = position.quantity * price
-
-                    if position.instrument.currency == self.current_portfolio.base_currency:
-                        total += position_value
-                    else:
-                        # Use transaction-based exchange rate only
-                        rate = self._get_transaction_based_exchange_rate(
-                            target_date,
-                            position.instrument.currency,
-                            self.current_portfolio.base_currency
-                        )
-                        if rate:
-                            total += position_value * rate
-
-        return total
-
-    def _get_transaction_based_exchange_rate(
-        self, target_date: date, from_currency: Currency, to_currency: Currency
-    ) -> Optional[Decimal]:
-        """Get exchange rate from transaction history only, no external data providers."""
-        if from_currency == to_currency:
-            return Decimal("1")
-
-        # For now, return 1.0 as a safe fallback to avoid blocking snapshot creation
-        # In most cases, portfolios use a single base currency anyway
-        # TODO: Could be enhanced to derive actual rates from transaction history
-        return Decimal("1.0")
-
-    def create_snapshot_for_date_with_fallbacks(
-        self, snapshot_date: date
-    ) -> PortfolioSnapshot:
-        """Create a snapshot for a specific date using transaction-based fallbacks."""
-        if not self.current_portfolio:
-            raise ValueError("No portfolio loaded")
-
-        # Reconstruct portfolio state as of this date
-        portfolio_state = self._reconstruct_portfolio_state_as_of(snapshot_date)
-
-        # Calculate total value using fallbacks
-        total_value = self._calculate_portfolio_value_as_of(snapshot_date, portfolio_state)
-
-        # Calculate cash balance
-        cash_balance = Decimal("0")
-        for currency, amount in portfolio_state['cash_balances'].items():
-            if currency == self.current_portfolio.base_currency:
-                cash_balance += amount
-            else:
-                # Try to get historical exchange rate
-                rate = self._get_historical_exchange_rate_for_date(
-                    snapshot_date, currency, self.current_portfolio.base_currency
-                )
-                if rate:
-                    cash_balance += amount * rate
-
-        positions_value = total_value - cash_balance
-
-        # Calculate performance metrics
-        total_cost_basis = sum(pos.cost_basis for pos in portfolio_state['positions'].values())
-        total_unrealized_pnl = sum(
-            pos.unrealized_pnl or Decimal("0")
-            for pos in portfolio_state['positions'].values()
-        )
-
-        total_unrealized_pnl_percent = (
-            (total_unrealized_pnl / total_cost_basis * 100)
-            if total_cost_basis > 0
-            else Decimal("0")
-        )
-
-        # Create snapshot
-        snapshot = PortfolioSnapshot(
-            date=snapshot_date,
-            total_value=total_value,
-            cash_balance=cash_balance,
-            positions_value=positions_value,
-            base_currency=self.current_portfolio.base_currency,
-            positions=portfolio_state['positions'],
-            cash_balances=portfolio_state['cash_balances'],
-            total_cost_basis=total_cost_basis,
-            total_unrealized_pnl=total_unrealized_pnl,
-            total_unrealized_pnl_percent=total_unrealized_pnl_percent,
-        )
-
-        return snapshot
-
-    def _reconstruct_portfolio_state_as_of(self, target_date: date) -> Dict:
-        """Reconstruct portfolio state as of a specific date using transaction history."""
-        if not self.current_portfolio:
-            return {}
-
-        # Always reconstruct from transactions to ensure consistent pricing
-        # Start with current state and reverse all transactions, then re-apply up to target date
-        positions = dict(self.current_portfolio.positions)
-        cash_balances = dict(self.current_portfolio.cash_balances)
-
-        # First, reverse ALL transactions to get original state
-        for transaction in reversed(sorted(self.current_portfolio.transactions, key=lambda t: t.timestamp)):
-            self._reverse_transaction_effect(transaction, positions, cash_balances)
-
-        # Clear positions (original state had no positions)
-        positions = {}
-
-        # Process transactions up to the target date
-        for transaction in sorted(self.current_portfolio.transactions, key=lambda t: t.timestamp):
-            if transaction.timestamp.date() > target_date:
-                break
-
-            # Update cash balances
-            currency = transaction.currency
-            if currency not in cash_balances:
-                cash_balances[currency] = Decimal("0")
-
-            if transaction.transaction_type in [TransactionType.DEPOSIT, TransactionType.DIVIDEND, TransactionType.INTEREST]:
-                cash_balances[currency] += transaction.total_value
-            elif transaction.transaction_type in [TransactionType.WITHDRAWAL, TransactionType.FEES]:
-                cash_balances[currency] -= transaction.total_value
-            elif transaction.transaction_type == TransactionType.BUY:
-                cash_balances[currency] -= transaction.total_value
-            elif transaction.transaction_type == TransactionType.SELL:
-                cash_balances[currency] += transaction.total_value
-
-                        # Update positions
-            if transaction.transaction_type in [TransactionType.BUY, TransactionType.SELL]:
-                symbol = transaction.instrument.symbol
-                if symbol not in positions:
-                    positions[symbol] = Position(
-                        instrument=transaction.instrument,
-                        quantity=Decimal("0"),
-                        average_cost=Decimal("0"),
-                        current_price=transaction.price,  # Use transaction price as fallback
-                        last_updated=datetime.now()
-                    )
-
-                pos = positions[symbol]
-                if transaction.transaction_type == TransactionType.BUY:
-                    # Calculate new average cost
-                    total_cost = pos.cost_basis + transaction.total_value
-                    total_quantity = pos.quantity + transaction.quantity
-                    pos.average_cost = total_cost / total_quantity if total_quantity > 0 else Decimal("0")
-                    pos.quantity = total_quantity
-                else:  # SELL
-                    pos.quantity -= transaction.quantity
-                    # Reduce cost basis proportionally
-                    if pos.quantity > 0:
-                        # Note: Position objects don't have cost_basis as a direct attribute
-                        # We'll calculate it when needed using quantity * average_cost
-                        pass
-                    else:
-                        pos.average_cost = Decimal("0")
-
-                # Update current price to latest transaction price
-                pos.current_price = transaction.price
-
-        # Filter out positions with zero quantity
-        active_positions = {symbol: pos for symbol, pos in positions.items() if pos.quantity > 0}
-
-        return {
-            'positions': active_positions,
-            'cash_balances': cash_balances
-        }
-
-    def _reverse_transaction_effect(self, transaction: Transaction, positions: Dict, cash_balances: Dict) -> None:
-        """Reverse the effect of a transaction to reconstruct earlier state."""
-        # Reverse cash balance changes
-        currency = transaction.currency
-        if currency not in cash_balances:
-            cash_balances[currency] = Decimal("0")
-
-        if transaction.transaction_type in [TransactionType.DEPOSIT, TransactionType.DIVIDEND, TransactionType.INTEREST]:
-            cash_balances[currency] -= transaction.total_value
-        elif transaction.transaction_type in [TransactionType.WITHDRAWAL, TransactionType.FEES]:
-            cash_balances[currency] += transaction.total_value
-        elif transaction.transaction_type == TransactionType.BUY:
-            cash_balances[currency] += transaction.total_value  # Reverse: add back the cash spent
-        elif transaction.transaction_type == TransactionType.SELL:
-            cash_balances[currency] -= transaction.total_value  # Reverse: remove the cash received
-
-    def _calculate_portfolio_value_as_of(self, target_date: date, portfolio_state: Dict) -> Decimal:
-        """Calculate portfolio value as of a specific date using transaction-based fallbacks."""
-        total = Decimal("0")
-
-        # Add cash balances
-        for currency, amount in portfolio_state['cash_balances'].items():
-            if currency == self.current_portfolio.base_currency:
-                total += amount
-            else:
-                # Try to get historical exchange rate
-                rate = self._get_historical_exchange_rate_for_date(
-                    target_date, currency, self.current_portfolio.base_currency
-                )
-                if rate:
-                    total += amount * rate
-
-        # Add position values using transaction prices as fallbacks
-        for position in portfolio_state['positions'].values():
-            if position.quantity > 0 and position.current_price:
-                position_value = position.quantity * position.current_price
-
-                if position.instrument.currency == self.current_portfolio.base_currency:
-                    total += position_value
-                else:
-                    # Try to get historical exchange rate
-                    rate = self._get_historical_exchange_rate_for_date(
-                        target_date,
-                        position.instrument.currency,
-                        self.current_portfolio.base_currency
-                    )
-                    if rate:
-                        total += position_value * rate
-
-        return total
-
-    def _get_historical_exchange_rate_for_date(
-        self, target_date: date, from_currency: Currency, to_currency: Currency
-    ) -> Optional[Decimal]:
-        """Get historical exchange rate for a specific date."""
-        if from_currency == to_currency:
-            return Decimal("1")
-
-        try:
-            # Try to get historical rate from data provider
-            rate = self.data_manager.get_historical_fx_rate_on(
-                target_date, from_currency, to_currency
-            )
-            if rate:
-                return rate
-        except Exception:
-            pass
-
-        # If no historical rate available, try to find the closest available rate
-        # Look for rates within a reasonable time window (e.g., ±7 days)
-        for days_offset in range(1, 8):
-            for direction in [-1, 1]:
-                try_date = target_date + timedelta(days=direction * days_offset)
-                try:
-                    rate = self.data_manager.get_historical_fx_rate_on(
-                        try_date, from_currency, to_currency
-                    )
-                    if rate:
-                        return rate
-                except Exception:
-                    continue
-
-        return None
-
-    def refresh_snapshots_with_current_data(
-        self, start_date: Optional[date] = None, end_date: Optional[date] = None
-    ) -> List[PortfolioSnapshot]:
-        """Manually refresh snapshots with current market data and exchange rates.
-
-        This method allows users to update snapshots with fresh data from data providers.
-        """
-        if not self.current_portfolio:
-            raise ValueError("No portfolio loaded")
-
-        start_date = start_date or self.current_portfolio.created_at.date()
-        end_date = end_date or date.today()
-
-        logging.info(f"Refreshing snapshots from {start_date} to {end_date}")
-
-        # Get existing snapshots in this range
-        existing_snapshots = self.storage.get_snapshots_in_range(
-            self.current_portfolio.id, start_date, end_date
-        )
-
-        # Create a map of existing snapshots by date
-        existing_by_date = {snap.date: snap for snap in existing_snapshots}
-
-        refreshed_snapshots = []
-        current_date = start_date
-
-        while current_date <= end_date:
-            try:
-                if current_date in existing_by_date:
-                    # Update existing snapshot with current data
-                    snapshot = self._update_snapshot_with_current_data(
-                        existing_by_date[current_date]
-                    )
-                else:
-                    # Create new snapshot with current data
-                    snapshot = self.create_snapshot_for_date_with_fallbacks(current_date)
-
-                refreshed_snapshots.append(snapshot)
-                logging.info(f"Refreshed snapshot for {current_date}")
-
-            except Exception as e:
-                logging.warning(f"Failed to refresh snapshot for {current_date}: {e}")
-
-            current_date += timedelta(days=1)
-
-        return refreshed_snapshots
-
-    def update_snapshots_with_market_data(
-        self, days_back: int = 30
-    ) -> List[PortfolioSnapshot]:
-        """Update snapshots for the last N days with current market data.
-
-        This method fetches fresh data from providers and updates snapshots.
-        """
-        if not self.current_portfolio:
-            raise ValueError("No portfolio loaded")
-
-        end_date = date.today()
-        start_date = end_date - timedelta(days=days_back)
-
-        logging.info(f"Updating snapshots with market data from {start_date} to {end_date}")
-
-        # First update current prices to get fresh data
-        try:
-            price_results = self.update_current_prices()
-            logging.info(f"Updated current prices: {price_results}")
-        except Exception as e:
-            logging.warning(f"Failed to update current prices: {e}")
-
-        # Then refresh snapshots with this fresh data
-        return self.refresh_snapshots_with_current_data(start_date, end_date)
-
-    def _update_snapshot_with_current_data(self, snapshot: PortfolioSnapshot) -> PortfolioSnapshot:
-        """Update an existing snapshot with current market data."""
-        if not self.current_portfolio:
-            return snapshot
-
-        # Get current portfolio state
-        current_state = self._reconstruct_portfolio_state_as_of(snapshot.date)
-
-        # Update with current market data where available
-        for symbol, position in current_state['positions'].items():
-            if symbol in self.current_portfolio.positions:
-                current_position = self.current_portfolio.positions[symbol]
-                if current_position.current_price:
-                    # Use current market price if available
-                    position.current_price = current_position.current_price
-
-        # Recalculate total value with updated data
-        total_value = self._calculate_portfolio_value_as_of(snapshot.date, current_state)
-
-        # Update snapshot
-        snapshot.total_value = total_value
-        snapshot.positions = current_state['positions']
-        snapshot.cash_balances = current_state['cash_balances']
-
-        # Recalculate metrics
-        total_cost_basis = sum(pos.cost_basis for pos in current_state['positions'].values())
-        total_unrealized_pnl = sum(
-            pos.unrealized_pnl or Decimal("0")
-            for pos in current_state['positions'].values()
-        )
-
-        snapshot.total_cost_basis = total_cost_basis
-        snapshot.total_unrealized_pnl = total_unrealized_pnl
-        snapshot.total_unrealized_pnl_percent = (
-            (total_unrealized_pnl / total_cost_basis * 100)
-            if total_cost_basis > 0
-            else Decimal("0")
-        )
-
-        # Save updated snapshot
-        self.storage.save_snapshot(self.current_portfolio.id, snapshot)
-
-        return snapshot

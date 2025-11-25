@@ -130,15 +130,29 @@ class DataProviderManager:
         else:
             providers = self.providers
 
+        logging.info(f"Getting historical prices for {symbol} from {start_date} to {end_date}")
+
         # First attempt: requested window
         for provider in providers:
             try:
-                prices = provider.get_historical_prices(symbol, start_date, end_date)
-                if prices:
+                all_prices = []
+                chunk_start = start_date
+                while chunk_start <= end_date:
+                    chunk_end = min(chunk_start + timedelta(days=31), end_date)
+                    chunk_prices = provider.get_historical_prices(symbol, chunk_start, chunk_end)
+
+                    if chunk_prices:
+                        all_prices.extend(chunk_prices)
+
+                    chunk_start = chunk_end + timedelta(days=1)
+                    if chunk_start <= end_date:
+                        time.sleep(0.1)
+
+                if all_prices:
                     logging.debug(
-                        f"Got {len(prices)} historical prices for {symbol} from {provider.name}"
+                        f"Got {len(all_prices)} historical prices for {symbol} from {provider.name}"
                     )
-                    return prices
+                    return all_prices
             except Exception as e:
                 logging.warning(
                     f"Error getting historical prices from {provider.name}: {e}"
