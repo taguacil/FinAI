@@ -243,6 +243,13 @@ class PortfolioTrackerUI:
                 else:
                     st.sidebar.caption(f"📡 Data: ✅ {freshness_text}")
 
+            # FX rate status indicator
+            if "fx_fallback_warnings" in st.session_state and st.session_state.fx_fallback_warnings:
+                num_warnings = len(st.session_state.fx_fallback_warnings)
+                st.sidebar.caption(f"💱 FX: ⚠️ {num_warnings} rate(s) unavailable")
+            else:
+                st.sidebar.caption("💱 FX: ✅ All rates available")
+
     def render_chat_interface(self, agent):
         """Render the AI chat interface."""
         st.header("💬 Chat with AI Financial Advisor")
@@ -469,8 +476,16 @@ class PortfolioTrackerUI:
                         },
                     ),
                     (
-                        "Claude Sonnet 4 (thinking)",
-                        {"provider": "anthropic", "model": "claude-sonnet-4-20250514"},
+                        "Claude Haiku 4.5",
+                        {"provider": "vertex-ai", "model": "claude-haiku-4-5"},
+                    ),
+                    (
+                        "Claude Sonnet 4.5",
+                        {"provider": "vertex-ai", "model": "claude-sonnet-4-5"},
+                    ),
+                    (
+                        "Claude Opus 4.5",
+                        {"provider": "vertex-ai", "model": "claude-opus-4-5"},
                     ),
                     (
                         "Gemini 2.0 Flash Lite",
@@ -479,6 +494,10 @@ class PortfolioTrackerUI:
                     (
                         "Gemini 2.5 Pro (thinking)",
                         {"provider": "vertex-ai", "model": "gemini-2.5-pro"},
+                    ),
+                    (
+                        "Gemini 3 Pro",
+                        {"provider": "vertex-ai", "model": "gemini-3-pro-preview"},
                     ),
                 ]
                 model_choice = st.selectbox(
@@ -508,7 +527,7 @@ class PortfolioTrackerUI:
                             )
                         else:
                             project = os.getenv(
-                                "GOOGLE_VERTEX_PROJECT", "mystic-fountain-415918"
+                                "GOOGLE_VERTEX_PROJECT", "qd-peanut"
                             )
                             location = os.getenv("GOOGLE_VERTEX_LOCATION", "us-central1")
                             agent.set_llm_config(
@@ -521,9 +540,29 @@ class PortfolioTrackerUI:
                     except Exception as e:
                         st.error(f"Failed to set model: {e}")
 
+    def _render_fx_warnings(self):
+        """Render FX rate fallback warnings if any exist."""
+        if "fx_fallback_warnings" in st.session_state and st.session_state.fx_fallback_warnings:
+            warnings = st.session_state.fx_fallback_warnings
+            with st.expander(f"⚠️ FX Rate Issues ({len(warnings)} currency pair(s))", expanded=False):
+                st.warning(
+                    "Some FX rates were unavailable and defaulted to 1.0 (no conversion). "
+                    "This may cause inaccurate values for multi-currency portfolios."
+                )
+                for warning in warnings[:10]:  # Show first 10
+                    st.caption(f"• {warning}")
+                if len(warnings) > 10:
+                    st.caption(f"... and {len(warnings) - 10} more")
+                if st.button("Clear FX Warnings", key="clear_fx_warnings"):
+                    st.session_state.fx_fallback_warnings = []
+                    st.rerun()
+
     def render_portfolio_overview(self, portfolio_manager, market_data_service):
         """Render portfolio overview with transactions."""
         st.header("📊 Portfolio Overview")
+
+        # Show FX rate warnings if any
+        self._render_fx_warnings()
 
         if not st.session_state.portfolio_loaded:
             st.warning("Please load or create a portfolio to view details.")
@@ -757,7 +796,7 @@ class PortfolioTrackerUI:
                     for r in daily_returns:
                         twr *= 1.0 + r
                     ytd_perf_pct = (twr - 1.0) * 100.0
-                    ytd_col1.metric("YTD Performance (TWR)", f"{ytd_perf_pct:.2f}%")
+                    ytd_col1.metric("YTD Performance (TWR)", f"{ytd_perf_pct:.2f}%", delta=f"{ytd_perf_pct:.2f}%")
                 else:
                     ytd_col1.metric("YTD Performance (TWR)", "N/A")
             else:
@@ -767,16 +806,21 @@ class PortfolioTrackerUI:
 
         # Unrealized P&L percentage from current positions
         try:
+            # Calculate cost basis from quantity * average_cost since cost_basis isn't in the summary
             total_cost_basis = sum(
-                float(pos.get("cost_basis", 0) or 0) for pos in positions
+                float(pos.get("quantity", 0) or 0) * float(pos.get("average_cost", 0) or 0)
+                for pos in positions
             )
             if total_cost_basis > 0:
                 unrealized_pct = total_pnl / total_cost_basis * 100.0
-                ytd_col2.metric("Unrealized P&L (%)", f"{unrealized_pct:.2f}%")
+                ytd_col2.metric("Unrealized P&L (%)", f"{unrealized_pct:.2f}%", delta=f"{unrealized_pct:.2f}%")
             else:
                 ytd_col2.metric("Unrealized P&L (%)", "N/A")
         except Exception:
             ytd_col2.metric("Unrealized P&L (%)", "N/A")
+
+        # Link to Analytics tab for detailed metrics
+        st.caption("💡 For detailed performance metrics (Sharpe ratio, volatility, benchmark comparison), see the **Analytics** tab.")
 
         # Positions by category (table layout)
         if positions:
@@ -841,7 +885,14 @@ class PortfolioTrackerUI:
                     pass
 
                 # Total buy price (cost basis) in native and base
-                total_buy_native = pos.get("cost_basis")
+                # Calculate from quantity * average_cost since cost_basis isn't in the summary
+                qty_val = pos.get("quantity")
+                avg_cost_val = pos.get("average_cost")
+                total_buy_native = (
+                    Decimal(str(qty_val)) * Decimal(str(avg_cost_val))
+                    if qty_val is not None and avg_cost_val is not None
+                    else None
+                )
                 total_buy_base = (
                     self._convert_to_base(
                         portfolio_manager,
@@ -1215,9 +1266,19 @@ class PortfolioTrackerUI:
                         from_currency, to_currency
                     )
 
-                # Default to 1.0 if no rate available
+                # Default to 1.0 if no rate available - THIS IS A PROBLEM
                 if not rate:
                     rate = Decimal("1.0")
+                    logging.warning(
+                        f"FX rate unavailable for {from_currency}->{to_currency} on {snapshot.date}, "
+                        f"using 1.0 fallback - snapshot values may be inaccurate"
+                    )
+                    # Track fallback for UI warning
+                    if "fx_fallback_warnings" not in st.session_state:
+                        st.session_state.fx_fallback_warnings = []
+                    warning_msg = f"{from_currency.value}/{to_currency.value} on {snapshot.date}"
+                    if warning_msg not in st.session_state.fx_fallback_warnings:
+                        st.session_state.fx_fallback_warnings.append(warning_msg)
 
                 # Convert all monetary values
                 # Use model_copy to avoid Pydantic validation issues with existing Position objects
@@ -1271,9 +1332,19 @@ class PortfolioTrackerUI:
                         from_currency, to_currency
                     )
 
-                # Default to 1.0 if no rate available
+                # Default to 1.0 if no rate available - THIS IS A PROBLEM
                 if not rate:
                     rate = Decimal("1.0")
+                    logging.warning(
+                        f"FX rate unavailable for {from_currency}->{to_currency} on {flow_date}, "
+                        f"using 1.0 fallback - cash flow values may be inaccurate"
+                    )
+                    # Track fallback for UI warning
+                    if "fx_fallback_warnings" not in st.session_state:
+                        st.session_state.fx_fallback_warnings = []
+                    warning_msg = f"{from_currency.value}/{to_currency.value} on {flow_date}"
+                    if warning_msg not in st.session_state.fx_fallback_warnings:
+                        st.session_state.fx_fallback_warnings.append(warning_msg)
 
                 converted_cash_flows[flow_date] = flow_amount * float(rate)
 
@@ -1327,8 +1398,18 @@ class PortfolioTrackerUI:
                         txn.timestamp.date(), cur, base
                     )
                     or portfolio_manager.data_manager.get_exchange_rate(cur, base)
-                    or Decimal("1")
                 )
+                if not fx:
+                    fx = Decimal("1")
+                    logging.warning(
+                        f"FX rate unavailable for {cur}->{base} on {txn.timestamp.date()}, "
+                        f"using 1.0 fallback - FX summary may be inaccurate"
+                    )
+                    if "fx_fallback_warnings" not in st.session_state:
+                        st.session_state.fx_fallback_warnings = []
+                    warning_msg = f"{cur.value}/{base.value} on {txn.timestamp.date()}"
+                    if warning_msg not in st.session_state.fx_fallback_warnings:
+                        st.session_state.fx_fallback_warnings.append(warning_msg)
             if txn.transaction_type == TransactionType.DEPOSIT:
                 foreign_balance[cur] += amt
                 base_cost[cur] += amt * fx
@@ -1348,17 +1429,26 @@ class PortfolioTrackerUI:
         for cur in currencies:
             amt_foreign = portfolio.cash_balances.get(cur, Decimal("0"))
             cost_base = base_cost.get(cur, Decimal("0"))
-            rate = (
-                Decimal("1")
-                if cur == base
-                else (
+            if cur == base:
+                rate = Decimal("1")
+            else:
+                rate = (
                     portfolio_manager.data_manager.get_exchange_rate(cur, base)
                     or portfolio_manager.data_manager.get_historical_fx_rate_on(
                         date.today(), cur, base
                     )
-                    or Decimal("1")
                 )
-            )
+                if not rate:
+                    rate = Decimal("1")
+                    logging.warning(
+                        f"Current FX rate unavailable for {cur}->{base}, "
+                        f"using 1.0 fallback - FX summary may be inaccurate"
+                    )
+                    if "fx_fallback_warnings" not in st.session_state:
+                        st.session_state.fx_fallback_warnings = []
+                    warning_msg = f"{cur.value}/{base.value} (current)"
+                    if warning_msg not in st.session_state.fx_fallback_warnings:
+                        st.session_state.fx_fallback_warnings.append(warning_msg)
             current_value_base = amt_foreign * rate
             avg_cost_rate = (cost_base / amt_foreign) if amt_foreign else Decimal("0")
             fx_unrealized = current_value_base - cost_base
@@ -1544,6 +1634,10 @@ class PortfolioTrackerUI:
     def render_analytics(self, portfolio_manager, metrics_calculator):
         """Render portfolio analytics and charts."""
         st.header("📈 Portfolio Analytics")
+        st.caption("Historical performance analysis and risk metrics. See **Portfolio** tab for current positions and values.")
+
+        # Show FX rate warnings if any
+        self._render_fx_warnings()
 
         if not st.session_state.portfolio_loaded:
             st.warning("Please load a portfolio to view analytics.")
@@ -2641,321 +2735,107 @@ class PortfolioTrackerUI:
         """)
 
     def _render_advanced_what_if_section(self, portfolio_manager, current_portfolio):
-        """Render the advanced what-if analysis section."""
-        st.header("🔧 Advanced What-If Analysis")
+        """Render a simplified what-if analysis section."""
+        st.subheader("🧪 Quick What-If Analysis")
+        st.markdown("Test how adding a new investment would impact your portfolio.")
 
-        st.markdown("""
-        Go beyond predefined scenarios with **precise portfolio modifications** and **custom market assumptions**.
-        Perfect for testing specific investment ideas or allocation changes.
-        """)
-
-        # Import here to avoid circular imports
-        from src.agents.tools import AdvancedWhatIfTool, HypotheticalPositionTool
-
-        # Create tabs for different types of analysis
-        tab1, tab2 = st.tabs(["🔧 Portfolio Modifications", "🧪 Hypothetical Positions"])
-
-        with tab1:
-            self._render_portfolio_modifications_tab(portfolio_manager, current_portfolio)
-
-        with tab2:
-            self._render_hypothetical_positions_tab(portfolio_manager, current_portfolio)
-
-    def _render_portfolio_modifications_tab(self, portfolio_manager, current_portfolio):
-        """Render the portfolio modifications tab."""
-        st.subheader("🔧 Portfolio Modifications")
-        st.markdown("Modify your existing positions and add new ones to see how your portfolio would perform.")
-
-        # Portfolio modification inputs
+        # Simple single-flow interface
         col1, col2 = st.columns(2)
 
         with col1:
-            st.markdown("**📊 Modify Existing Positions**")
-            modify_help = """
-            Format: SYMBOL:CHANGE
-
-            Examples:
-            • AAPL:+50% (increase by 50%)
-            • MSFT:-25% (decrease by 25%)
-            • GOOGL:=150 (set to exactly 150 shares)
-            • TSLA:+100 (add 100 shares)
-            • AMZN:-50 (remove 50 shares)
-
-            Multiple: AAPL:+50%,MSFT:-25%,GOOGL:=150
-            """
-            modify_positions = st.text_area(
-                "Position Modifications",
-                placeholder="e.g., AAPL:+50%,MSFT:-25%",
-                help=modify_help
-            )
-
-        with col2:
-            st.markdown("**➕ Add New Positions**")
-            add_help = """
-            Format: SYMBOL:QUANTITY@PRICE
-
-            Examples:
-            • NVDA:100@$800 (100 shares at $800)
-            • TSLA:50@$250 (50 shares at $250)
-
-            Multiple: NVDA:100@$800,TSLA:50@$250
-            """
-            add_positions = st.text_area(
-                "New Positions",
-                placeholder="e.g., NVDA:100@$800,TSLA:50@$250",
-                help=add_help
-            )
-
-        # Market assumptions
-        st.markdown("**📈 Market Assumptions**")
-        col1, col2, col3 = st.columns(3)
-
-        with col1:
-            market_return = st.slider(
-                "Expected Annual Return (%)",
-                min_value=-20.0, max_value=30.0, value=8.0, step=0.5,
-                help="Expected market return per year",
-                key="whatif_market_return"
-            ) / 100.0
-
-            projection_years = st.slider(
-                "Projection Period (Years)",
-                min_value=0.5, max_value=10.0, value=2.0, step=0.5,
-                key="whatif_projection_years"
-            )
-
-        with col2:
-            market_volatility = st.slider(
-                "Market Volatility (%)",
-                min_value=5.0, max_value=80.0, value=20.0, step=1.0,
-                help="Annual volatility/risk level",
-                key="whatif_market_volatility"
-            ) / 100.0
-
-            monte_carlo_runs = st.selectbox(
-                "Simulation Runs",
-                [500, 1000, 2500, 5000],
-                index=1,
-                help="More runs = more accurate but slower",
-                key="whatif_monte_carlo_runs"
-            )
-
-        with col3:
-            recurring_deposits = st.number_input(
-                "Monthly Deposits ($)",
-                min_value=0.0, value=0.0, step=100.0,
-                help="Regular monthly contributions",
-                key="whatif_monthly_deposits"
-            )
-
-            stress_test = st.checkbox(
-                "Apply Stress Test Conditions",
-                help="Force negative returns and high volatility",
-                key="whatif_stress_test"
-            )
-
-        # Run analysis button
-        if st.button("🚀 Run Advanced What-If Analysis", type="primary", key="advanced_whatif"):
-            if not modify_positions and not add_positions:
-                st.error("Please specify position modifications or new positions to add.")
-                return
-
-            try:
-                # Import and run the advanced tool
-                from src.agents.tools import AdvancedWhatIfTool
-
-                tool = AdvancedWhatIfTool(portfolio_manager)
-
-                with st.spinner("Running advanced Monte Carlo simulation..."):
-                    result = tool._run(
-                        scenario_type="custom",
-                        projection_years=projection_years,
-                        monte_carlo_runs=monte_carlo_runs,
-                        modify_positions=modify_positions,
-                        add_positions=add_positions,
-                        market_return=market_return,
-                        market_volatility=market_volatility,
-                        recurring_deposits=recurring_deposits,
-                        stress_test=stress_test
-                    )
-
-                # Display results
-                if "Error" in result:
-                    st.error(result)
-                else:
-                    st.success("✅ Analysis complete!")
-
-                    # Format and display the result
-                    st.markdown("### 📊 Analysis Results")
-
-                    # Split result into sections for better formatting
-                    sections = result.split("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-                    if len(sections) > 1:
-                        # Display the formatted result
-                        for section in sections[1:]:  # Skip the title
-                            lines = section.strip().split('\n')
-                            for line in lines:
-                                if line.startswith('📊') or line.startswith('🎯') or line.startswith('📈') or line.startswith('⚡') or line.startswith('⚠️') or line.startswith('💡'):
-                                    st.markdown(f"**{line}**")
-                                elif line.startswith('   •'):
-                                    st.markdown(line)
-                                elif line.strip():
-                                    st.markdown(line)
-                    else:
-                        st.code(result)
-
-            except Exception as e:
-                st.error(f"Error running analysis: {e}")
-
-    def _render_hypothetical_positions_tab(self, portfolio_manager, current_portfolio):
-        """Render the hypothetical positions tab."""
-        st.subheader("🧪 Hypothetical Position Testing")
-        st.markdown("Test adding a single new investment to see how it would impact your portfolio.")
-
-        # Input controls
-        col1, col2 = st.columns(2)
-
-        with col1:
+            # Stock selection
             symbol = st.text_input(
                 "Stock Symbol",
-                placeholder="e.g., NVDA, TSLA, AMZN",
-                help="Enter the stock symbol you want to test",
-                key="hypo_symbol"
-            ).upper()
+                placeholder="e.g., NVDA, AAPL, MSFT",
+                key="whatif_symbol"
+            ).upper().strip()
 
-            investment_type = st.radio(
-                "Investment Method",
-                ["Dollar Amount", "Share Quantity"],
-                help="Choose how to specify the investment size",
-                key="hypo_investment_type"
+            # Investment amount (simple dollar input)
+            investment_amount = st.number_input(
+                "Investment Amount ($)",
+                min_value=100.0,
+                value=5000.0,
+                step=500.0,
+                key="whatif_amount",
+                help="How much you want to invest"
             )
 
-            if investment_type == "Dollar Amount":
-                investment_amount = st.number_input(
-                    "Investment Amount ($)",
-                    min_value=100.0, value=5000.0, step=100.0,
-                    key="hypo_investment_amount"
-                )
-                purchase_price = st.number_input(
-                    "Expected Purchase Price ($)",
-                    min_value=0.01, value=100.0, step=0.01,
-                    help="Price per share you expect to pay",
-                    key="hypo_purchase_price_dollar"
-                )
-                quantity = investment_amount / purchase_price if purchase_price > 0 else 0
-                st.info(f"This equals approximately {quantity:.1f} shares")
-            else:
-                quantity = st.number_input(
-                    "Number of Shares",
-                    min_value=1.0, value=100.0, step=1.0,
-                    key="hypo_num_shares"
-                )
-                purchase_price = st.number_input(
-                    "Purchase Price per Share ($)",
-                    min_value=0.01, value=100.0, step=0.01,
-                    key="hypo_purchase_price_shares"
-                )
-                investment_amount = quantity * purchase_price
-                st.info(f"Total investment: ${investment_amount:,.2f}")
+            # Show current portfolio context
+            current_value = float(current_portfolio.total_value)
+            if current_value > 0:
+                allocation_pct = (investment_amount / current_value) * 100
+                st.caption(f"This would be **{allocation_pct:.1f}%** of your portfolio")
 
         with col2:
+            # Market scenario (simplified)
             scenario = st.selectbox(
-                "Market Scenario",
-                ["optimistic", "likely", "pessimistic", "stress"],
+                "Market Outlook",
+                [
+                    ("🟢 Optimistic", "optimistic"),
+                    ("🟡 Normal", "likely"),
+                    ("🟠 Cautious", "pessimistic"),
+                ],
+                format_func=lambda x: x[0],
                 index=1,
-                help="Choose the market conditions to test under",
-                key="hypo_scenario"
-            )
+                key="whatif_scenario"
+            )[1]
 
-            time_horizon = st.slider(
-                "Time Horizon (Years)",
-                min_value=0.5, max_value=5.0, value=1.0, step=0.5,
-                help="How long to project the investment",
-                key="hypo_time_horizon"
-            )
+            # Time horizon
+            time_horizon = st.selectbox(
+                "Time Horizon",
+                [
+                    ("6 months", 0.5),
+                    ("1 year", 1.0),
+                    ("2 years", 2.0),
+                    ("5 years", 5.0),
+                ],
+                format_func=lambda x: x[0],
+                index=1,
+                key="whatif_horizon"
+            )[1]
 
-            # Show scenario details
-            scenario_details = {
-                "optimistic": "🟢 Bull market: 12% return, 16% volatility",
-                "likely": "🟡 Historical average: 8% return, 20% volatility",
-                "pessimistic": "🟠 Economic downturn: 3% return, 28% volatility",
-                "stress": "🔴 Market crash: -5% return, 40% volatility"
+            # Scenario explanation
+            scenario_info = {
+                "optimistic": "Assumes 12% annual return, lower volatility",
+                "likely": "Assumes 8% annual return, typical volatility",
+                "pessimistic": "Assumes 3% annual return, higher volatility",
             }
-            st.info(scenario_details[scenario])
+            st.caption(scenario_info.get(scenario, ""))
 
-            # Portfolio impact preview
-            current_value = float(current_portfolio.total_value)
-            allocation_pct = (investment_amount / current_value) * 100
-            st.metric(
-                "Portfolio Allocation",
-                f"{allocation_pct:.1f}%",
-                help=f"This investment would be {allocation_pct:.1f}% of your current portfolio"
-            )
-
-        # Run analysis button
-        if st.button("🧪 Test Hypothetical Position", type="primary", key="hypothetical_test"):
+        # Run button
+        if st.button("🚀 Analyze Investment", type="primary", key="whatif_run", use_container_width=True):
             if not symbol:
-                st.error("Please enter a stock symbol.")
-                return
-
-            if quantity <= 0 or purchase_price <= 0:
-                st.error("Please enter valid quantity and price values.")
+                st.warning("Please enter a stock symbol.")
                 return
 
             try:
-                # Import and run the hypothetical tool
                 from src.agents.tools import HypotheticalPositionTool
 
                 tool = HypotheticalPositionTool(portfolio_manager)
 
-                with st.spinner(f"Testing {symbol} investment under {scenario} scenario..."):
+                # Estimate share price (use $100 as default, tool will fetch real price if available)
+                estimated_price = 100.0
+
+                with st.spinner(f"Analyzing {symbol}..."):
                     result = tool._run(
                         symbol=symbol,
-                        quantity=quantity,
-                        purchase_price=purchase_price,
+                        quantity=investment_amount / estimated_price,
+                        purchase_price=estimated_price,
                         scenario=scenario,
                         time_horizon=time_horizon
                     )
 
-                # Display results
                 if "Error" in result:
                     st.error(result)
                 else:
-                    st.success("✅ Hypothetical analysis complete!")
+                    st.success("Analysis complete!")
 
-                    # Format and display the result
-                    st.markdown("### 🧪 Hypothetical Position Results")
-
-                    # Split result into sections for better formatting
-                    sections = result.split("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-                    if len(sections) > 1:
-                        # Display the formatted result
-                        for section in sections[1:]:  # Skip the title
-                            lines = section.strip().split('\n')
-                            for line in lines:
-                                if line.startswith('💼') or line.startswith('📊') or line.startswith('🎯') or line.startswith('📈') or line.startswith('⚡') or line.startswith('⚠️') or line.startswith('💡'):
-                                    st.markdown(f"**{line}**")
-                                elif line.startswith('   •'):
-                                    st.markdown(line)
-                                elif line.strip():
-                                    st.markdown(line)
-                    else:
-                        st.code(result)
-
-                    # Add comparison with portfolio
-                    original_value = float(current_portfolio.total_value)
-                    st.markdown("### 📊 Portfolio Impact Summary")
-
-                    col1, col2, col3 = st.columns(3)
-                    with col1:
-                        st.metric("Current Portfolio", f"${original_value:,.0f}")
-                    with col2:
-                        st.metric("Investment Amount", f"${investment_amount:,.0f}")
-                    with col3:
-                        st.metric("New Allocation", f"{allocation_pct:.1f}%")
+                    # Show key results in a clean format
+                    st.markdown("#### Results")
+                    st.markdown(result)
 
             except Exception as e:
-                st.error(f"Error running hypothetical analysis: {e}")
+                st.error(f"Analysis failed: {e}")
 
     def render_settings(self):
         """Render settings and configuration."""

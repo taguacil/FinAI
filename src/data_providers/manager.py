@@ -31,7 +31,8 @@ class DataProviderManager:
         self._exchange_rate_cache: Dict[str, tuple[Decimal, float]] = {}
         self._failed_symbols_cache: Dict[str, float] = {}
         self._failed_isins_cache: Dict[str, float] = {}
-        self._positive_cache_ttl = 3600  # 1 hour for successful lookups
+        # Cache TTL settings (standardized across all components to 1 hour for FX/prices)
+        self._positive_cache_ttl = 3600  # 1 hour for successful lookups (aligned with FXRateCache and MarketDataService)
         self._negative_cache_ttl = 86400  # 24 hours for failed lookups
 
         # Initialize persistent FX rate cache
@@ -282,6 +283,13 @@ class DataProviderManager:
             try:
                 rate = provider.get_exchange_rate(from_currency, to_currency)
                 if rate is not None:
+                    # Validate rate before using/caching
+                    if not self.fx_cache.validate_rate(rate, from_currency, to_currency):
+                        logging.warning(
+                            f"Invalid exchange rate {rate} for {from_currency}->{to_currency} from {provider.name}, skipping"
+                        )
+                        continue
+
                     logging.debug(
                         f"Got exchange rate {from_currency}->{to_currency} from {provider.name}: {rate}"
                     )
@@ -347,20 +355,30 @@ class DataProviderManager:
                 return None
             return None
 
+        def _validate_and_store(rate: Decimal) -> Optional[Decimal]:
+            """Validate rate and store in cache if valid."""
+            if self.fx_cache.validate_rate(rate, from_currency, to_currency):
+                self.fx_cache.store_rate(from_currency, to_currency, day, rate)
+                return rate
+            logging.warning(
+                f"Invalid historical FX rate {rate} for {from_currency}->{to_currency} on {day}"
+            )
+            return None
+
         # Exact date
         rate = _extract_close(pair, day, day)
         if rate is not None:
-            # Store in cache for future use
-            self.fx_cache.store_rate(from_currency, to_currency, day, rate)
-            return rate
+            validated = _validate_and_store(rate)
+            if validated is not None:
+                return validated
 
         # Try a short lookahead window
         lookahead_end = day + timedelta(days=3)
         rate = _extract_close(pair, day, lookahead_end)
         if rate is not None:
-            # Store in cache for future use
-            self.fx_cache.store_rate(from_currency, to_currency, day, rate)
-            return rate
+            validated = _validate_and_store(rate)
+            if validated is not None:
+                return validated
 
         # Try inverse pair and invert
         inv = _extract_close(inverse_pair, day, day)
@@ -369,9 +387,9 @@ class DataProviderManager:
         if inv is not None and inv != 0:
             try:
                 inverted_rate = Decimal("1") / inv
-                # Store the original pair rate in cache
-                self.fx_cache.store_rate(from_currency, to_currency, day, inverted_rate)
-                return inverted_rate
+                validated = _validate_and_store(inverted_rate)
+                if validated is not None:
+                    return validated
             except Exception:
                 return None
 

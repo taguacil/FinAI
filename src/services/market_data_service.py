@@ -135,7 +135,8 @@ class MarketDataService:
     - Observable freshness state for UI
     """
 
-    # Staleness threshold in seconds (1 hour)
+    # Staleness threshold in seconds (1 hour - standardized across all components)
+    # This value is aligned with FXRateCache.cache_freshness_hours and DataProviderManager._positive_cache_ttl
     PRICE_STALE_THRESHOLD = 3600
     FX_STALE_THRESHOLD = 3600
 

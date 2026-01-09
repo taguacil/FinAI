@@ -162,7 +162,49 @@ class AddTransactionTool(BaseTool):
             if not txn_type:
                 return f"Invalid transaction type: {transaction_type}. Use: buy, sell, dividend, deposit, withdrawal"
 
-            # Determine timestamp: prefer explicit date, else days_ago
+            # Validate required fields based on transaction type
+            is_cash_movement = txn_type in (TransactionType.DEPOSIT, TransactionType.WITHDRAWAL)
+
+            if is_cash_movement:
+                # For deposits/withdrawals: require amount, currency, and date
+                missing_fields = []
+
+                # Amount can be provided as quantity or price
+                amount = quantity if quantity > 0 else price
+                if amount <= 0:
+                    missing_fields.append("amount (how much to deposit/withdraw)")
+                if not currency:
+                    missing_fields.append("currency (USD, EUR, GBP, etc.)")
+                if not date:
+                    missing_fields.append("date (when did this occur)")
+
+                if missing_fields:
+                    return f"Missing required information for {transaction_type}: {', '.join(missing_fields)}. Please ask the user to provide this information."
+
+                # Set up cash movement
+                symbol = "CASH"
+                isin = None
+                price = amount
+                quantity = 1.0
+
+            else:
+                # For buy/sell/dividend: require quantity, price, and date
+                missing_fields = []
+                if quantity <= 0:
+                    missing_fields.append("quantity (how many shares/units)")
+                if price <= 0:
+                    missing_fields.append("price (price per share/unit)")
+                if not date:
+                    missing_fields.append("date (when did this transaction occur)")
+
+                if missing_fields:
+                    return f"Missing required information: {', '.join(missing_fields)}. Please ask the user to provide this information before proceeding."
+
+                # Validate that we have at least one identifier for non-cash transactions
+                if not symbol and not isin:
+                    return "Please provide either a symbol (e.g., AAPL) or an ISIN (e.g., US0378331005)."
+
+            # Determine timestamp
             if date:
                 try:
                     timestamp = datetime.strptime(date, "%Y-%m-%d")
@@ -170,37 +212,6 @@ class AddTransactionTool(BaseTool):
                     return "Invalid date format. Use YYYY-MM-DD."
             else:
                 timestamp = datetime.now() - timedelta(days=days_ago)
-
-            # Handle cash movements (ISIN not required)
-            if txn_type in (TransactionType.DEPOSIT, TransactionType.WITHDRAWAL):
-                if symbol and symbol.upper() != "CASH":
-                    return "❌ For deposits/withdrawals, use 'CASH' as the symbol."
-                symbol = "CASH"
-                isin = None  # Clear ISIN for cash transactions
-
-            # Validate that we have at least one identifier
-            if not symbol and not isin:
-                return "❌ Please provide either a symbol (e.g., AAPL) or an ISIN (e.g., US0378331005)."
-
-            # Normalize cash amount semantics for deposits/withdrawals
-            if (
-                symbol
-                and symbol.upper() == "CASH"
-                and txn_type
-                in (
-                    TransactionType.DEPOSIT,
-                    TransactionType.WITHDRAWAL,
-                )
-            ):
-                # If only quantity provided, treat as amount; use quantity=1
-                if quantity > 0 and price == 0:
-                    price = quantity
-                    quantity = 1.0
-                # If neither positive, invalid
-                if price <= 0:
-                    return "❌ Please provide a positive amount for deposit/withdrawal. Use 'price' as amount or 'quantity' alone."
-                # Force quantity=1 for cash movements
-                quantity = 1.0
 
             # Prepare currency
             from src.portfolio.models import Currency as Cur
@@ -253,11 +264,11 @@ class AddTransactionTool(BaseTool):
                             self.portfolio_manager.current_portfolio.transactions
                         ):
                             if txn.instrument.symbol == symbol.upper():
-                                return f"✅ Added {transaction_type} transaction: {quantity} {txn.instrument.symbol} ({txn.instrument.name}) @ ${price}"
+                                return f"✅ Added {transaction_type} transaction: {quantity} {txn.instrument.symbol} ({txn.instrument.name}) @ {price}"
                 except Exception:
                     pass
 
-                return f"✅ Added {transaction_type} transaction: {quantity} {label} @ ${price}"
+                return f"✅ Added {transaction_type} transaction: {quantity} {label} @ {price}"
             else:
                 return "❌ Failed to add transaction. Make sure a portfolio is loaded."
 
@@ -289,9 +300,7 @@ class GetPortfolioSummaryTool(BaseTool):
         """Get portfolio summary."""
         try:
             if not self.portfolio_manager.current_portfolio:
-                return (
-                    "❌ No portfolio loaded. Please create or load a portfolio first."
-                )
+                return "No portfolio loaded. Please create or load a portfolio first."
 
             portfolio = self.portfolio_manager.current_portfolio
 
@@ -303,31 +312,24 @@ class GetPortfolioSummaryTool(BaseTool):
             total_value = self.portfolio_manager.get_portfolio_value()
 
             summary = [
-                f"📊 **Portfolio Summary: {portfolio.name}**",
-                f"💰 **Total Value**: ${total_value:,.2f} {portfolio.base_currency.value}",
-                f"📅 **Created**: {portfolio.created_at.strftime('%Y-%m-%d')}",
+                f"Portfolio: {portfolio.name}",
+                f"Total Value: ${total_value:,.2f} {portfolio.base_currency.value}",
+                f"Created: {portfolio.created_at.strftime('%Y-%m-%d')}",
                 "",
             ]
 
             # Cash balances
             if portfolio.cash_balances:
-                summary.append("💵 **Cash Balances:**")
+                summary.append("Cash Balances:")
                 for currency, amount in portfolio.cash_balances.items():
                     code = getattr(currency, "value", str(currency))
-                    summary.append(f"  • {code}: {amount:,.2f}")
+                    summary.append(f"- {code}: ${amount:,.2f}")
                 summary.append("")
 
             # Positions
             if positions:
-                summary.append("📈 **Current Positions:**")
+                summary.append("Current Positions:")
                 for pos in positions:
-                    pnl_str = ""
-                    if pos["unrealized_pnl"] is not None:
-                        pnl = float(pos["unrealized_pnl"])
-                        pnl_pct = float(pos["unrealized_pnl_percent"] or 0)
-                        pnl_emoji = "📈" if pnl >= 0 else "📉"
-                        pnl_str = f" | {pnl_emoji} {pnl:+.2f} ({pnl_pct:+.1f}%)"
-
                     # Get appropriate unit label based on instrument type
                     instrument_type = pos.get("instrument_type", "stock")
                     if instrument_type == "bond":
@@ -339,10 +341,20 @@ class GetPortfolioSummaryTool(BaseTool):
                     else:
                         unit_label = "shares"
 
+                    # Format price
+                    price_str = f"${pos['current_price']:,.2f}" if pos['current_price'] else "N/A"
+
+                    # Format P&L
+                    pnl_str = ""
+                    if pos["unrealized_pnl"] is not None:
+                        pnl = float(pos["unrealized_pnl"])
+                        pnl_pct = float(pos["unrealized_pnl_percent"] or 0)
+                        sign = "+" if pnl >= 0 else ""
+                        pnl_str = f" ({sign}${pnl:,.2f}, {sign}{pnl_pct:.1f}%)"
+
                     summary.append(
-                        f"  • **{pos['symbol']}** ({pos['name']}) [{instrument_type.upper()}]: "
-                        f"{pos['quantity']} {unit_label} @ ${pos['current_price'] or 'N/A'}"
-                        f"{pnl_str}"
+                        f"- {pos['symbol']} ({pos['name']}): "
+                        f"{pos['quantity']:.4g} {unit_label} @ {price_str}{pnl_str}"
                     )
                 summary.append("")
 
@@ -351,12 +363,12 @@ class GetPortfolioSummaryTool(BaseTool):
                 try:
                     metrics = self.portfolio_manager.get_performance_metrics()
                     if metrics and "error" not in metrics:
-                        summary.append("📊 **Performance Metrics:**")
+                        summary.append("Performance Metrics:")
                         summary.append(
-                            f"  • Total Return: {metrics.get('total_return_percent', 0):.2f}%"
+                            f"- Total Return: {metrics.get('total_return_percent', 0):.2f}%"
                         )
                         summary.append(
-                            f"  • Volatility: {metrics.get('annualized_volatility_percent', 0):.2f}%"
+                            f"- Volatility: {metrics.get('annualized_volatility_percent', 0):.2f}%"
                         )
                         summary.append("")
                 except Exception:
@@ -366,7 +378,7 @@ class GetPortfolioSummaryTool(BaseTool):
             return "\n".join(summary)
 
         except Exception as e:
-            return f"❌ Error getting portfolio summary: {str(e)}"
+            return f"Error getting portfolio summary: {str(e)}"
 
 
 class GetTransactionsTool(BaseTool):
@@ -488,11 +500,11 @@ class SimulateWhatIfTool(BaseTool):
                 f"📈 What-if Simulation ({start} → {end})\n"
                 f"• Excluded symbols: {symbols or '-'}\n"
                 f"• Excluded txn ids: {ids or '-'}\n"
-                f"• Start value: ${start_value:,.2f}\n"
-                f"• End value: ${end_value:,.2f}\n"
+                f"• Start value: {start_value:,.2f} USD\n"
+                f"• End value: {end_value:,.2f} USD\n"
                 f"• Total return: {total_return:.2f}%\n"
-                f"• Baseline end: ${base_end:,.2f} | Baseline return: {base_return:.2f}%\n"
-                f"• Δ End value vs baseline: {delta_value:+,.2f} | Δ Return: {delta_return:+.2f}%"
+                f"• Baseline end: {base_end:,.2f} USD | Baseline return: {base_return:.2f}%\n"
+                f"• Δ End value vs baseline: {delta_value:+,.2f} USD | Δ Return: {delta_return:+.2f}%"
             )
         except Exception as e:
             return f"❌ Error running simulation: {str(e)}"
@@ -806,7 +818,7 @@ class AdvancedWhatIfTool(BaseTool):
         # Calculate portfolio modification impact
         modification_impact = modified_start_value - original_value
 
-        # Build result string
+        # Build result string (use "USD" instead of "$" to avoid Streamlit LaTeX interpretation)
         lines = [
             f"🔮 Advanced What-If Analysis",
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
@@ -819,7 +831,7 @@ class AdvancedWhatIfTool(BaseTool):
         if add_positions:
             lines.append(f"   ➕ New Positions: {add_positions}")
         if modification_impact != 0:
-            lines.append(f"   📈 Immediate Impact: {modification_impact:+,.2f} ({modification_impact/original_value*100:+.1f}%)")
+            lines.append(f"   📈 Immediate Impact: {modification_impact:+,.2f} USD ({modification_impact/original_value*100:+.1f}%)")
 
         lines.extend([
             f"",
@@ -830,11 +842,11 @@ class AdvancedWhatIfTool(BaseTool):
             f"   • Market Volatility: {result.scenario_config.market_assumptions.volatility*100:.1f}%",
             f"",
             f"📈 Projection Results:",
-            f"   • Starting Value: ${modified_start_value:,.2f}",
-            f"   • Mean Final Value: ${mean_final_value:,.2f}",
-            f"   • Median Final Value: ${stats['median_final_value']:,.2f}",
-            f"   • Best Case (95%): ${stats.get('percentile_95', mean_final_value):,.2f}",
-            f"   • Worst Case (5%): ${stats.get('percentile_25', mean_final_value):,.2f}",
+            f"   • Starting Value: {modified_start_value:,.2f} USD",
+            f"   • Mean Final Value: {mean_final_value:,.2f} USD",
+            f"   • Median Final Value: {stats['median_final_value']:,.2f} USD",
+            f"   • Best Case (95%): {stats.get('percentile_95', mean_final_value):,.2f} USD",
+            f"   • Worst Case (5%): {stats.get('percentile_25', mean_final_value):,.2f} USD",
             f"",
             f"⚡ Performance Metrics:",
             f"   • Mean Annual Return: {stats['mean_annualized_return']*100:.1f}%",
@@ -844,8 +856,8 @@ class AdvancedWhatIfTool(BaseTool):
             f"",
             f"⚠️ Risk Analysis:",
             f"   • Mean Max Drawdown: {stats['mean_max_drawdown']*100:.1f}%",
-            f"   • Standard Deviation: ${stats['std_final_value']:,.2f}",
-            f"   • Value at Risk (95%): ${stats.get('var_95', 0):,.2f}",
+            f"   • Standard Deviation: {stats['std_final_value']:,.2f} USD",
+            f"   • Value at Risk (95%): {stats.get('var_95', 0):,.2f} USD",
             f"",
             f"💡 Key Insights:",
             f"   • Total Return Potential: {(mean_final_value/modified_start_value - 1)*100:+.1f}%",
@@ -919,8 +931,8 @@ class HypotheticalPositionTool(BaseTool):
             current_value = float(current_snapshot.total_value)
             investment_value = quantity * purchase_price
 
-            # Create scenario for the hypothetical position
-            add_position_str = f"{symbol}:{quantity}@${purchase_price}"
+            # Create scenario for the hypothetical position (no $ to avoid Streamlit LaTeX issues)
+            add_position_str = f"{symbol}:{quantity}@{purchase_price}"
 
             # Use the advanced what-if tool
             advanced_tool = AdvancedWhatIfTool(self.portfolio_manager)
@@ -955,8 +967,8 @@ class HypotheticalPositionTool(BaseTool):
                 f"💼 Hypothetical Investment:",
                 f"   • Symbol: {symbol}",
                 f"   • Quantity: {quantity:,.0f} shares",
-                f"   • Purchase Price: ${purchase_price:,.2f}",
-                f"   • Total Investment: ${investment_value:,.2f} ({investment_pct:.1f}% of portfolio)",
+                f"   • Purchase Price: {purchase_price:,.2f} USD",
+                f"   • Total Investment: {investment_value:,.2f} USD ({investment_pct:.1f}% of portfolio)",
                 f"   • Scenario: {scenario.title()}",
                 f"   • Time Horizon: {time_horizon:.1f} years",
                 f"",
@@ -1074,7 +1086,159 @@ class SearchCompanyTool(BaseTool):
             return "\n".join(search_results)
 
         except Exception as e:
-            return f"❌ Error searching for company '{query}': {str(e)}"
+            return f"Error searching for company '{query}': {str(e)}"
+
+
+class ResolveInstrumentInput(BaseModel):
+    """Input for resolving an instrument."""
+
+    isin: Optional[str] = Field(
+        default=None, description="ISIN identifier (highest priority)"
+    )
+    symbol: Optional[str] = Field(
+        default=None, description="Stock/instrument symbol (second priority)"
+    )
+    name: Optional[str] = Field(
+        default=None,
+        description="Company or instrument name to search (requires user confirmation)",
+    )
+
+
+class ResolveInstrumentTool(BaseTool):
+    """Tool for resolving instrument identity with priority: ISIN > Symbol > Name search."""
+
+    name: str = "resolve_instrument"
+    description: str = """Resolve an instrument's identity before adding a transaction.
+
+    PRIORITY ORDER:
+    1. ISIN (highest priority) - Direct lookup, no confirmation needed
+    2. Symbol - Direct lookup, no confirmation needed
+    3. Name/Description - Search and REQUIRES user confirmation
+
+    Use this tool BEFORE add_transaction when:
+    - User provides a company name instead of symbol (e.g., "Apple" instead of "AAPL")
+    - You're unsure if the symbol/ISIN is correct
+    - User describes an instrument without clear identifiers
+
+    Returns:
+    - If ISIN/symbol found: Confirmed instrument details ready for add_transaction
+    - If name search: List of candidates - YOU MUST ASK USER TO CONFIRM before proceeding
+    """
+    args_schema: type[BaseModel] = ResolveInstrumentInput
+    data_manager: Optional[DataProviderManager] = None
+
+    def __init__(self, data_manager: DataProviderManager):
+        super().__init__()
+        self.data_manager = data_manager
+
+    def _run(
+        self,
+        isin: Optional[str] = None,
+        symbol: Optional[str] = None,
+        name: Optional[str] = None,
+    ) -> str:
+        """Resolve instrument identity with priority: ISIN > Symbol > Name."""
+        try:
+            # Priority 1: ISIN lookup
+            if isin:
+                isin = isin.strip().upper()
+                # Search for the ISIN
+                results = self.data_manager.search_instruments(isin)
+
+                # Look for exact ISIN match
+                exact_match = None
+                for r in results:
+                    if hasattr(r, 'isin') and r.isin and r.isin.upper() == isin:
+                        exact_match = r
+                        break
+
+                if exact_match:
+                    return self._format_confirmed_result(exact_match, "ISIN")
+
+                # No exact ISIN match - show search results if any
+                if results:
+                    return self._format_search_results(
+                        results, f"ISIN '{isin}'", needs_confirmation=True
+                    )
+                return f"No instrument found with ISIN '{isin}'. Please verify the ISIN is correct."
+
+            # Priority 2: Symbol lookup
+            if symbol:
+                symbol = symbol.strip().upper()
+                # Try to get instrument info directly
+                results = self.data_manager.search_instruments(symbol)
+                exact_match = None
+                for r in results:
+                    if r.symbol.upper() == symbol:
+                        exact_match = r
+                        break
+
+                if exact_match:
+                    return self._format_confirmed_result(exact_match, "symbol")
+
+                # No exact match - show search results
+                if results:
+                    return self._format_search_results(
+                        results, f"symbol '{symbol}'", needs_confirmation=True
+                    )
+                return f"No instrument found with symbol '{symbol}'. Please verify the symbol is correct or provide the company name."
+
+            # Priority 3: Name search (always requires confirmation)
+            if name:
+                name = name.strip()
+                # Try company name search first
+                results = self.data_manager.search_by_company_name(name)
+                if not results:
+                    results = self.data_manager.search_instruments(name)
+
+                if results:
+                    return self._format_search_results(
+                        results, f"name '{name}'", needs_confirmation=True
+                    )
+                return f"No instruments found matching '{name}'. Try a different search term or check the spelling."
+
+            return "Please provide at least one of: ISIN, symbol, or name to search."
+
+        except Exception as e:
+            return f"Error resolving instrument: {str(e)}"
+
+    def _format_confirmed_result(self, instrument, lookup_type: str) -> str:
+        """Format a confirmed instrument result."""
+        lines = [
+            f"CONFIRMED INSTRUMENT (found by {lookup_type}):",
+            f"- Symbol: {instrument.symbol}",
+            f"- Name: {instrument.name}",
+            f"- Type: {instrument.instrument_type.value}",
+            f"- Currency: {instrument.currency.value}",
+        ]
+        if instrument.isin:
+            lines.append(f"- ISIN: {instrument.isin}")
+        if instrument.exchange:
+            lines.append(f"- Exchange: {instrument.exchange}")
+
+        lines.append("")
+        lines.append("You can proceed with add_transaction using the symbol above.")
+        return "\n".join(lines)
+
+    def _format_search_results(
+        self, results: list, search_term: str, needs_confirmation: bool = False
+    ) -> str:
+        """Format search results that may need user confirmation."""
+        lines = [f"Search results for {search_term}:", ""]
+
+        for i, instrument in enumerate(results[:5], 1):  # Limit to top 5
+            lines.append(f"{i}. {instrument.symbol} - {instrument.name}")
+            lines.append(f"   Type: {instrument.instrument_type.value}, Currency: {instrument.currency.value}")
+            if instrument.isin:
+                lines.append(f"   ISIN: {instrument.isin}")
+            lines.append("")
+
+        if needs_confirmation:
+            lines.append("ACTION REQUIRED: Please ask the user to confirm which instrument they want.")
+            lines.append("Example: 'I found these matches. Which one did you mean?'")
+            lines.append("Only proceed with add_transaction after user confirms the correct instrument.")
+
+        return "\n".join(lines)
 
 
 class GetCurrentPriceTool(BaseTool):
@@ -1103,7 +1267,7 @@ class GetCurrentPriceTool(BaseTool):
             info = self.data_manager.get_instrument_info(symbol.upper())
             name = info.name if info else symbol.upper()
 
-            return f"💰 **{symbol.upper()}** ({name}): ${price:.2f}"
+            return f"💰 **{symbol.upper()}** ({name}): {price:.2f} USD"
 
         except Exception as e:
             return f"❌ Error getting price for {symbol}: {str(e)}"
@@ -1228,19 +1392,200 @@ class GetTransactionHistoryTool(BaseTool):
                 if txn_type in ["BUY", "SELL"]:
                     result.append(
                         f"• {date_str}: {txn_type} {txn['quantity']} {symbol} "
-                        f"@ ${txn['price']} (Total: ${txn['total_value']})"
+                        f"@ {txn['price']} (Total: {txn['total_value']})"
                     )
                 elif txn_type == "DIVIDEND":
                     result.append(
-                        f"• {date_str}: DIVIDEND {symbol} ${txn['total_value']}"
+                        f"• {date_str}: DIVIDEND {symbol} {txn['total_value']}"
                     )
                 else:
-                    result.append(f"• {date_str}: {txn_type} ${txn['total_value']}")
+                    result.append(f"• {date_str}: {txn_type} {txn['total_value']}")
 
             return "\n".join(result)
 
         except Exception as e:
             return f"❌ Error getting transaction history: {str(e)}"
+
+
+class ModifyTransactionInput(BaseModel):
+    """Input for modifying a transaction."""
+
+    transaction_id: str = Field(description="ID of the transaction to modify")
+    quantity: Optional[float] = Field(default=None, description="New quantity (optional)")
+    price: Optional[float] = Field(default=None, description="New price (optional)")
+    date: Optional[str] = Field(
+        default=None, description="New date in YYYY-MM-DD format (optional)"
+    )
+    notes: Optional[str] = Field(default=None, description="New notes (optional)")
+
+
+class ModifyTransactionTool(BaseTool):
+    """Tool for modifying existing transactions."""
+
+    name: str = "modify_transaction"
+    description: str = """Modify an existing transaction by its ID.
+
+    You can modify:
+    - quantity: New number of shares/units
+    - price: New price per share/unit
+    - date: New transaction date (YYYY-MM-DD)
+    - notes: New notes for the transaction
+
+    Use get_transactions or get_transaction_history to find transaction IDs first.
+    """
+    args_schema: type[BaseModel] = ModifyTransactionInput
+    portfolio_manager: Optional[PortfolioManager] = None
+
+    def __init__(self, portfolio_manager: PortfolioManager):
+        super().__init__()
+        self.portfolio_manager = portfolio_manager
+
+    def _run(
+        self,
+        transaction_id: str,
+        quantity: Optional[float] = None,
+        price: Optional[float] = None,
+        date: Optional[str] = None,
+        notes: Optional[str] = None,
+    ) -> str:
+        """Modify a transaction."""
+        try:
+            if not self.portfolio_manager.current_portfolio:
+                return "❌ No portfolio loaded."
+
+            # Find the transaction
+            portfolio = self.portfolio_manager.current_portfolio
+            transaction = None
+            for txn in portfolio.transactions:
+                if txn.id == transaction_id:
+                    transaction = txn
+                    break
+
+            if not transaction:
+                return f"❌ Transaction not found with ID: {transaction_id}"
+
+            # Track what was modified
+            modifications = []
+
+            if quantity is not None:
+                old_qty = transaction.quantity
+                transaction.quantity = Decimal(str(quantity))
+                modifications.append(f"quantity: {old_qty} → {quantity}")
+
+            if price is not None:
+                old_price = transaction.price
+                transaction.price = Decimal(str(price))
+                modifications.append(f"price: {old_price} → {price}")
+
+            if date is not None:
+                try:
+                    new_timestamp = datetime.strptime(date, "%Y-%m-%d")
+                    old_date = transaction.timestamp.strftime("%Y-%m-%d")
+                    transaction.timestamp = new_timestamp
+                    modifications.append(f"date: {old_date} → {date}")
+                except ValueError:
+                    return "❌ Invalid date format. Use YYYY-MM-DD."
+
+            if notes is not None:
+                old_notes = transaction.notes or "(none)"
+                transaction.notes = notes
+                modifications.append(f"notes: {old_notes} → {notes}")
+
+            if not modifications:
+                return "❌ No modifications specified. Provide at least one field to modify."
+
+            # Recalculate positions
+            portfolio.recalculate_positions()
+
+            # Save the portfolio
+            self.portfolio_manager.storage.save_portfolio(portfolio)
+
+            return (
+                f"✅ Modified transaction {transaction_id[:8]}...\n"
+                f"Changes: {', '.join(modifications)}"
+            )
+
+        except Exception as e:
+            return f"❌ Error modifying transaction: {str(e)}"
+
+
+class DeleteTransactionInput(BaseModel):
+    """Input for deleting a transaction."""
+
+    transaction_id: str = Field(description="ID of the transaction to delete")
+    confirm: bool = Field(
+        default=True, description="Set to True to confirm deletion"
+    )
+
+
+class DeleteTransactionTool(BaseTool):
+    """Tool for deleting transactions from the portfolio."""
+
+    name: str = "delete_transaction"
+    description: str = """Delete a transaction from the portfolio by its ID.
+
+    WARNING: This action cannot be undone. The portfolio positions will be recalculated
+    after the transaction is removed.
+
+    Use get_transactions or get_transaction_history to find transaction IDs first.
+    """
+    args_schema: type[BaseModel] = DeleteTransactionInput
+    portfolio_manager: Optional[PortfolioManager] = None
+
+    def __init__(self, portfolio_manager: PortfolioManager):
+        super().__init__()
+        self.portfolio_manager = portfolio_manager
+
+    def _run(self, transaction_id: str, confirm: bool = True) -> str:
+        """Delete a transaction."""
+        try:
+            if not self.portfolio_manager.current_portfolio:
+                return "❌ No portfolio loaded."
+
+            if not confirm:
+                return "❌ Deletion not confirmed. Set confirm=True to proceed."
+
+            portfolio = self.portfolio_manager.current_portfolio
+
+            # Find and remove the transaction
+            transaction_to_delete = None
+            for txn in portfolio.transactions:
+                if txn.id == transaction_id:
+                    transaction_to_delete = txn
+                    break
+
+            if not transaction_to_delete:
+                return f"❌ Transaction not found with ID: {transaction_id}"
+
+            # Store details for confirmation message
+            symbol = transaction_to_delete.instrument.symbol
+            txn_type = transaction_to_delete.transaction_type.value
+            quantity = transaction_to_delete.quantity
+            price = transaction_to_delete.price
+            txn_date = transaction_to_delete.timestamp.strftime("%Y-%m-%d")
+
+            # Remove the transaction
+            portfolio.transactions.remove(transaction_to_delete)
+
+            # Recalculate positions
+            portfolio.recalculate_positions()
+
+            # Save the portfolio
+            self.portfolio_manager.storage.save_portfolio(portfolio)
+
+            return (
+                f"✅ Deleted transaction:\n"
+                f"• ID: {transaction_id[:8]}...\n"
+                f"• Type: {txn_type}\n"
+                f"• Symbol: {symbol}\n"
+                f"• Quantity: {quantity}\n"
+                f"• Price: {price}\n"
+                f"• Date: {txn_date}\n\n"
+                f"Portfolio positions have been recalculated."
+            )
+
+        except Exception as e:
+            return f"❌ Error deleting transaction: {str(e)}"
 
 
 def create_portfolio_tools(
@@ -1251,6 +1596,8 @@ def create_portfolio_tools(
     """Create all portfolio management tools."""
     return [
         AddTransactionTool(portfolio_manager),
+        ModifyTransactionTool(portfolio_manager),
+        DeleteTransactionTool(portfolio_manager),
         GetPortfolioSummaryTool(portfolio_manager, metrics_calculator),
         GetTransactionsTool(portfolio_manager),
         SimulateWhatIfTool(portfolio_manager),
@@ -1263,6 +1610,40 @@ def create_portfolio_tools(
         GetCurrentPriceTool(data_manager),
         GetPortfolioMetricsTool(portfolio_manager, metrics_calculator),
         GetTransactionHistoryTool(portfolio_manager),
+    ]
+
+
+def create_transaction_tools(
+    portfolio_manager: PortfolioManager,
+    data_manager: DataProviderManager,
+) -> List[BaseTool]:
+    """Create tools for the Transaction Agent (CRUD operations)."""
+    return [
+        AddTransactionTool(portfolio_manager),
+        ModifyTransactionTool(portfolio_manager),
+        DeleteTransactionTool(portfolio_manager),
+        SearchInstrumentTool(data_manager),
+        SearchCompanyTool(data_manager),
+    ]
+
+
+def create_analytics_tools(
+    portfolio_manager: PortfolioManager,
+    data_manager: DataProviderManager,
+    metrics_calculator: FinancialMetricsCalculator,
+) -> List[BaseTool]:
+    """Create tools for the Analytics Agent (data and analysis)."""
+    return [
+        GetPortfolioSummaryTool(portfolio_manager, metrics_calculator),
+        GetPortfolioMetricsTool(portfolio_manager, metrics_calculator),
+        GetTransactionsTool(portfolio_manager),
+        GetTransactionHistoryTool(portfolio_manager),
+        SimulateWhatIfTool(portfolio_manager),
+        AdvancedWhatIfTool(portfolio_manager),
+        HypotheticalPositionTool(portfolio_manager),
+        GetCurrentPriceTool(data_manager),
+        CalculatorTool(),
+        IngestPdfTool(),
     ]
 
 

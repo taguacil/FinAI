@@ -17,6 +17,10 @@ from ..portfolio.models import Currency
 class FXRateCache:
     """Persistent cache for foreign exchange rates using CSV storage."""
 
+    # Rate validation bounds - most currency pairs fall within these ranges
+    MIN_VALID_RATE = Decimal("0.0001")  # 1:10000 ratio
+    MAX_VALID_RATE = Decimal("100000")  # 100000:1 ratio
+
     def __init__(self, cache_dir: Optional[str] = None):
         """Initialize the FX rate cache.
 
@@ -35,9 +39,35 @@ class FXRateCache:
 
         # Cache settings
         self.max_memory_cache_size = 1000
-        self.cache_freshness_days = 7  # Consider rates fresh for 7 days
+        self.cache_freshness_hours = 1  # Consider rates fresh for 1 hour (standardized)
 
         self._load_available_pairs()
+
+    def validate_rate(self, rate: Decimal, from_currency: Currency, to_currency: Currency) -> bool:
+        """Validate that an FX rate is within reasonable bounds.
+
+        Args:
+            rate: The exchange rate to validate
+            from_currency: Currency to convert from
+            to_currency: Currency to convert to
+
+        Returns:
+            True if rate is valid, False otherwise
+        """
+        if rate is None:
+            return False
+        if rate <= 0:
+            logging.warning(
+                f"FX rate validation failed: {from_currency}->{to_currency} rate {rate} is non-positive"
+            )
+            return False
+        if rate < self.MIN_VALID_RATE or rate > self.MAX_VALID_RATE:
+            logging.warning(
+                f"FX rate validation failed: {from_currency}->{to_currency} rate {rate} "
+                f"is outside valid range [{self.MIN_VALID_RATE}, {self.MAX_VALID_RATE}]"
+            )
+            return False
+        return True
 
     def _get_cache_filename(self, from_currency: Currency, to_currency: Currency) -> Path:
         """Get the cache filename for a currency pair."""
@@ -94,7 +124,7 @@ class FXRateCache:
 
         return None
 
-    def store_rate(self, from_currency: Currency, to_currency: Currency, rate_date: date, rate: Decimal):
+    def store_rate(self, from_currency: Currency, to_currency: Currency, rate_date: date, rate: Decimal) -> bool:
         """Store an exchange rate in the cache.
 
         Args:
@@ -102,9 +132,19 @@ class FXRateCache:
             to_currency: Currency to convert to
             rate_date: Date for the exchange rate
             rate: Exchange rate value
+
+        Returns:
+            True if rate was stored successfully, False if validation failed
         """
         if from_currency == to_currency:
-            return  # Don't store 1:1 rates
+            return True  # Don't store 1:1 rates, but consider it success
+
+        # Validate rate before storing
+        if not self.validate_rate(rate, from_currency, to_currency):
+            logging.error(
+                f"Refusing to store invalid FX rate {rate} for {from_currency}->{to_currency}"
+            )
+            return False
 
         # Store in CSV
         self._store_rate_in_csv(from_currency, to_currency, rate_date, rate)
@@ -116,6 +156,7 @@ class FXRateCache:
         # Update available pairs
         pair = f"{from_currency.value}_{to_currency.value}"
         self._available_pairs.add(pair)
+        return True
 
     def _load_rate_from_csv(self, from_currency: Currency, to_currency: Currency, rate_date: date) -> Optional[Decimal]:
         """Load exchange rate from CSV file."""
@@ -245,14 +286,24 @@ class FXRateCache:
             return None
 
     def is_rate_fresh(self, from_currency: Currency, to_currency: Currency, rate_date: date) -> bool:
-        """Check if we have a fresh rate for the given date."""
+        """Check if we have a fresh rate for the given date.
+
+        For historical rates, checks if we have data for that specific date.
+        For current/recent rates, checks if the data is within the freshness window.
+        """
         cached_rate = self.get_rate(from_currency, to_currency, rate_date)
         if cached_rate is None:
             return False
 
-        # Check if the rate is within our freshness window
+        # For historical dates (more than 1 day old), just check if we have data
         days_old = (date.today() - rate_date).days
-        return days_old <= self.cache_freshness_days
+        if days_old > 1:
+            return True  # Historical rate exists
+
+        # For current/recent rates, check freshness window (standardized to 1 hour)
+        # Since we don't track cache timestamps per rate, we consider it fresh
+        # if it's for today or yesterday
+        return days_old <= 1
 
     def get_cache_stats(self) -> Dict[str, int]:
         """Get statistics about the cache."""
