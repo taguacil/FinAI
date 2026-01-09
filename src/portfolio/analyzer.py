@@ -6,21 +6,51 @@ The manager is responsible for fetching prices before calling analyzer methods.
 """
 
 import logging
+import statistics
 from datetime import date, datetime, timedelta
 from decimal import Decimal
-from typing import Dict, List
+from typing import TYPE_CHECKING, Dict, List, Optional, Union
+
+import pandas as pd
 
 from ..data_providers.manager import DataProviderManager
 from .models import Currency, Portfolio, PortfolioSnapshot, Position, TransactionType
 from .storage import FileBasedStorage
 
+if TYPE_CHECKING:
+    from ..services.market_data_service import MarketDataService
+
 
 class PortfolioAnalyzer:
-    """Pure calculation engine - no data fetching, only calculations."""
+    """Pure calculation engine - no data fetching, only calculations.
 
-    def __init__(self, data_manager: DataProviderManager, storage: FileBasedStorage):
-        self.data_manager = data_manager
+    Supports both DataProviderManager (legacy) and MarketDataService (new).
+    """
+
+    def __init__(
+        self,
+        data_manager: Union[DataProviderManager, "MarketDataService"],
+        storage: FileBasedStorage,
+    ):
+        """Initialize the analyzer.
+
+        Args:
+            data_manager: Either DataProviderManager or MarketDataService
+            storage: FileBasedStorage instance
+        """
+        self._data_manager = data_manager
         self.storage = storage
+
+    @property
+    def data_manager(self) -> DataProviderManager:
+        """Get the underlying DataProviderManager for compatibility.
+
+        If a MarketDataService was provided, returns its internal data_manager.
+        """
+        # Check if it's a MarketDataService by looking for data_manager attribute
+        if hasattr(self._data_manager, "data_manager"):
+            return self._data_manager.data_manager
+        return self._data_manager
 
     def create_snapshot(
         self, portfolio: Portfolio, snapshot_date: date, save: bool = True
@@ -129,13 +159,15 @@ class PortfolioAnalyzer:
         """Calculate performance metrics from historical snapshots."""
         end_date = date.today()
         start_date = end_date - timedelta(days=days)
-        snapshots = self.storage.load_snapshots(portfolio.id, start_date, end_date)
 
-        if len(snapshots) < 2:
+        # Try DataFrame approach first (more efficient)
+        df = self.storage.load_snapshots_df(portfolio.id, start_date, end_date)
+
+        if df.empty or len(df) < 2:
             return {"error": "Insufficient data"}
 
-        first_value = snapshots[0].total_value
-        last_value = snapshots[-1].total_value
+        first_value = Decimal(str(df["total_value"].iloc[0]))
+        last_value = Decimal(str(df["total_value"].iloc[-1]))
 
         total_return = (
             ((last_value - first_value) / first_value * 100)
@@ -143,26 +175,123 @@ class PortfolioAnalyzer:
             else Decimal("0")
         )
 
-        # Volatility
-        daily_returns = []
-        for i in range(1, len(snapshots)):
-            prev = snapshots[i - 1].total_value
-            curr = snapshots[i].total_value
-            if prev > 0:
-                daily_returns.append(float((curr - prev) / prev))
+        # Calculate daily returns using pandas
+        daily_returns = df["total_value"].pct_change().dropna()
 
         volatility = Decimal("0")
         if len(daily_returns) > 1:
-            import statistics
-            volatility = Decimal(str(statistics.stdev(daily_returns) * (252**0.5) * 100))
+            # Annualized volatility
+            vol = daily_returns.std() * (252**0.5) * 100
+            volatility = Decimal(str(vol))
 
         return {
             "total_return_percent": total_return,
             "annualized_volatility_percent": volatility,
             "current_value": last_value,
             "period_start_value": first_value,
-            "days_analyzed": len(snapshots),
+            "days_analyzed": len(df),
         }
+
+    def get_performance_metrics_df(
+        self, portfolio: Portfolio, days: int = 365
+    ) -> pd.DataFrame:
+        """Calculate performance metrics and return as DataFrame.
+
+        Returns a DataFrame with daily values and returns.
+        """
+        end_date = date.today()
+        start_date = end_date - timedelta(days=days)
+
+        df = self.storage.load_snapshots_df(portfolio.id, start_date, end_date)
+
+        if df.empty:
+            return pd.DataFrame()
+
+        # Add calculated columns
+        df["daily_return"] = df["total_value"].pct_change()
+        df["cumulative_return"] = (1 + df["daily_return"]).cumprod() - 1
+
+        return df
+
+    def calculate_volatility(
+        self, portfolio: Portfolio, days: int = 365
+    ) -> Optional[Decimal]:
+        """Calculate annualized volatility using daily returns."""
+        df = self.storage.load_snapshots_df(
+            portfolio.id,
+            date.today() - timedelta(days=days),
+            date.today(),
+        )
+
+        if df.empty or len(df) < 2:
+            return None
+
+        daily_returns = df["total_value"].pct_change().dropna()
+        if len(daily_returns) < 2:
+            return None
+
+        vol = daily_returns.std() * (252**0.5) * 100
+        return Decimal(str(vol))
+
+    def calculate_max_drawdown(
+        self, portfolio: Portfolio, days: int = 365
+    ) -> Optional[Decimal]:
+        """Calculate maximum drawdown over the period."""
+        df = self.storage.load_snapshots_df(
+            portfolio.id,
+            date.today() - timedelta(days=days),
+            date.today(),
+        )
+
+        if df.empty or len(df) < 2:
+            return None
+
+        # Calculate running maximum and drawdown
+        values = df["total_value"]
+        running_max = values.expanding().max()
+        drawdown = (values - running_max) / running_max * 100
+
+        max_dd = drawdown.min()
+        return Decimal(str(max_dd)) if pd.notna(max_dd) else None
+
+    def calculate_sharpe_ratio(
+        self,
+        portfolio: Portfolio,
+        days: int = 365,
+        risk_free_rate: float = 0.04,
+    ) -> Optional[Decimal]:
+        """Calculate Sharpe ratio.
+
+        Args:
+            portfolio: The portfolio
+            days: Number of days to analyze
+            risk_free_rate: Annual risk-free rate (default 4%)
+
+        Returns:
+            Sharpe ratio or None if insufficient data
+        """
+        df = self.storage.load_snapshots_df(
+            portfolio.id,
+            date.today() - timedelta(days=days),
+            date.today(),
+        )
+
+        if df.empty or len(df) < 2:
+            return None
+
+        daily_returns = df["total_value"].pct_change().dropna()
+        if len(daily_returns) < 2:
+            return None
+
+        # Annualize returns
+        annual_return = daily_returns.mean() * 252
+        annual_vol = daily_returns.std() * (252**0.5)
+
+        if annual_vol == 0:
+            return None
+
+        sharpe = (annual_return - risk_free_rate) / annual_vol
+        return Decimal(str(sharpe))
 
     def get_external_cash_flows_by_day(
         self, portfolio: Portfolio, start_date: date, end_date: date

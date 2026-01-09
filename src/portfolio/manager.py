@@ -6,7 +6,7 @@ import logging
 import uuid
 from datetime import date, datetime, timedelta
 from decimal import Decimal
-from typing import Dict, List, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional, Union
 
 from ..data_providers.manager import DataProviderManager
 from .analyzer import PortfolioAnalyzer
@@ -22,20 +22,51 @@ from .models import (
 )
 from .storage import FileBasedStorage
 
+if TYPE_CHECKING:
+    from ..services.market_data_service import MarketDataService
+
 
 class PortfolioManager:
-    """Manages portfolio operations, transactions, and data updates."""
+    """Manages portfolio operations, transactions, and data updates.
+
+    Supports both DataProviderManager (legacy) and MarketDataService (new).
+    """
 
     def __init__(
         self,
         storage: Optional[FileBasedStorage] = None,
-        data_manager: Optional[DataProviderManager] = None,
+        data_manager: Optional[Union[DataProviderManager, "MarketDataService"]] = None,
     ):
-        """Initialize portfolio manager."""
+        """Initialize portfolio manager.
+
+        Args:
+            storage: FileBasedStorage instance
+            data_manager: DataProviderManager or MarketDataService instance
+        """
         self.storage = storage or FileBasedStorage()
-        self.data_manager = data_manager or DataProviderManager()
-        self.analyzer = PortfolioAnalyzer(self.data_manager, self.storage)
+        self._data_manager = data_manager or DataProviderManager()
+        self.analyzer = PortfolioAnalyzer(self._data_manager, self.storage)
         self.current_portfolio: Optional[Portfolio] = None
+
+    @property
+    def data_manager(self) -> DataProviderManager:
+        """Get the underlying DataProviderManager for compatibility.
+
+        If a MarketDataService was provided, returns its internal data_manager.
+        """
+        if hasattr(self._data_manager, "data_manager"):
+            return self._data_manager.data_manager
+        return self._data_manager
+
+    @property
+    def market_data_service(self) -> Optional["MarketDataService"]:
+        """Get the MarketDataService if one was provided."""
+        # Import here to avoid circular imports
+        from ..services.market_data_service import MarketDataService
+
+        if isinstance(self._data_manager, MarketDataService):
+            return self._data_manager
+        return None
 
     def create_portfolio(
         self, name: str, base_currency: Currency = Currency.USD

@@ -24,6 +24,7 @@ from src.data_providers.manager import DataProviderManager
 from src.portfolio.manager import PortfolioManager
 from src.portfolio.models import Currency, TransactionType
 from src.portfolio.storage import FileBasedStorage
+from src.services.market_data_service import MarketDataService
 from src.utils.logging_config import setup_logging
 from src.utils.metrics import FinancialMetricsCalculator
 
@@ -53,29 +54,41 @@ class PortfolioTrackerUI:
             setup_logging(log_level="INFO", app_name="portfolio-tracker-ui")
 
             storage = FileBasedStorage()
-            data_manager = DataProviderManager()
-            portfolio_manager = PortfolioManager(storage, data_manager)
-            metrics_calculator = FinancialMetricsCalculator(data_manager)
+            data_provider = DataProviderManager()
+
+            # Create MarketDataService wrapping the DataProviderManager
+            market_data_service = MarketDataService(data_provider)
+
+            # Pass MarketDataService to PortfolioManager
+            portfolio_manager = PortfolioManager(storage, market_data_service)
+
+            # Metrics calculator uses the underlying DataProviderManager
+            metrics_calculator = FinancialMetricsCalculator(data_provider)
 
             agent = PortfolioAgent(
                 portfolio_manager=portfolio_manager,
-                data_manager=data_manager,
+                data_manager=market_data_service,
                 metrics_calculator=metrics_calculator,
             )
 
-            return portfolio_manager, agent, metrics_calculator
+            return portfolio_manager, agent, metrics_calculator, market_data_service
         except Exception as e:
             st.error(f"Error initializing components: {e}")
-            return None, None, None
+            return None, None, None, None
 
     def run(self):
         """Run the Streamlit app."""
         # Initialize components
-        portfolio_manager, agent, metrics_calculator = self.initialize_components()
+        result = self.initialize_components()
+        portfolio_manager, agent, metrics_calculator, market_data_service = result
 
-        if not all([portfolio_manager, agent, metrics_calculator]):
+        if not all([portfolio_manager, agent, metrics_calculator, market_data_service]):
             st.error("Failed to initialize application components.")
             return
+
+        # Store market_data_service in session state for access in other methods
+        if "market_data_service" not in st.session_state:
+            st.session_state.market_data_service = market_data_service
 
         # Initialize session state
         self.init_session_state()
@@ -101,7 +114,7 @@ class PortfolioTrackerUI:
         )
 
         # Sidebar
-        self.render_sidebar(portfolio_manager)
+        self.render_sidebar(portfolio_manager, market_data_service)
 
         # Main content tabs
         tab1, tab2, tab3, tab4, tab5 = st.tabs(
@@ -112,7 +125,7 @@ class PortfolioTrackerUI:
             self.render_chat_interface(agent)
 
         with tab2:
-            self.render_portfolio_overview(portfolio_manager)
+            self.render_portfolio_overview(portfolio_manager, market_data_service)
 
         with tab3:
             self.render_analytics(portfolio_manager, metrics_calculator)
@@ -132,7 +145,7 @@ class PortfolioTrackerUI:
         if "selected_portfolio" not in st.session_state:
             st.session_state.selected_portfolio = None
 
-    def render_sidebar(self, portfolio_manager):
+    def render_sidebar(self, portfolio_manager, market_data_service):
         """Render the sidebar with portfolio management."""
         st.sidebar.header("📁 Portfolio Management")
 
@@ -220,19 +233,15 @@ class PortfolioTrackerUI:
             """
             )
 
-            # Quick actions
-            st.sidebar.subheader("🔄 Data Management")
+            # Data freshness indicator (compact)
+            if market_data_service is not None:
+                freshness = market_data_service.freshness
+                freshness_text = freshness.freshness_display
 
-            # Quick current prices update (no snapshots)
-            if st.sidebar.button(
-                "💰 Update Current Prices Only", help="Update current prices without creating snapshots"
-            ):
-                with st.spinner("Updating current prices..."):
-                    price_results = portfolio_manager.update_current_prices()
-                    success_count = sum(price_results.values())
-                    total_count = len(price_results)
-                    st.sidebar.success(f"✅ Updated prices: {success_count}/{total_count}")
-                    st.rerun()
+                if freshness.is_stale:
+                    st.sidebar.caption(f"📡 Data: ⚠️ {freshness_text}")
+                else:
+                    st.sidebar.caption(f"📡 Data: ✅ {freshness_text}")
 
     def render_chat_interface(self, agent):
         """Render the AI chat interface."""
@@ -284,179 +293,12 @@ class PortfolioTrackerUI:
 
             st.rerun()
 
-        # Model selection + PDF + Quick action buttons
-        st.subheader("Quick Actions")
-        col_pdf, col0, col1, col2, col3 = st.columns([2, 2, 1, 1, 1])
+        # Quick Actions - prominent buttons at the top
+        st.markdown("---")
+        action_col1, action_col2, action_col3, action_col4 = st.columns(4)
 
-        # PDF Uploader
-        with col_pdf:
-            uploaded_pdf = st.file_uploader(
-                "Attach PDF (datasheet)", type=["pdf"], accept_multiple_files=False
-            )
-            if uploaded_pdf is not None:
-                st.caption(
-                    f"Selected: {uploaded_pdf.name} ({uploaded_pdf.size/1024:.1f} KB)"
-                )
-                pdf_bytes = uploaded_pdf.read()
-                if st.button("Attach PDF to Chat"):
-                    try:
-                        import io
-
-                        reader = PdfReader(io.BytesIO(pdf_bytes))
-                        texts = []
-                        for page in reader.pages:
-                            try:
-                                t = page.extract_text() or ""
-                                if t:
-                                    texts.append(t)
-                            except Exception:
-                                continue
-                        content = "\n\n".join(texts).strip()
-                        if not content:
-                            st.warning("No text extracted from the PDF.")
-                        else:
-                            if len(content) > 100_000:
-                                content = content[:100_000] + "\n\n...[truncated]"
-                            st.session_state.chat_history.append(
-                                {
-                                    "role": "user",
-                                    "content": f"📄 Attached PDF: {uploaded_pdf.name}\n\n{content}",
-                                }
-                            )
-                            st.success("PDF content attached to chat.")
-                            st.rerun()
-                    except Exception as e:
-                        st.error(f"Failed to read PDF: {e}")
-                if st.button("Analyze PDF Now"):
-                    try:
-                        import io
-
-                        reader = PdfReader(io.BytesIO(pdf_bytes))
-                        texts = []
-                        for page in reader.pages:
-                            try:
-                                t = page.extract_text() or ""
-                                if t:
-                                    texts.append(t)
-                            except Exception:
-                                continue
-                        content = "\n\n".join(texts).strip()
-                        if not content:
-                            st.warning("No text extracted from the PDF.")
-                        else:
-                            if len(content) > 80_000:
-                                content = content[:80_000] + "\n\n...[truncated]"
-                            prompt = (
-                                f"Please analyze the attached PDF datasheet '{uploaded_pdf.name}'. "
-                                f"Summarize key points, risks, and any financial metrics or terms.\n\n"
-                                f"Extracted text follows:\n{content}"
-                            )
-                            st.session_state.chat_history.append(
-                                {"role": "user", "content": prompt}
-                            )
-                            with st.spinner("Analyzing PDF..."):
-                                response = agent.chat(prompt)
-                            st.session_state.chat_history.append(
-                                {"role": "assistant", "content": response}
-                            )
-                            st.rerun()
-                    except Exception as e:
-                        st.error(f"Failed to analyze PDF: {e}")
-
-        with col0:
-            st.markdown("**AI Model**")
-            # Single dropdown with all supported models and their providers
-            all_models = [
-                (
-                    "Azure GPT-4.1",
-                    {
-                        "provider": "azure-openai",
-                        "endpoint": "https://kallamai.openai.azure.com/",
-                        "model": "gpt-4.1",
-                    },
-                ),
-                (
-                    "Azure GPT-4.1 Mini",
-                    {
-                        "provider": "azure-openai",
-                        "endpoint": "https://kallamai.openai.azure.com/",
-                        "model": "gpt-4.1-mini",
-                    },
-                ),
-                (
-                    "Azure o4-mini",
-                    {
-                        "provider": "azure-openai",
-                        "endpoint": "https://kallamai.openai.azure.com/",
-                        "model": "o4-mini",
-                    },
-                ),
-                (
-                    "Azure GPT-5",
-                    {
-                        "provider": "azure-openai",
-                        "endpoint": "https://kallamai.openai.azure.com/",
-                        "model": "gpt-5",
-                    },
-                ),
-                (
-                    "Azure GPT-5 Mini",
-                    {
-                        "provider": "azure-openai",
-                        "endpoint": "https://kallamai.openai.azure.com/",
-                        "model": "gpt-5-mini",
-                    },
-                ),
-                (
-                    "Claude Sonnet 4 (thinking)",
-                    {"provider": "anthropic", "model": "claude-sonnet-4-20250514"},
-                ),
-                (
-                    "Gemini 2.0 Flash Lite",
-                    {"provider": "vertex-ai", "model": "gemini-2.0-flash-lite-001"},
-                ),
-                (
-                    "Gemini 2.5 Pro (thinking)",
-                    {"provider": "vertex-ai", "model": "gemini-2.5-pro"},
-                ),
-            ]
-            model_choice = st.selectbox("Model", all_models, format_func=lambda x: x[0])
-            if st.button("Apply Model"):
-                try:
-                    meta = model_choice[1]
-                    provider_key = meta.get("provider")
-                    if provider_key == "azure-openai":
-                        azure_key = os.getenv("AZURE_OPENAI_API_KEY", "")
-                        agent.set_llm_config(
-                            provider="azure-openai",
-                            azure_endpoint=meta.get("endpoint"),
-                            azure_api_key=azure_key,
-                            azure_model=meta.get("model"),
-                        )
-                    elif provider_key == "anthropic":
-                        anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
-                        agent.set_llm_config(
-                            provider="anthropic",
-                            anthropic_api_key=anthropic_key,
-                            anthropic_model=meta.get("model"),
-                        )
-                    else:
-                        project = os.getenv(
-                            "GOOGLE_VERTEX_PROJECT", "mystic-fountain-415918"
-                        )
-                        location = os.getenv("GOOGLE_VERTEX_LOCATION", "us-central1")
-                        agent.set_llm_config(
-                            provider="vertex-ai",
-                            vertex_project=project,
-                            vertex_location=location,
-                            vertex_model=meta.get("model"),
-                        )
-                    st.success(f"Model set to {model_choice[0]}")
-                except Exception as e:
-                    st.error(f"Failed to set model: {e}")
-
-        with col1:
-            if st.button("📊 Portfolio Summary"):
+        with action_col1:
+            if st.button("📊 Portfolio Summary", use_container_width=True):
                 if st.session_state.portfolio_loaded:
                     response = agent.chat("Please show me my current portfolio summary")
                     st.session_state.chat_history.append(
@@ -466,8 +308,8 @@ class PortfolioTrackerUI:
                 else:
                     st.warning("Please load a portfolio first")
 
-        with col2:
-            if st.button("📈 Performance Analysis"):
+        with action_col2:
+            if st.button("📈 Performance Analysis", use_container_width=True):
                 if st.session_state.portfolio_loaded:
                     response = agent.analyze_portfolio_performance()
                     st.session_state.chat_history.append(
@@ -477,13 +319,209 @@ class PortfolioTrackerUI:
                 else:
                     st.warning("Please load a portfolio first")
 
-        with col3:
-            if st.button("🧹 Clear Chat"):
+        with action_col3:
+            if st.button("💡 Investment Ideas", use_container_width=True):
+                if st.session_state.portfolio_loaded:
+                    response = agent.chat("Based on my current portfolio, what investment opportunities should I consider?")
+                    st.session_state.chat_history.append(
+                        {"role": "assistant", "content": response}
+                    )
+                    st.rerun()
+                else:
+                    st.warning("Please load a portfolio first")
+
+        with action_col4:
+            if st.button("🧹 Clear Chat", use_container_width=True):
                 st.session_state.chat_history = []
                 agent.clear_conversation()
                 st.rerun()
 
-    def render_portfolio_overview(self, portfolio_manager):
+        # Advanced Options - collapsible section
+        with st.expander("⚙️ Advanced Options", expanded=False):
+            adv_col1, adv_col2 = st.columns(2)
+
+            # PDF Analysis
+            with adv_col1:
+                st.markdown("**📄 Document Analysis**")
+                uploaded_pdf = st.file_uploader(
+                    "Upload PDF (datasheet, prospectus, etc.)",
+                    type=["pdf"],
+                    accept_multiple_files=False,
+                    key="pdf_uploader"
+                )
+                if uploaded_pdf is not None:
+                    st.caption(
+                        f"Selected: {uploaded_pdf.name} ({uploaded_pdf.size/1024:.1f} KB)"
+                    )
+                    pdf_bytes = uploaded_pdf.read()
+
+                    pdf_btn_col1, pdf_btn_col2 = st.columns(2)
+                    with pdf_btn_col1:
+                        if st.button("📎 Attach to Chat", use_container_width=True):
+                            try:
+                                import io
+
+                                reader = PdfReader(io.BytesIO(pdf_bytes))
+                                texts = []
+                                for page in reader.pages:
+                                    try:
+                                        t = page.extract_text() or ""
+                                        if t:
+                                            texts.append(t)
+                                    except Exception:
+                                        continue
+                                content = "\n\n".join(texts).strip()
+                                if not content:
+                                    st.warning("No text extracted from the PDF.")
+                                else:
+                                    if len(content) > 100_000:
+                                        content = content[:100_000] + "\n\n...[truncated]"
+                                    st.session_state.chat_history.append(
+                                        {
+                                            "role": "user",
+                                            "content": f"📄 Attached PDF: {uploaded_pdf.name}\n\n{content}",
+                                        }
+                                    )
+                                    st.success("PDF content attached to chat.")
+                                    st.rerun()
+                            except Exception as e:
+                                st.error(f"Failed to read PDF: {e}")
+
+                    with pdf_btn_col2:
+                        if st.button("🔍 Analyze Now", use_container_width=True):
+                            try:
+                                import io
+
+                                reader = PdfReader(io.BytesIO(pdf_bytes))
+                                texts = []
+                                for page in reader.pages:
+                                    try:
+                                        t = page.extract_text() or ""
+                                        if t:
+                                            texts.append(t)
+                                    except Exception:
+                                        continue
+                                content = "\n\n".join(texts).strip()
+                                if not content:
+                                    st.warning("No text extracted from the PDF.")
+                                else:
+                                    if len(content) > 80_000:
+                                        content = content[:80_000] + "\n\n...[truncated]"
+                                    prompt = (
+                                        f"Please analyze the attached PDF datasheet '{uploaded_pdf.name}'. "
+                                        f"Summarize key points, risks, and any financial metrics or terms.\n\n"
+                                        f"Extracted text follows:\n{content}"
+                                    )
+                                    st.session_state.chat_history.append(
+                                        {"role": "user", "content": prompt}
+                                    )
+                                    with st.spinner("Analyzing PDF..."):
+                                        response = agent.chat(prompt)
+                                    st.session_state.chat_history.append(
+                                        {"role": "assistant", "content": response}
+                                    )
+                                    st.rerun()
+                            except Exception as e:
+                                st.error(f"Failed to analyze PDF: {e}")
+
+            # AI Model Selection
+            with adv_col2:
+                st.markdown("**🤖 AI Model Configuration**")
+                all_models = [
+                    (
+                        "Azure GPT-4.1",
+                        {
+                            "provider": "azure-openai",
+                            "endpoint": "https://kallamai.openai.azure.com/",
+                            "model": "gpt-4.1",
+                        },
+                    ),
+                    (
+                        "Azure GPT-4.1 Mini",
+                        {
+                            "provider": "azure-openai",
+                            "endpoint": "https://kallamai.openai.azure.com/",
+                            "model": "gpt-4.1-mini",
+                        },
+                    ),
+                    (
+                        "Azure o4-mini",
+                        {
+                            "provider": "azure-openai",
+                            "endpoint": "https://kallamai.openai.azure.com/",
+                            "model": "o4-mini",
+                        },
+                    ),
+                    (
+                        "Azure GPT-5",
+                        {
+                            "provider": "azure-openai",
+                            "endpoint": "https://kallamai.openai.azure.com/",
+                            "model": "gpt-5",
+                        },
+                    ),
+                    (
+                        "Azure GPT-5 Mini",
+                        {
+                            "provider": "azure-openai",
+                            "endpoint": "https://kallamai.openai.azure.com/",
+                            "model": "gpt-5-mini",
+                        },
+                    ),
+                    (
+                        "Claude Sonnet 4 (thinking)",
+                        {"provider": "anthropic", "model": "claude-sonnet-4-20250514"},
+                    ),
+                    (
+                        "Gemini 2.0 Flash Lite",
+                        {"provider": "vertex-ai", "model": "gemini-2.0-flash-lite-001"},
+                    ),
+                    (
+                        "Gemini 2.5 Pro (thinking)",
+                        {"provider": "vertex-ai", "model": "gemini-2.5-pro"},
+                    ),
+                ]
+                model_choice = st.selectbox(
+                    "Select Model",
+                    all_models,
+                    format_func=lambda x: x[0],
+                    key="model_selector"
+                )
+                if st.button("Apply Model", use_container_width=True):
+                    try:
+                        meta = model_choice[1]
+                        provider_key = meta.get("provider")
+                        if provider_key == "azure-openai":
+                            azure_key = os.getenv("AZURE_OPENAI_API_KEY", "")
+                            agent.set_llm_config(
+                                provider="azure-openai",
+                                azure_endpoint=meta.get("endpoint"),
+                                azure_api_key=azure_key,
+                                azure_model=meta.get("model"),
+                            )
+                        elif provider_key == "anthropic":
+                            anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
+                            agent.set_llm_config(
+                                provider="anthropic",
+                                anthropic_api_key=anthropic_key,
+                                anthropic_model=meta.get("model"),
+                            )
+                        else:
+                            project = os.getenv(
+                                "GOOGLE_VERTEX_PROJECT", "mystic-fountain-415918"
+                            )
+                            location = os.getenv("GOOGLE_VERTEX_LOCATION", "us-central1")
+                            agent.set_llm_config(
+                                provider="vertex-ai",
+                                vertex_project=project,
+                                vertex_location=location,
+                                vertex_model=meta.get("model"),
+                            )
+                        st.success(f"Model set to {model_choice[0]}")
+                    except Exception as e:
+                        st.error(f"Failed to set model: {e}")
+
+    def render_portfolio_overview(self, portfolio_manager, market_data_service):
         """Render portfolio overview with transactions."""
         st.header("📊 Portfolio Overview")
 
@@ -573,51 +611,81 @@ class PortfolioTrackerUI:
                     f"📅 Latest price update: {latest_update.strftime('%Y-%m-%d %H:%M')}"
                 )
 
-        # Show latest snapshot date
-        latest_snapshot = portfolio_manager.storage.get_latest_snapshot(portfolio.id)
-        if latest_snapshot:
-            st.info(f"🗓️ Latest snapshot: {latest_snapshot.date.isoformat()}")
+        # Data status row
+        status_col1, status_col2 = st.columns(2)
+        with status_col1:
+            latest_snapshot = portfolio_manager.storage.get_latest_snapshot(portfolio.id)
+            if latest_snapshot:
+                st.caption(f"🗓️ Latest snapshot: {latest_snapshot.date.isoformat()}")
 
-        # Add single update button with duration control
-        col1, col2, col3 = st.columns([1, 1, 2])
+        with status_col2:
+            if market_data_service is not None:
+                freshness = market_data_service.freshness
+                freshness_text = freshness.freshness_display
+                if freshness.is_stale:
+                    st.caption(f"📡 Prices: ⚠️ {freshness_text}")
+                else:
+                    st.caption(f"📡 Prices: ✅ {freshness_text}")
+
+        # Data update controls
+        col1, col2, col3, col4 = st.columns([1, 1, 1, 2])
         with col1:
             days_to_update = st.selectbox(
-                "Update Period",
+                "Period",
                 [7, 14, 30, 60, 90, 180, 365],
                 index=2,  # Default to 30 days
                 help="Number of days back to update with fresh market data"
             )
 
         with col2:
-            if st.button("📈 Update Market Data", help="Fetch fresh market data and update snapshots", type="primary"):
-                with st.spinner(f"Updating market data for last {days_to_update} days..."):
+            if st.button("📈 Update Snapshots", help="Fetch prices and create/update historical snapshots", type="primary"):
+                with st.spinner(f"Updating snapshots for last {days_to_update} days..."):
                     try:
                         end_date = date.today()
                         start_date = end_date - timedelta(days=days_to_update)
                         logging.info(f"Updating snapshots from {start_date} to {end_date}")
                         refreshed = portfolio_manager.create_snapshots_for_range(start_date, end_date, save=True)
-                        st.success(f"✅ Updated {len(refreshed)} snapshots with fresh market data (saved to storage)")
+                        # Update freshness tracking
+                        if market_data_service and portfolio_manager.current_portfolio:
+                            market_data_service.refresh_all(portfolio_manager.current_portfolio)
+                        st.success(f"✅ Updated {len(refreshed)} snapshots")
                         st.rerun()
                     except Exception as e:
                         import traceback
                         error_details = traceback.format_exc()
                         logging.error(f"Failed to update market data: {error_details}")
-                        st.error(f"❌ Failed to update market data: {str(e)}")
+                        st.error(f"❌ Failed to update: {str(e)}")
 
         with col3:
-            st.info("💡 This fetches fresh prices and updates snapshots. Transactions automatically update snapshots with existing data.")
+            if st.button("💰 Quick Refresh", help="Update current prices only (faster, no snapshots)"):
+                with st.spinner("Refreshing prices..."):
+                    if market_data_service and portfolio_manager.current_portfolio:
+                        result = market_data_service.refresh_all(portfolio_manager.current_portfolio)
+                        st.success(f"✅ {result.symbols_updated} prices updated")
+                        st.rerun()
+                    else:
+                        price_results = portfolio_manager.update_current_prices()
+                        success_count = sum(price_results.values())
+                        st.success(f"✅ {success_count} prices updated")
+                        st.rerun()
 
-        # Key metrics
-        col1, col2, col3, col4 = st.columns(4)
+        with col4:
+            st.caption("💡 **Snapshots**: Updates historical data for analytics. **Quick Refresh**: Just updates current prices.")
 
-        with col1:
-            st.metric("Total Value", f"${total_value:,.2f}")
+        # Key metrics - styled container
+        st.markdown("### 📈 Portfolio Summary")
 
-        with col2:
+        # First row: Core metrics
+        metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
+
+        with metric_col1:
+            st.metric("💰 Total Value", f"${total_value:,.2f}")
+
+        with metric_col2:
             total_positions = len(positions)
-            st.metric("Positions", total_positions)
+            st.metric("📋 Positions", total_positions)
 
-        with col3:
+        with metric_col3:
             # Sum cash across currencies in base currency
             cash_total_base = Decimal("0")
             if portfolio.cash_balances:
@@ -630,15 +698,16 @@ class PortfolioTrackerUI:
                         portfolio.base_currency.value,
                         allow_fetch=True,
                     )
-            st.metric("Cash (base)", f"${cash_total_base:,.2f}")
+            st.metric("💵 Cash (base)", f"${cash_total_base:,.2f}")
 
-        with col4:
+        with metric_col4:
             # Calculate total P&L
             total_pnl = sum(
                 float(pos.get("unrealized_pnl", 0) or 0) for pos in positions
             )
             # Color-coded P&L metric - the delta parameter automatically colors positive green and negative red
-            st.metric("Unrealized P&L", f"${total_pnl:,.2f}", delta=f"{total_pnl:,.2f}")
+            pnl_icon = "📈" if total_pnl >= 0 else "📉"
+            st.metric(f"{pnl_icon} Unrealized P&L", f"${total_pnl:,.2f}", delta=f"{total_pnl:,.2f}")
 
         # Additional metrics: YTD Performance (TWR) and Unrealized P&L (%)
         ytd_col1, ytd_col2 = st.columns(2)
@@ -928,30 +997,34 @@ class PortfolioTrackerUI:
                 allow_fetch=fetch_live,
             )
 
-        # Add transaction form
-        st.subheader("➕ Add Transaction")
-        self.render_transaction_form(portfolio_manager)
+        # Transactions Section
+        st.markdown("---")
+        st.subheader("📝 Transactions")
 
-        # Recent transactions
-        st.subheader("📝 Recent Transactions")
-        transactions = portfolio_manager.get_transaction_history()
+        trans_tab1, trans_tab2 = st.tabs(["Recent Transactions", "➕ Add New"])
 
-        if transactions:
-            df_transactions = pd.DataFrame(transactions)
-            df_transactions["timestamp"] = pd.to_datetime(
-                df_transactions["timestamp"]
-            ).dt.strftime("%Y-%m-%d %H:%M")
+        with trans_tab1:
+            transactions = portfolio_manager.get_transaction_history()
 
-            # Format monetary columns
-            for col in ["quantity", "price", "total_value"]:
-                if col in df_transactions.columns:
-                    df_transactions[col] = df_transactions[col].apply(
-                        lambda x: f"{float(x):,.2f}"
-                    )
+            if transactions:
+                df_transactions = pd.DataFrame(transactions)
+                df_transactions["timestamp"] = pd.to_datetime(
+                    df_transactions["timestamp"]
+                ).dt.strftime("%Y-%m-%d %H:%M")
 
-            st.dataframe(df_transactions, use_container_width=True)
-        else:
-            st.info("No recent transactions found.")
+                # Format monetary columns
+                for col in ["quantity", "price", "total_value"]:
+                    if col in df_transactions.columns:
+                        df_transactions[col] = df_transactions[col].apply(
+                            lambda x: f"{float(x):,.2f}"
+                        )
+
+                st.dataframe(df_transactions, use_container_width=True)
+            else:
+                st.info("No recent transactions found.")
+
+        with trans_tab2:
+            self.render_transaction_form(portfolio_manager)
 
     def plot_allocation_by_category(
         self,
@@ -1476,21 +1549,41 @@ class PortfolioTrackerUI:
             st.warning("Please load a portfolio to view analytics.")
             return
 
-        # Analysis date range selection
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            default_range = (date.today() - timedelta(days=365), date.today())
-            date_range = st.date_input("Analysis Range", value=default_range)
-        with col2:
-            benchmark = st.text_input("Benchmark Symbol", value="SPY")
-        with col3:
-            display_currency_code = st.selectbox(
-                "Display Currency",
-                [c.value for c in Currency],
-                index=[c.value for c in Currency].index(
-                    portfolio_manager.current_portfolio.base_currency.value
-                ),
-            )
+        # Analysis Configuration Panel
+        with st.container():
+            st.markdown("#### ⚙️ Analysis Configuration")
+            config_col1, config_col2, config_col3, config_col4 = st.columns([2, 1, 1, 1])
+
+            with config_col1:
+                default_range = (date.today() - timedelta(days=365), date.today())
+                date_range = st.date_input("📅 Analysis Period", value=default_range)
+
+            with config_col2:
+                benchmark = st.text_input("📊 Benchmark", value="SPY", help="Compare against a market index")
+
+            with config_col3:
+                display_currency_code = st.selectbox(
+                    "💱 Currency",
+                    [c.value for c in Currency],
+                    index=[c.value for c in Currency].index(
+                        portfolio_manager.current_portfolio.base_currency.value
+                    ),
+                    help="Display all values in this currency"
+                )
+
+            with config_col4:
+                # Quick period selectors
+                st.markdown("**Quick Select**")
+                period_options = {"1M": 30, "3M": 90, "6M": 180, "1Y": 365, "2Y": 730}
+                if st.selectbox(
+                    "Period",
+                    list(period_options.keys()),
+                    index=3,  # 1Y
+                    key="quick_period",
+                    label_visibility="collapsed"
+                ):
+                    # This is just for display; the actual date_range input is used
+                    pass
 
         # Normalize date range
         if isinstance(date_range, tuple) and len(date_range) == 2:
@@ -1620,6 +1713,7 @@ class PortfolioTrackerUI:
             }
 
         # Display unified metrics with descriptions
+        st.markdown("---")
         st.subheader("📊 Performance Summary")
 
         # Core Performance Metrics
@@ -1701,6 +1795,7 @@ class PortfolioTrackerUI:
             st.caption("📈 Return vs max drawdown ratio")
 
         # Risk Metrics Section
+        st.markdown("---")
         st.subheader("⚠️ Risk Analysis")
         col1, col2, col3 = st.columns(3)
 
@@ -1720,6 +1815,7 @@ class PortfolioTrackerUI:
             st.caption("🔄 Alternative return calculation method")
 
         # Benchmark Comparison (if available)
+        st.markdown("---")
         if metrics.get("benchmark_available"):
             st.subheader(f"📊 Benchmark Comparison ({benchmark})")
             col1, col2, col3, col4 = st.columns(4)
@@ -1797,17 +1893,8 @@ class PortfolioTrackerUI:
                 st.warning(f"Could not calculate money-weighted returns: {e}")
                 st.info("💡 Money-weighted returns require additional data processing.")
 
-        # Prepare benchmark series (aligned to snapshot dates)
-        bench_map: Dict[date, float] = {}
-        try:
-            price_data = portfolio_manager.data_manager.get_historical_prices(
-                benchmark, start_date, end_date
-            )
-            for pd_item in price_data:
-                if pd_item.close_price:
-                    bench_map[pd_item.date] = float(pd_item.close_price)
-        except Exception:
-            bench_map = {}
+        # Use benchmark prices from metrics calculation (avoids duplicate fetch)
+        bench_map: Dict[date, float] = comprehensive_metrics.get("benchmark_prices", {})
 
         # Align benchmark prices to snapshot dates with forward-fill
         bench_prices_aligned: List[Optional[float]] = []
@@ -2251,43 +2338,52 @@ class PortfolioTrackerUI:
             st.error(f"Could not create current portfolio snapshot: {e}")
             return
 
-        # Configuration sidebar
-        with st.sidebar:
-            st.header("🔧 Scenario Settings")
+        # Simulation Settings (in main tab area)
+        st.subheader("🔧 Simulation Settings")
 
-            # Time horizon
-            projection_years = st.slider("Projection Period (Years)", 1.0, 10.0, 5.0, 0.5)
+        settings_col1, settings_col2, settings_col3 = st.columns(3)
 
-            # Simulation parameters
+        with settings_col1:
+            projection_years = st.slider(
+                "Projection Period (Years)",
+                1.0, 10.0, 5.0, 0.5,
+                help="How far into the future to project",
+                key="scenario_projection_years"
+            )
             monte_carlo_runs = st.selectbox(
                 "Monte Carlo Runs",
                 [500, 1000, 2500, 5000],
                 index=1,
-                help="More runs = more accurate but slower"
+                help="More runs = more accurate but slower",
+                key="scenario_monte_carlo_runs"
             )
 
+        with settings_col2:
             confidence_levels = st.multiselect(
                 "Confidence Intervals (%)",
                 [5, 10, 25, 50, 75, 90, 95],
                 default=[5, 25, 50, 75, 95],
-                help="Percentiles to show in charts"
+                help="Percentiles to show in charts",
+                key="scenario_confidence_levels"
             )
 
-            # Cash flow assumptions
-            st.subheader("💰 Cash Flows")
+        with settings_col3:
+            st.markdown("**💰 Cash Flow Assumptions**")
             recurring_deposits = st.number_input(
                 "Monthly Deposits ($)",
                 min_value=0.0,
                 value=0.0,
                 step=100.0,
-                help="Regular monthly contributions"
+                help="Regular monthly contributions",
+                key="scenario_monthly_deposits"
             )
             recurring_withdrawals = st.number_input(
                 "Monthly Withdrawals ($)",
                 min_value=0.0,
                 value=0.0,
                 step=100.0,
-                help="Regular monthly withdrawals"
+                help="Regular monthly withdrawals",
+                key="scenario_monthly_withdrawals"
             )
 
         # Convert confidence levels to decimals
@@ -2618,38 +2714,44 @@ class PortfolioTrackerUI:
             market_return = st.slider(
                 "Expected Annual Return (%)",
                 min_value=-20.0, max_value=30.0, value=8.0, step=0.5,
-                help="Expected market return per year"
+                help="Expected market return per year",
+                key="whatif_market_return"
             ) / 100.0
 
             projection_years = st.slider(
                 "Projection Period (Years)",
-                min_value=0.5, max_value=10.0, value=2.0, step=0.5
+                min_value=0.5, max_value=10.0, value=2.0, step=0.5,
+                key="whatif_projection_years"
             )
 
         with col2:
             market_volatility = st.slider(
                 "Market Volatility (%)",
                 min_value=5.0, max_value=80.0, value=20.0, step=1.0,
-                help="Annual volatility/risk level"
+                help="Annual volatility/risk level",
+                key="whatif_market_volatility"
             ) / 100.0
 
             monte_carlo_runs = st.selectbox(
                 "Simulation Runs",
                 [500, 1000, 2500, 5000],
                 index=1,
-                help="More runs = more accurate but slower"
+                help="More runs = more accurate but slower",
+                key="whatif_monte_carlo_runs"
             )
 
         with col3:
             recurring_deposits = st.number_input(
                 "Monthly Deposits ($)",
                 min_value=0.0, value=0.0, step=100.0,
-                help="Regular monthly contributions"
+                help="Regular monthly contributions",
+                key="whatif_monthly_deposits"
             )
 
             stress_test = st.checkbox(
                 "Apply Stress Test Conditions",
-                help="Force negative returns and high volatility"
+                help="Force negative returns and high volatility",
+                key="whatif_stress_test"
             )
 
         # Run analysis button
@@ -2717,35 +2819,41 @@ class PortfolioTrackerUI:
             symbol = st.text_input(
                 "Stock Symbol",
                 placeholder="e.g., NVDA, TSLA, AMZN",
-                help="Enter the stock symbol you want to test"
+                help="Enter the stock symbol you want to test",
+                key="hypo_symbol"
             ).upper()
 
             investment_type = st.radio(
                 "Investment Method",
                 ["Dollar Amount", "Share Quantity"],
-                help="Choose how to specify the investment size"
+                help="Choose how to specify the investment size",
+                key="hypo_investment_type"
             )
 
             if investment_type == "Dollar Amount":
                 investment_amount = st.number_input(
                     "Investment Amount ($)",
-                    min_value=100.0, value=5000.0, step=100.0
+                    min_value=100.0, value=5000.0, step=100.0,
+                    key="hypo_investment_amount"
                 )
                 purchase_price = st.number_input(
                     "Expected Purchase Price ($)",
                     min_value=0.01, value=100.0, step=0.01,
-                    help="Price per share you expect to pay"
+                    help="Price per share you expect to pay",
+                    key="hypo_purchase_price_dollar"
                 )
                 quantity = investment_amount / purchase_price if purchase_price > 0 else 0
                 st.info(f"This equals approximately {quantity:.1f} shares")
             else:
                 quantity = st.number_input(
                     "Number of Shares",
-                    min_value=1.0, value=100.0, step=1.0
+                    min_value=1.0, value=100.0, step=1.0,
+                    key="hypo_num_shares"
                 )
                 purchase_price = st.number_input(
                     "Purchase Price per Share ($)",
-                    min_value=0.01, value=100.0, step=0.01
+                    min_value=0.01, value=100.0, step=0.01,
+                    key="hypo_purchase_price_shares"
                 )
                 investment_amount = quantity * purchase_price
                 st.info(f"Total investment: ${investment_amount:,.2f}")
@@ -2755,13 +2863,15 @@ class PortfolioTrackerUI:
                 "Market Scenario",
                 ["optimistic", "likely", "pessimistic", "stress"],
                 index=1,
-                help="Choose the market conditions to test under"
+                help="Choose the market conditions to test under",
+                key="hypo_scenario"
             )
 
             time_horizon = st.slider(
                 "Time Horizon (Years)",
                 min_value=0.5, max_value=5.0, value=1.0, step=0.5,
-                help="How long to project the investment"
+                help="How long to project the investment",
+                key="hypo_time_horizon"
             )
 
             # Show scenario details

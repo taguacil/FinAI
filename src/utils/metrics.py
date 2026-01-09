@@ -765,32 +765,52 @@ class FinancialMetricsCalculator:
 
         return float(annual_return / max_drawdown)
 
-    def get_benchmark_returns(
+    def get_benchmark_data(
         self, symbol: str, start_date: date, end_date: date
-    ) -> List[float]:
-        """Get benchmark returns for comparison."""
+    ) -> tuple[List[float], Dict[date, float]]:
+        """Get benchmark returns and prices with a single fetch.
+
+        Returns:
+            Tuple of (returns list, prices dict)
+        """
         try:
             price_data = self.data_manager.get_historical_prices(
                 symbol, start_date, end_date
             )
 
-            if len(price_data) < 2:
-                return []
+            prices: Dict[date, float] = {}
+            returns: List[float] = []
 
-            returns = []
-            for i in range(1, len(price_data)):
-                prev_price = float(price_data[i - 1].close_price or 0)
-                curr_price = float(price_data[i].close_price or 0)
+            for i, pd_item in enumerate(price_data):
+                if pd_item.close_price:
+                    prices[pd_item.date] = float(pd_item.close_price)
 
-                if prev_price > 0:
-                    daily_return = (curr_price - prev_price) / prev_price
-                    returns.append(daily_return)
+                    if i > 0:
+                        prev_price = float(price_data[i - 1].close_price or 0)
+                        curr_price = float(pd_item.close_price)
+                        if prev_price > 0:
+                            daily_return = (curr_price - prev_price) / prev_price
+                            returns.append(daily_return)
 
-            return returns
+            return returns, prices
 
         except Exception as e:
-            logging.error(f"Error getting benchmark returns for {symbol}: {e}")
-            return []
+            logging.error(f"Error getting benchmark data for {symbol}: {e}")
+            return [], {}
+
+    def get_benchmark_returns(
+        self, symbol: str, start_date: date, end_date: date
+    ) -> List[float]:
+        """Get benchmark returns for comparison."""
+        returns, _ = self.get_benchmark_data(symbol, start_date, end_date)
+        return returns
+
+    def get_benchmark_prices(
+        self, symbol: str, start_date: date, end_date: date
+    ) -> Dict[date, float]:
+        """Get benchmark prices as a dict for chart alignment."""
+        _, prices = self.get_benchmark_data(symbol, start_date, end_date)
+        return prices
 
     def calculate_value_at_risk(
         self, returns: List[float], confidence_level: float = 0.05
@@ -861,10 +881,10 @@ class FinancialMetricsCalculator:
         if len(portfolio_returns) == 0:
             return {"error": "Could not calculate returns"}
 
-        # Get benchmark returns
+        # Get benchmark data (returns and prices in one fetch)
         start_date = snapshots[0].date
         end_date = snapshots[-1].date
-        benchmark_returns = self.get_benchmark_returns(
+        benchmark_returns, benchmark_prices = self.get_benchmark_data(
             benchmark_symbol, start_date, end_date
         )
 
@@ -917,6 +937,8 @@ class FinancialMetricsCalculator:
             # Benchmark comparison (if available)
             "benchmark_symbol": benchmark_symbol,
             "benchmark_available": len(benchmark_returns_aligned) > 0,
+            # Include benchmark prices for chart reuse (avoids duplicate fetch)
+            "benchmark_prices": benchmark_prices,
         }
 
         # Add benchmark-relative metrics if benchmark data is available

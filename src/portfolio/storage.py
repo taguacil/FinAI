@@ -1,5 +1,8 @@
 """
 Portfolio storage system for persisting data to filesystem.
+
+This module provides file-based storage for portfolios and delegates
+snapshot storage to the SQLite-based SnapshotStore for improved performance.
 """
 
 import json
@@ -7,9 +10,12 @@ import logging
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
+
+import pandas as pd
 
 from .models import Portfolio, PortfolioSnapshot
+from .snapshot_store import SnapshotStore
 
 
 class PortfolioEncoder(json.JSONEncoder):
@@ -47,7 +53,11 @@ class PortfolioDecoder:
 
 
 class FileBasedStorage:
-    """File-based storage system for portfolio data."""
+    """File-based storage system for portfolio data.
+
+    Portfolio data is stored as JSON files for simplicity.
+    Snapshot data is delegated to SQLite-based SnapshotStore for performance.
+    """
 
     def __init__(self, data_dir: str = "data"):
         """Initialize storage with data directory."""
@@ -58,6 +68,12 @@ class FileBasedStorage:
         # Create directories if they don't exist
         self.portfolios_dir.mkdir(parents=True, exist_ok=True)
         self.snapshots_dir.mkdir(parents=True, exist_ok=True)
+
+        # Initialize SQLite-based snapshot store
+        self._snapshot_store = SnapshotStore(data_dir)
+
+        # Track which portfolios have been migrated
+        self._migrated_portfolios: set = set()
 
     def save_portfolio(self, portfolio: Portfolio) -> None:
         """Save portfolio to file."""
@@ -113,105 +129,41 @@ class FileBasedStorage:
         return False
 
     def save_snapshot(self, portfolio_id: str, snapshot: PortfolioSnapshot) -> None:
-        """Save portfolio snapshot into a consolidated file per portfolio.
+        """Save portfolio snapshot to SQLite store.
 
-        New structure: data/snapshots/{portfolio_id}.json containing an array of
-        daily snapshots. If a snapshot for the date exists, it is replaced.
+        Args:
+            portfolio_id: The portfolio ID
+            snapshot: The snapshot to save
         """
-        try:
-            if not portfolio_id.replace("-", "").replace("_", "").isalnum():
-                raise ValueError(f"Invalid portfolio ID: {portfolio_id}")
+        if not portfolio_id.replace("-", "").replace("_", "").isalnum():
+            raise ValueError(f"Invalid portfolio ID: {portfolio_id}")
 
-            consolidated_path = self.snapshots_dir / f"{portfolio_id}.json"
+        # Ensure migration has happened for this portfolio
+        self._ensure_migrated(portfolio_id)
 
-            snapshots_data = []
-            if consolidated_path.exists():
-                with open(consolidated_path, "r") as f:
-                    snapshots_data = json.load(
-                        f, object_hook=PortfolioDecoder.decimal_hook
-                    )
-
-                # Ensure snapshots_data is a list
-                if isinstance(snapshots_data, dict):
-                    # Migrate old single-snapshot structure if encountered
-                    snapshots_data = [snapshots_data]
-
-            # Remove any existing snapshot for this date
-            snapshot_date_str = snapshot.date.isoformat()
-            snapshots_data = [
-                s for s in snapshots_data if s.get("date") != snapshot_date_str
-            ]
-
-            # Append new snapshot (ensure date is a string for consistent sorting)
-            new_item = snapshot.dict()
-            new_item["date"] = snapshot_date_str
-            snapshots_data.append(new_item)
-
-            # Sort by date
-            snapshots_data.sort(key=lambda s: s.get("date"))
-
-            with open(consolidated_path, "w") as f:
-                json.dump(snapshots_data, f, cls=PortfolioEncoder, indent=2)
-
-        except Exception as e:
-            raise RuntimeError(
-                f"Failed to save snapshot for portfolio {portfolio_id}: {e}"
-            ) from e
+        # Delegate to SQLite store
+        self._snapshot_store.save_snapshot(portfolio_id, snapshot)
 
     def save_snapshots_batch(self, portfolio_id: str, snapshots: List[PortfolioSnapshot]) -> None:
-        """Save multiple portfolio snapshots in a single file operation.
+        """Save multiple portfolio snapshots efficiently.
 
-        This is much more efficient than calling save_snapshot multiple times
-        as it only reads/writes the file once.
+        Uses SQLite transactions for atomic batch inserts.
+
+        Args:
+            portfolio_id: The portfolio ID
+            snapshots: List of snapshots to save
         """
         if not snapshots:
             return
 
-        try:
-            if not portfolio_id.replace("-", "").replace("_", "").isalnum():
-                raise ValueError(f"Invalid portfolio ID: {portfolio_id}")
+        if not portfolio_id.replace("-", "").replace("_", "").isalnum():
+            raise ValueError(f"Invalid portfolio ID: {portfolio_id}")
 
-            consolidated_path = self.snapshots_dir / f"{portfolio_id}.json"
+        # Ensure migration has happened for this portfolio
+        self._ensure_migrated(portfolio_id)
 
-            snapshots_data = []
-            if consolidated_path.exists():
-                with open(consolidated_path, "r") as f:
-                    snapshots_data = json.load(
-                        f, object_hook=PortfolioDecoder.decimal_hook
-                    )
-
-                # Ensure snapshots_data is a list
-                if isinstance(snapshots_data, dict):
-                    # Migrate old single-snapshot structure if encountered
-                    snapshots_data = [snapshots_data]
-
-            # Create a set of dates we're updating for efficient filtering
-            new_snapshot_dates = {snapshot.date.isoformat() for snapshot in snapshots}
-
-            # Remove any existing snapshots for the dates we're updating
-            snapshots_data = [
-                s for s in snapshots_data if s.get("date") not in new_snapshot_dates
-            ]
-
-            # Add all new snapshots
-            for snapshot in snapshots:
-                new_item = snapshot.dict()
-                new_item["date"] = snapshot.date.isoformat()
-                snapshots_data.append(new_item)
-
-            # Sort by date once at the end
-            snapshots_data.sort(key=lambda s: s.get("date"))
-
-            # Write the file once
-            with open(consolidated_path, "w") as f:
-                json.dump(snapshots_data, f, cls=PortfolioEncoder, indent=2)
-
-            logging.info(f"Batch saved {len(snapshots)} snapshots for portfolio {portfolio_id}")
-
-        except Exception as e:
-            raise RuntimeError(
-                f"Failed to batch save snapshots for portfolio {portfolio_id}: {e}"
-            ) from e
+        # Delegate to SQLite store
+        self._snapshot_store.save_snapshots_batch(portfolio_id, snapshots)
 
     def load_snapshots(
         self,
@@ -219,77 +171,146 @@ class FileBasedStorage:
         start_date: Optional[date] = None,
         end_date: Optional[date] = None,
     ) -> List[PortfolioSnapshot]:
-        """Load portfolio snapshots within date range."""
-        consolidated_path = self.snapshots_dir / f"{portfolio_id}.json"
+        """Load portfolio snapshots within date range.
 
-        # If consolidated file doesn't exist, attempt migration from legacy per-day files
-        if not consolidated_path.exists():
-            legacy_dir = self.snapshots_dir / portfolio_id
-            if legacy_dir.exists():
-                try:
-                    legacy_snapshots: List[PortfolioSnapshot] = []
-                    for filepath in legacy_dir.glob("*.json"):
-                        try:
-                            with open(filepath, "r") as f:
-                                data = json.load(
-                                    f, object_hook=PortfolioDecoder.decimal_hook
-                                )
-                            legacy_snapshots.append(PortfolioSnapshot(**data))
-                        except Exception as e:
-                            print(f"Error loading legacy snapshot {filepath}: {e}")
-                            continue
+        Uses SQLite for efficient indexed queries.
 
-                    # Write consolidated file
-                    legacy_snapshots_sorted = sorted(
-                        legacy_snapshots, key=lambda x: x.date
-                    )
-                    with open(consolidated_path, "w") as f:
-                        json.dump(
-                            [s.dict() for s in legacy_snapshots_sorted],
-                            f,
-                            cls=PortfolioEncoder,
-                            indent=2,
-                        )
-                except Exception as e:
-                    print(f"Error migrating legacy snapshots for {portfolio_id}: {e}")
-                    # Fall through to return from legacy in-memory if migration fails
-                    pass
+        Args:
+            portfolio_id: The portfolio ID
+            start_date: Optional start date (inclusive)
+            end_date: Optional end date (inclusive)
 
-        if not consolidated_path.exists():
-            return []
+        Returns:
+            List of PortfolioSnapshot objects, sorted by date
+        """
+        # Ensure migration has happened for this portfolio
+        self._ensure_migrated(portfolio_id)
 
-        try:
-            with open(consolidated_path, "r") as f:
-                snapshots_data = json.load(f, object_hook=PortfolioDecoder.decimal_hook)
-
-            snapshots: List[PortfolioSnapshot] = []
-            for item in snapshots_data:
-                try:
-                    snap = PortfolioSnapshot(**item)
-                    if start_date and snap.date < start_date:
-                        continue
-                    if end_date and snap.date > end_date:
-                        continue
-                    snapshots.append(snap)
-                except Exception as e:
-                    print(f"Error parsing snapshot item: {e}")
-                    continue
-
-            return sorted(snapshots, key=lambda x: x.date)
-        except Exception as e:
-            print(f"Error loading snapshots for {portfolio_id}: {e}")
-            return []
+        # Delegate to SQLite store
+        return self._snapshot_store.load_snapshots(portfolio_id, start_date, end_date)
 
     def get_latest_snapshot(self, portfolio_id: str) -> Optional[PortfolioSnapshot]:
         """Get the most recent snapshot for a portfolio."""
-        snapshots = self.load_snapshots(portfolio_id)
-        return snapshots[-1] if snapshots else None
+        self._ensure_migrated(portfolio_id)
+        return self._snapshot_store.get_latest_snapshot(portfolio_id)
 
     def get_snapshots_in_range(
         self, portfolio_id: str, start_date: date, end_date: date
     ) -> List[PortfolioSnapshot]:
         """Get snapshots within a specific date range."""
         return self.load_snapshots(portfolio_id, start_date, end_date)
+
+    def load_snapshots_df(
+        self,
+        portfolio_id: str,
+        start_date: Optional[date] = None,
+        end_date: Optional[date] = None,
+    ) -> pd.DataFrame:
+        """Load snapshots as a DataFrame for analytics.
+
+        Args:
+            portfolio_id: The portfolio ID
+            start_date: Optional start date
+            end_date: Optional end date
+
+        Returns:
+            DataFrame with snapshot data (date index, value columns)
+        """
+        self._ensure_migrated(portfolio_id)
+        return self._snapshot_store.load_snapshots_df(portfolio_id, start_date, end_date)
+
+    def get_snapshot_date_range(self, portfolio_id: str) -> Optional[Tuple[date, date]]:
+        """Get the date range of available snapshots.
+
+        Args:
+            portfolio_id: The portfolio ID
+
+        Returns:
+            Tuple of (earliest_date, latest_date) or None if no snapshots
+        """
+        self._ensure_migrated(portfolio_id)
+        return self._snapshot_store.get_date_range(portfolio_id)
+
+    def get_snapshot_count(self, portfolio_id: str) -> int:
+        """Get the number of snapshots for a portfolio.
+
+        Args:
+            portfolio_id: The portfolio ID
+
+        Returns:
+            Number of snapshots
+        """
+        self._ensure_migrated(portfolio_id)
+        return self._snapshot_store.get_snapshot_count(portfolio_id)
+
+    def delete_snapshots(
+        self,
+        portfolio_id: str,
+        start_date: Optional[date] = None,
+        end_date: Optional[date] = None,
+    ) -> int:
+        """Delete snapshots within a date range.
+
+        Args:
+            portfolio_id: The portfolio ID
+            start_date: Optional start date
+            end_date: Optional end date
+
+        Returns:
+            Number of snapshots deleted
+        """
+        self._ensure_migrated(portfolio_id)
+        return self._snapshot_store.delete_snapshots(portfolio_id, start_date, end_date)
+
+    def _ensure_migrated(self, portfolio_id: str) -> None:
+        """Ensure JSON snapshots have been migrated to SQLite.
+
+        Checks if there's a JSON file that hasn't been migrated yet,
+        and if so, migrates it to the SQLite store.
+
+        Args:
+            portfolio_id: The portfolio ID
+        """
+        # Skip if already migrated in this session
+        if portfolio_id in self._migrated_portfolios:
+            return
+
+        # Check if SQLite already has data for this portfolio
+        if self._snapshot_store.has_snapshots(portfolio_id):
+            self._migrated_portfolios.add(portfolio_id)
+            return
+
+        # Check for JSON file to migrate
+        json_path = self.snapshots_dir / f"{portfolio_id}.json"
+        if json_path.exists():
+            logging.info(f"Migrating snapshots from JSON for portfolio {portfolio_id}")
+            migrated_count = self._snapshot_store.migrate_from_json(portfolio_id, json_path)
+            if migrated_count > 0:
+                logging.info(f"Successfully migrated {migrated_count} snapshots to SQLite")
+                # Keep JSON file as backup (don't delete)
+
+        # Also check for legacy per-day directory structure
+        legacy_dir = self.snapshots_dir / portfolio_id
+        if legacy_dir.exists() and legacy_dir.is_dir():
+            # First consolidate to JSON, then migrate
+            try:
+                legacy_snapshots: List[PortfolioSnapshot] = []
+                for filepath in legacy_dir.glob("*.json"):
+                    try:
+                        with open(filepath, "r") as f:
+                            data = json.load(f, object_hook=PortfolioDecoder.decimal_hook)
+                        legacy_snapshots.append(PortfolioSnapshot(**data))
+                    except Exception as e:
+                        logging.warning(f"Error loading legacy snapshot {filepath}: {e}")
+                        continue
+
+                if legacy_snapshots:
+                    self._snapshot_store.save_snapshots_batch(portfolio_id, legacy_snapshots)
+                    logging.info(f"Migrated {len(legacy_snapshots)} legacy snapshots for {portfolio_id}")
+            except Exception as e:
+                logging.error(f"Error migrating legacy snapshots for {portfolio_id}: {e}")
+
+        self._migrated_portfolios.add(portfolio_id)
 
     def backup_portfolio(self, portfolio_id: str) -> str:
         """Create a backup of portfolio data."""

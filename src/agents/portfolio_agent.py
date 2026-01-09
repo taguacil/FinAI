@@ -3,7 +3,7 @@ Portfolio AI agent using LangGraph for financial advice and portfolio management
 """
 
 import os
-from typing import Dict, List, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional, Union
 
 from langchain.agents import AgentExecutor, create_openai_tools_agent
 from langchain.memory import ConversationBufferMemory
@@ -19,14 +19,20 @@ from ..portfolio.manager import PortfolioManager
 from ..utils.metrics import FinancialMetricsCalculator
 from .tools import create_portfolio_tools
 
+if TYPE_CHECKING:
+    from ..services.market_data_service import MarketDataService
+
 
 class PortfolioAgent:
-    """AI agent for portfolio management and financial advice."""
+    """AI agent for portfolio management and financial advice.
+
+    Supports both DataProviderManager (legacy) and MarketDataService (new).
+    """
 
     def __init__(
         self,
         portfolio_manager: PortfolioManager,
-        data_manager: DataProviderManager,
+        data_manager: Union[DataProviderManager, "MarketDataService"],
         metrics_calculator: FinancialMetricsCalculator,
         openai_api_key: Optional[str] = None,
         azure_endpoint: Optional[str] = None,
@@ -34,10 +40,20 @@ class PortfolioAgent:
         azure_model: Optional[str] = None,
         azure_api_version: str = "2025-01-01-preview",
     ):
-        """Initialize the portfolio agent."""
+        """Initialize the portfolio agent.
 
+        Args:
+            portfolio_manager: PortfolioManager instance
+            data_manager: DataProviderManager or MarketDataService instance
+            metrics_calculator: FinancialMetricsCalculator instance
+            openai_api_key: Optional OpenAI API key
+            azure_endpoint: Optional Azure OpenAI endpoint
+            azure_api_key: Optional Azure OpenAI API key
+            azure_model: Optional Azure OpenAI model name
+            azure_api_version: Azure API version
+        """
         self.portfolio_manager = portfolio_manager
-        self.data_manager = data_manager
+        self._data_manager = data_manager
         self.metrics_calculator = metrics_calculator
 
         # Initialize LLM (prefer Azure OpenAI if configured)
@@ -51,9 +67,9 @@ class PortfolioAgent:
             openai_api_key=openai_api_key or os.getenv("OPENAI_API_KEY", ""),
         )
 
-        # Create tools
+        # Create tools - pass the underlying DataProviderManager for compatibility
         self.portfolio_tools = create_portfolio_tools(
-            portfolio_manager, data_manager, metrics_calculator
+            portfolio_manager, self.data_manager, metrics_calculator
         )
 
         # Add web search tool for financial news and market data
@@ -69,6 +85,13 @@ class PortfolioAgent:
 
         # Create agent
         self.agent_executor = self._create_agent()
+
+    @property
+    def data_manager(self) -> DataProviderManager:
+        """Get the underlying DataProviderManager for compatibility."""
+        if hasattr(self._data_manager, "data_manager"):
+            return self._data_manager.data_manager
+        return self._data_manager
 
     def set_llm_config(
         self,
