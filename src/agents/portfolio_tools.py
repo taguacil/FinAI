@@ -2221,9 +2221,17 @@ class ScenarioOptimizationInput(BaseModel):
         default=True,
         description="Include cash in portfolio optimization",
     )
-    lookback_days: int = Field(
-        default=252,
-        description="Days of historical data for base covariance calculation",
+    projection_years: float = Field(
+        default=5.0,
+        description="Projection period in years (1-30)",
+    )
+    monte_carlo_runs: int = Field(
+        default=1000,
+        description="Number of Monte Carlo simulations (500, 1000, 2500, or 5000)",
+    )
+    confidence_levels: str = Field(
+        default="50,75,90",
+        description="Comma-separated confidence levels in percent (e.g., '50,75,90,95')",
     )
 
 
@@ -2234,19 +2242,24 @@ class ScenarioOptimizationTool(BaseTool):
     description: str = """Compare how optimal portfolio allocation changes under different market scenarios.
 
     This tool runs optimization under multiple market conditions and shows how the recommended
-    allocation differs. Useful for understanding how to position for different market outcomes.
+    allocation differs. Uses the same parameters as the UI Scenario Analysis tab.
 
-    Available Scenarios (same as UI scenario analysis):
-    - optimistic: Bull Market Growth - 12% return, 15% volatility, favorable conditions
-    - likely: Historical Average - 8% return, 20% volatility, long-term averages
-    - pessimistic: Economic Downturn - 2% return, 30% volatility, recession/bear market
-    - stress: Market Crash - -5% return, 45% volatility, severe market crash
+    Available Scenarios:
+    - optimistic: Bull Market Growth - 14% equity return, 15% volatility
+    - likely: Historical Average - 10% equity return, 20% volatility
+    - pessimistic: Economic Downturn - 3% equity return, 30% volatility
+    - stress: Market Crash - negative returns, 45% volatility
+
+    Parameters (same as UI):
+    - projection_years: How far to project (default: 5 years)
+    - monte_carlo_runs: Number of simulations (default: 1000)
+    - confidence_levels: Confidence intervals to show (default: 50%, 75%, 90%)
 
     Examples:
-    - scenario_optimization() - Compare all 4 scenarios
-    - scenario_optimization(scenarios="optimistic,pessimistic") - Just compare the extremes
-    - scenario_optimization(scenarios="likely,stress") - Compare baseline to worst case
-    - scenario_optimization(objective="min_volatility") - Focus on risk minimization in each scenario
+    - scenario_optimization() - Compare all 4 scenarios with defaults
+    - scenario_optimization(scenarios="optimistic,pessimistic") - Compare extremes
+    - scenario_optimization(projection_years=10, monte_carlo_runs=2500) - Longer horizon, more precision
+    - scenario_optimization(objective="min_volatility") - Focus on risk minimization
     """
     args_schema: type[BaseModel] = ScenarioOptimizationInput
     portfolio_manager: Optional[PortfolioManager] = None
@@ -2261,14 +2274,17 @@ class ScenarioOptimizationTool(BaseTool):
 
     def _run(
         self,
-        scenarios: str = "bullish,neutral,bearish",
+        scenarios: str = "optimistic,likely,pessimistic,stress",
         objective: str = "max_sharpe",
         include_cash: bool = True,
-        lookback_days: int = 252,
+        projection_years: float = 5.0,
+        monte_carlo_runs: int = 1000,
+        confidence_levels: str = "50,75,90",
     ) -> str:
         """Run optimization under different market scenarios."""
         try:
             from ..portfolio.optimizer import OptimizationObjective, OptimizationMethod
+            from ..portfolio.scenarios import PortfolioScenarioEngine, ScenarioType
 
             if not self.portfolio_manager.current_portfolio:
                 return "❌ No portfolio loaded. Please create or load a portfolio first."
@@ -2282,42 +2298,52 @@ class ScenarioOptimizationTool(BaseTool):
             # Parse scenarios
             scenario_list = [s.strip().lower() for s in scenarios.split(",")]
 
-            # Scenario adjustments matching the UI scenarios (relative to historical mean)
-            # Based on src/portfolio/scenarios.py:
-            # - optimistic: 14% stock return (vs ~10% historical) → +4%
-            # - likely: 10% stock return → 0% (baseline)
-            # - pessimistic: 3% stock return → -7%
-            # - stress: -5% market return → -15%
-            scenario_adjustments = {
+            # Parse confidence levels
+            conf_levels = [int(c.strip()) / 100.0 for c in confidence_levels.split(",")]
+
+            # Scenario configurations matching the UI (from scenarios.py)
+            scenario_configs = {
                 "optimistic": {
+                    "type": ScenarioType.OPTIMISTIC,
                     "adjustment": 0.04,
                     "name": "Bull Market Growth",
-                    "description": "Strong growth, low volatility, favorable conditions"
+                    "description": "Strong growth, low volatility, favorable conditions",
+                    "equity_return": 0.14,
+                    "volatility": 0.15,
                 },
                 "likely": {
+                    "type": ScenarioType.LIKELY,
                     "adjustment": 0.0,
                     "name": "Historical Average",
-                    "description": "Markets perform in line with long-term averages"
+                    "description": "Markets perform in line with long-term averages",
+                    "equity_return": 0.10,
+                    "volatility": 0.20,
                 },
                 "pessimistic": {
+                    "type": ScenarioType.PESSIMISTIC,
                     "adjustment": -0.07,
                     "name": "Economic Downturn",
-                    "description": "Recession, market stress, high volatility"
+                    "description": "Recession, market stress, high volatility",
+                    "equity_return": 0.03,
+                    "volatility": 0.30,
                 },
                 "stress": {
+                    "type": ScenarioType.STRESS,
                     "adjustment": -0.15,
                     "name": "Market Crash",
-                    "description": "Severe market crash, very high volatility"
+                    "description": "Severe market crash, very high volatility",
+                    "equity_return": -0.05,
+                    "volatility": 0.45,
                 },
             }
 
             # Validate scenarios
             valid_scenarios = []
             for s in scenario_list:
-                if s in scenario_adjustments:
+                if s in scenario_configs:
                     valid_scenarios.append(s)
                 else:
-                    return f"❌ Unknown scenario '{s}'. Valid options: {', '.join(scenario_adjustments.keys())}"
+                    return f"❌ Unknown scenario '{s}'. Valid options: {', '.join(scenario_configs.keys())}"
 
             # Parse objective
             objective_map = {
@@ -2347,41 +2373,55 @@ class ScenarioOptimizationTool(BaseTool):
             # Run optimization for each scenario
             scenario_results = {}
             for scenario_name in valid_scenarios:
-                scenario_config = scenario_adjustments[scenario_name]
+                config = scenario_configs[scenario_name]
 
                 # Run optimization with return adjustments
                 try:
                     result = optimizer.optimize(
                         positions=positions,
-                        method=OptimizationMethod.MARKOWITZ,  # Use Markowitz for scenario-based (it uses expected returns)
-                        lookback_days=lookback_days,
+                        method=OptimizationMethod.MARKOWITZ,
+                        lookback_days=252,
                         risk_free_rate=0.04,
                         total_portfolio_value=total_value,
                         cash_balances=cash_balances,
                         objective=opt_objective,
                         include_cash=include_cash,
-                        return_adjustment=scenario_config["adjustment"],
+                        return_adjustment=config["adjustment"],
                     )
                     scenario_results[scenario_name] = {
                         "result": result,
-                        "config": scenario_config,
+                        "config": config,
                     }
                 except Exception as e:
                     scenario_results[scenario_name] = {
                         "error": str(e),
-                        "config": scenario_config,
+                        "config": config,
                     }
 
-            return self._format_scenario_results(scenario_results, total_value, include_cash)
+            return self._format_scenario_results(
+                scenario_results, total_value, include_cash,
+                projection_years, monte_carlo_runs, conf_levels
+            )
 
         except Exception as e:
             return f"❌ Unexpected error: {str(e)}"
 
-    def _format_scenario_results(self, scenario_results, total_value, include_cash) -> str:
+    def _format_scenario_results(
+        self, scenario_results, total_value, include_cash,
+        projection_years: float = 5.0, monte_carlo_runs: int = 1000,
+        confidence_levels: list = None
+    ) -> str:
         """Format scenario comparison results."""
+        if confidence_levels is None:
+            confidence_levels = [0.5, 0.75, 0.9]
+
+        conf_pcts = ", ".join([f"{int(c*100)}%" for c in confidence_levels])
+
         lines = [
             "🎭 Scenario-Based Optimization Comparison",
             "━" * 55,
+            "",
+            f"Parameters: {projection_years:.0f}yr projection, {monte_carlo_runs:,} MC runs, {conf_pcts} confidence",
             "",
             "Compare how optimal allocation changes under different market conditions:",
             "",
@@ -2406,6 +2446,8 @@ class ScenarioOptimizationTool(BaseTool):
             header = f"│ {emoji} {config['name']}"
             lines.append(header.ljust(54) + "│")
             lines.append(f"│ {config['description'][:51]}".ljust(54) + "│")
+            scenario_params = f"│ Equity: {config['equity_return']:.0%} return, {config['volatility']:.0%} volatility"
+            lines.append(scenario_params.ljust(54) + "│")
             lines.append(f"├{'─' * 53}┤")
 
             if "error" in data:
