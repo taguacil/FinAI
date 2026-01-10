@@ -18,9 +18,11 @@ from ..portfolio_tools import (
     HypotheticalPositionTool,
     IngestPdfTool,
     ModifyTransactionTool,
+    OptimizePortfolioTool,
     ResolveInstrumentTool,
     SearchCompanyTool,
     SearchInstrumentTool,
+    SetMarketPriceTool,
     SimulateWhatIfTool,
 )
 
@@ -48,9 +50,11 @@ __all__ = [
     "HypotheticalPositionTool",
     "IngestPdfTool",
     "ModifyTransactionTool",
+    "OptimizePortfolioTool",
     "ResolveInstrumentTool",
     "SearchCompanyTool",
     "SearchInstrumentTool",
+    "SetMarketPriceTool",
     "SimulateWhatIfTool",
     # Market data tools
     "GetPriceHistoryTool",

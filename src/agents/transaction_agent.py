@@ -23,6 +23,7 @@ from .tools import (
     ResolveInstrumentTool,
     SearchCompanyTool,
     SearchInstrumentTool,
+    SetMarketPriceTool,
 )
 
 
@@ -129,6 +130,29 @@ DEPOSIT/WITHDRAWAL:
 
 Always confirm successful operations and provide clear feedback.
 
+PRICE FALLBACK WORKFLOW:
+After adding a transaction, if the instrument's market price cannot be fetched automatically:
+1. Inform the user that the price lookup failed for the instrument
+2. Ask if they would like to:
+   a) Use the purchase price as the current market price (recommended for illiquid/unknown instruments)
+   b) Enter a custom market price
+   c) Leave the market price as unavailable for now
+3. Based on their choice:
+   - If (a): Use set_market_price with use_purchase_price=True
+   - If (b): Ask for the custom price, then use set_market_price with the price they provide
+   - If (c): Proceed without setting a market price
+
+SETTING MARKET PRICES:
+You can also help users set or update market prices for instruments at any time:
+- "Set the market price for AAPL to $150" → set_market_price(symbol="AAPL", price=150)
+- "Use purchase price as market price for XYZ" → set_market_price(symbol="XYZ", use_purchase_price=True)
+- "Set TSLA price to $200 for 2024-01-15" → set_market_price(symbol="TSLA", price=200, date="2024-01-15")
+
+This is useful for:
+- Instruments that don't have automatic price feeds (bonds, private securities)
+- Correcting historical prices
+- Setting prices for illiquid instruments
+
 Remember: This is for educational purposes. Always recommend consulting with qualified financial professionals."""
 
     @classmethod
@@ -151,6 +175,7 @@ Remember: This is for educational purposes. Always recommend consulting with qua
             AddTransactionTool(portfolio_manager),
             ModifyTransactionTool(portfolio_manager),
             DeleteTransactionTool(portfolio_manager),
+            SetMarketPriceTool(portfolio_manager),
             SearchInstrumentTool(data_manager),
             SearchCompanyTool(data_manager),
         ]

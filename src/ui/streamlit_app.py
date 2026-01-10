@@ -19,10 +19,12 @@ from pypdf import PdfReader
 # Add src to path for imports
 sys.path.append(os.path.join(os.path.dirname(__file__), "..", ".."))
 
+from src.agents.llm_config import MODEL_REGISTRY, get_available_models
 from src.agents.portfolio_agent import PortfolioAgent
 from src.data_providers.manager import DataProviderManager
 from src.portfolio.manager import PortfolioManager
 from src.portfolio.models import Currency, TransactionType
+from src.portfolio.optimizer import OptimizationMethod, OptimizationObjective, PortfolioOptimizer
 from src.portfolio.storage import FileBasedStorage
 from src.services.market_data_service import MarketDataService
 from src.utils.logging_config import setup_logging
@@ -117,8 +119,8 @@ class PortfolioTrackerUI:
         self.render_sidebar(portfolio_manager, market_data_service)
 
         # Main content tabs
-        tab1, tab2, tab3, tab4, tab5 = st.tabs(
-            ["💬 AI Chat", "📊 Portfolio", "📈 Analytics", "🔮 Scenarios", "⚙️ Settings"]
+        tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
+            ["💬 AI Chat", "📊 Portfolio", "📈 Analytics", "⚖️ Optimize", "🔮 Scenarios", "⚙️ Settings"]
         )
 
         with tab1:
@@ -131,9 +133,12 @@ class PortfolioTrackerUI:
             self.render_analytics(portfolio_manager, metrics_calculator)
 
         with tab4:
-            self.render_scenarios(portfolio_manager, metrics_calculator)
+            self.render_optimization(portfolio_manager, market_data_service)
 
         with tab5:
+            self.render_scenarios(portfolio_manager, metrics_calculator)
+
+        with tab6:
             self.render_settings()
 
     def init_session_state(self):
@@ -144,6 +149,9 @@ class PortfolioTrackerUI:
             st.session_state.portfolio_loaded = False
         if "selected_portfolio" not in st.session_state:
             st.session_state.selected_portfolio = None
+        # Price fallback prompt state
+        if "pending_price_fallback" not in st.session_state:
+            st.session_state.pending_price_fallback = None
 
     def render_sidebar(self, portfolio_manager, market_data_service):
         """Render the sidebar with portfolio management."""
@@ -434,109 +442,20 @@ class PortfolioTrackerUI:
             # AI Model Selection
             with adv_col2:
                 st.markdown("**🤖 AI Model Configuration**")
-                all_models = [
-                    (
-                        "Azure GPT-4.1",
-                        {
-                            "provider": "azure-openai",
-                            "endpoint": "https://kallamai.openai.azure.com/",
-                            "model": "gpt-4.1",
-                        },
-                    ),
-                    (
-                        "Azure GPT-4.1 Mini",
-                        {
-                            "provider": "azure-openai",
-                            "endpoint": "https://kallamai.openai.azure.com/",
-                            "model": "gpt-4.1-mini",
-                        },
-                    ),
-                    (
-                        "Azure o4-mini",
-                        {
-                            "provider": "azure-openai",
-                            "endpoint": "https://kallamai.openai.azure.com/",
-                            "model": "o4-mini",
-                        },
-                    ),
-                    (
-                        "Azure GPT-5",
-                        {
-                            "provider": "azure-openai",
-                            "endpoint": "https://kallamai.openai.azure.com/",
-                            "model": "gpt-5",
-                        },
-                    ),
-                    (
-                        "Azure GPT-5 Mini",
-                        {
-                            "provider": "azure-openai",
-                            "endpoint": "https://kallamai.openai.azure.com/",
-                            "model": "gpt-5-mini",
-                        },
-                    ),
-                    (
-                        "Claude Haiku 4.5",
-                        {"provider": "vertex-ai", "model": "claude-haiku-4-5"},
-                    ),
-                    (
-                        "Claude Sonnet 4.5",
-                        {"provider": "vertex-ai", "model": "claude-sonnet-4-5"},
-                    ),
-                    (
-                        "Claude Opus 4.5",
-                        {"provider": "vertex-ai", "model": "claude-opus-4-5"},
-                    ),
-                    (
-                        "Gemini 2.0 Flash Lite",
-                        {"provider": "vertex-ai", "model": "gemini-2.0-flash-lite-001"},
-                    ),
-                    (
-                        "Gemini 2.5 Pro (thinking)",
-                        {"provider": "vertex-ai", "model": "gemini-2.5-pro"},
-                    ),
-                    (
-                        "Gemini 3 Pro",
-                        {"provider": "vertex-ai", "model": "gemini-3-pro-preview"},
-                    ),
-                ]
+                # Get models from central registry
+                available_models = get_available_models()
                 model_choice = st.selectbox(
                     "Select Model",
-                    all_models,
-                    format_func=lambda x: x[0],
+                    available_models,
+                    format_func=lambda x: x[1],  # Display name
                     key="model_selector"
                 )
                 if st.button("Apply Model", use_container_width=True):
                     try:
-                        meta = model_choice[1]
-                        provider_key = meta.get("provider")
-                        if provider_key == "azure-openai":
-                            azure_key = os.getenv("AZURE_OPENAI_API_KEY", "")
-                            agent.set_llm_config(
-                                provider="azure-openai",
-                                azure_endpoint=meta.get("endpoint"),
-                                azure_api_key=azure_key,
-                                azure_model=meta.get("model"),
-                            )
-                        elif provider_key == "anthropic":
-                            anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
-                            agent.set_llm_config(
-                                provider="anthropic",
-                                anthropic_api_key=anthropic_key,
-                                anthropic_model=meta.get("model"),
-                            )
-                        else:
-                            project = os.getenv(
-                                "GOOGLE_VERTEX_PROJECT", "qd-peanut"
-                            )
-                            location = os.getenv("GOOGLE_VERTEX_LOCATION", "us-central1")
-                            agent.set_llm_config(
-                                provider="vertex-ai",
-                                vertex_project=project,
-                                vertex_location=location,
-                                vertex_model=meta.get("model"),
-                            )
-                        st.success(f"Model set to {model_choice[0]}")
+                        model_key, display_name, config = model_choice
+                        # Use the new simplified interface
+                        agent.set_llm_config(model_key=model_key)
+                        st.success(f"Model set to {display_name}")
                     except Exception as e:
                         st.error(f"Failed to set model: {e}")
 
@@ -557,12 +476,149 @@ class PortfolioTrackerUI:
                     st.session_state.fx_fallback_warnings = []
                     st.rerun()
 
+    def _render_price_fallback_prompt(self, portfolio_manager):
+        """Render price fallback prompt when an instrument has no market price."""
+        if not st.session_state.get("pending_price_fallback"):
+            return
+
+        data = st.session_state.pending_price_fallback
+
+        with st.container():
+            st.warning(
+                f"No market price found for **{data['symbol']}** ({data.get('instrument_name', 'Unknown')}).\n\n"
+                "This instrument may not have automatic price feeds (e.g., bonds, private securities)."
+            )
+
+            choice = st.radio(
+                "What would you like to do?",
+                [
+                    f"Use purchase price (${data['purchase_price']:.2f}) as market price",
+                    "Enter a custom market price",
+                    "Skip (leave market price as unavailable)"
+                ],
+                key="price_fallback_choice"
+            )
+
+            custom_price = None
+            if choice.startswith("Enter"):
+                custom_price = st.number_input(
+                    "Custom market price",
+                    min_value=0.01,
+                    value=float(data['purchase_price']),
+                    step=0.01,
+                    key="custom_market_price"
+                )
+
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("Confirm", key="confirm_price_fallback", type="primary"):
+                    try:
+                        if choice.startswith("Use purchase"):
+                            # Use purchase price as market price
+                            success = portfolio_manager.set_position_price(
+                                symbol=data["symbol"],
+                                price=Decimal(str(data["purchase_price"])),
+                                target_date=date.fromisoformat(data["date"]),
+                            )
+                            if success:
+                                st.success(f"Set market price for {data['symbol']} to ${data['purchase_price']:.2f}")
+                        elif choice.startswith("Enter") and custom_price:
+                            # Use custom price
+                            success = portfolio_manager.set_position_price(
+                                symbol=data["symbol"],
+                                price=Decimal(str(custom_price)),
+                                target_date=date.fromisoformat(data["date"]),
+                            )
+                            if success:
+                                st.success(f"Set market price for {data['symbol']} to ${custom_price:.2f}")
+                        # Clear the pending fallback
+                        st.session_state.pending_price_fallback = None
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error setting price: {e}")
+
+            with col2:
+                if st.button("Cancel", key="cancel_price_fallback"):
+                    st.session_state.pending_price_fallback = None
+                    st.rerun()
+
+    def _render_positions_without_prices(self, portfolio_manager, positions):
+        """Render UI for bulk setting prices on positions without prices."""
+        positions_without_prices = [
+            pos for pos in positions
+            if not pos.get("has_current_price") and pos.get("symbol") != "CASH"
+        ]
+
+        if not positions_without_prices:
+            return
+
+        with st.expander(
+            f"💰 Set prices for {len(positions_without_prices)} instruments without prices",
+            expanded=False
+        ):
+            st.info(
+                "These instruments don't have automatic price feeds. "
+                "You can set their prices manually using purchase price or a custom value."
+            )
+
+            # Create a form for bulk price setting
+            for pos in positions_without_prices:
+                symbol = pos["symbol"]
+                avg_cost = pos.get("average_cost", Decimal("0"))
+
+                col1, col2, col3 = st.columns([2, 2, 1])
+
+                with col1:
+                    st.text(f"{symbol}")
+                    st.caption(f"{pos.get('name', 'Unknown')}")
+
+                with col2:
+                    use_purchase = st.checkbox(
+                        f"Use ${float(avg_cost):.2f} (purchase price)",
+                        key=f"use_purchase_{symbol}",
+                        value=True
+                    )
+                    if not use_purchase:
+                        st.number_input(
+                            "Custom price",
+                            key=f"custom_price_{symbol}",
+                            min_value=0.01,
+                            value=float(avg_cost),
+                            step=0.01
+                        )
+
+                with col3:
+                    if st.button("Set", key=f"set_price_{symbol}"):
+                        try:
+                            if st.session_state.get(f"use_purchase_{symbol}", True):
+                                price_to_set = avg_cost
+                            else:
+                                price_to_set = Decimal(str(st.session_state.get(f"custom_price_{symbol}", avg_cost)))
+
+                            success = portfolio_manager.set_position_price(
+                                symbol=symbol,
+                                price=price_to_set,
+                                target_date=date.today(),
+                            )
+                            if success:
+                                st.success(f"Set price for {symbol}")
+                                st.rerun()
+                            else:
+                                st.error(f"Failed to set price for {symbol}")
+                        except Exception as e:
+                            st.error(f"Error: {e}")
+
+                st.divider()
+
     def render_portfolio_overview(self, portfolio_manager, market_data_service):
         """Render portfolio overview with transactions."""
         st.header("📊 Portfolio Overview")
 
         # Show FX rate warnings if any
         self._render_fx_warnings()
+
+        # Show price fallback prompt if there's a pending one
+        self._render_price_fallback_prompt(portfolio_manager)
 
         if not st.session_state.portfolio_loaded:
             st.warning("Please load or create a portfolio to view details.")
@@ -634,6 +690,8 @@ class PortfolioTrackerUI:
             st.warning(
                 f"⚠️ {len(positions_without_any_price)} positions have no price data. Use 'Update Current Prices' to fetch latest data."
             )
+            # Show UI for setting prices on positions without prices
+            self._render_positions_without_prices(portfolio_manager, positions)
 
         if positions_with_current_prices:
             # Find the most recent price update
@@ -1620,6 +1678,16 @@ class PortfolioTrackerUI:
                             st.success(
                                 f"Added {transaction_type} transaction: {quantity} {label} @ ${price}"
                             )
+                            # Check if the position has a current price
+                            position = portfolio_manager.current_portfolio.positions.get(label)
+                            if position and position.current_price is None:
+                                # Set up the price fallback prompt
+                                st.session_state.pending_price_fallback = {
+                                    "symbol": label,
+                                    "purchase_price": float(price),
+                                    "date": trade_date.isoformat(),
+                                    "instrument_name": position.instrument.name,
+                                }
                             st.rerun()
                         else:
                             st.error("Failed to add transaction")
@@ -2398,6 +2466,605 @@ class PortfolioTrackerUI:
         )
         fig2.update_xaxes(range=[start_date, end_date])
         st.plotly_chart(fig2, use_container_width=True)
+
+    def render_optimization(self, portfolio_manager, market_data_service):
+        """Render portfolio optimization with weight suggestions and visualizations."""
+        st.header("⚖️ Portfolio Optimization")
+
+        if not st.session_state.portfolio_loaded:
+            st.warning("Please load a portfolio to run optimization.")
+            return
+
+        portfolio = portfolio_manager.current_portfolio
+        if not portfolio:
+            st.warning("No portfolio currently loaded.")
+            return
+
+        positions = portfolio.positions
+        if len(positions) < 2:
+            st.info("Need at least 2 positions to run portfolio optimization.")
+            return
+
+        # Configuration section
+        st.subheader("Configuration")
+        col1, col2 = st.columns(2)
+
+        with col1:
+            lookback_days = st.slider(
+                "Lookback Period (days)",
+                min_value=60,
+                max_value=504,
+                value=252,
+                step=21,
+                help="Historical data used for optimization (252 = 1 year)"
+            )
+
+            risk_free_rate = st.slider(
+                "Risk-Free Rate (%)",
+                min_value=0.0,
+                max_value=10.0,
+                value=4.0,
+                step=0.25,
+                help="Annual risk-free rate for Sharpe ratio calculation"
+            ) / 100
+
+        with col2:
+            position_symbols = list(positions.keys())
+            locked_symbols = st.multiselect(
+                "Lock Positions",
+                options=position_symbols,
+                default=[],
+                help="These positions will keep their current weights"
+            )
+
+            include_cash = st.checkbox(
+                "Include cash in rebalancing",
+                value=True,
+                help="Consider cash as part of the portfolio. Enables cash allocation to achieve target volatility and includes existing cash in trade calculations."
+            )
+
+        # Risk constraint section - applies to both HRP and Markowitz
+        st.subheader("📊 Risk Constraint & Currency")
+        st.caption("Both HRP and Markowitz can target specific volatility by blending with cash.")
+
+        risk_col1, risk_col2, risk_col3 = st.columns(3)
+
+        with risk_col1:
+            objective_options = {
+                "Maximize Sharpe Ratio": OptimizationObjective.MAX_SHARPE,
+                "Minimize Volatility": OptimizationObjective.MIN_VOLATILITY,
+                "Target Specific Volatility": OptimizationObjective.EFFICIENT_RISK,
+            }
+            selected_objective = st.selectbox(
+                "Optimization Objective",
+                options=list(objective_options.keys()),
+                index=0,
+                help="Choose optimization objective (applies to both methods)"
+            )
+            objective = objective_options[selected_objective]
+
+        with risk_col2:
+            target_volatility = None
+            if objective == OptimizationObjective.EFFICIENT_RISK:
+                target_volatility = st.slider(
+                    "Target Annual Volatility (%)",
+                    min_value=1.0,
+                    max_value=40.0,
+                    value=15.0,
+                    step=1.0,
+                    help="Target volatility - if below minimum achievable, will blend with cash"
+                ) / 100
+                if include_cash:
+                    st.caption(f"💡 Will recommend cash allocation if needed")
+                else:
+                    st.warning("⚠️ Cash disabled - target volatility may not be achievable")
+            else:
+                st.info(f"📈 Using: {selected_objective}")
+
+        with risk_col3:
+            # Optimization currency selector
+            currency_options = [c.value for c in Currency]
+            default_currency = portfolio.base_currency.value
+            default_idx = currency_options.index(default_currency) if default_currency in currency_options else 0
+
+            selected_opt_currency = st.selectbox(
+                "Optimization Currency",
+                options=currency_options,
+                index=default_idx,
+                help="Currency perspective for optimization. Different currencies show different volatility due to FX effects."
+            )
+            optimization_currency = Currency(selected_opt_currency)
+
+            if optimization_currency != portfolio.base_currency:
+                st.caption(f"⚠️ Optimizing from {optimization_currency.value} perspective (portfolio base: {portfolio.base_currency.value})")
+
+        # Run optimization button
+        if st.button("🚀 Run Optimization", type="primary", use_container_width=True):
+            with st.spinner("Fetching price data and running optimization..."):
+                try:
+                    # Update prices first
+                    portfolio_manager.update_current_prices()
+
+                    # Calculate total portfolio value
+                    total_value = sum(
+                        pos.market_value or (pos.quantity * pos.average_cost)
+                        for pos in positions.values()
+                        if pos.quantity > 0
+                    )
+
+                    # Get cash balances if including cash
+                    cash_balances = portfolio.cash_balances if include_cash else None
+
+                    # Create optimizer with storage for local snapshot data
+                    optimizer = PortfolioOptimizer(
+                        portfolio_manager.data_manager,
+                        base_currency=portfolio.base_currency,
+                        storage=portfolio_manager.storage,
+                        portfolio_id=portfolio.id,
+                    )
+                    results = optimizer.compare_methods(
+                        positions=positions,
+                        locked_symbols=locked_symbols if locked_symbols else None,
+                        lookback_days=lookback_days,
+                        risk_free_rate=risk_free_rate,
+                        total_portfolio_value=total_value,
+                        cash_balances=cash_balances,
+                        objective=objective,
+                        target_volatility=target_volatility,
+                        include_cash=include_cash,
+                        optimization_currency=optimization_currency,
+                    )
+
+                    # Store results in session state
+                    st.session_state.optimization_results = results
+                    st.session_state.optimization_risk_free_rate = risk_free_rate
+                    st.session_state.optimization_locked = locked_symbols
+                    st.session_state.optimization_base_currency = portfolio.base_currency.value
+                    st.session_state.optimization_currency = optimization_currency.value
+                    st.session_state.optimization_include_cash = include_cash
+                    st.success("Optimization complete!")
+
+                except Exception as e:
+                    st.error(f"Optimization failed: {str(e)}")
+                    import traceback
+                    st.error(traceback.format_exc())
+                    return
+
+        # Display results if available
+        if "optimization_results" not in st.session_state:
+            st.info("Click 'Run Optimization' to generate weight suggestions.")
+            return
+
+        results = st.session_state.optimization_results
+        locked = st.session_state.get("optimization_locked", [])
+        base_currency = st.session_state.get("optimization_base_currency", "USD")
+        opt_currency = st.session_state.get("optimization_currency", base_currency)
+
+        # Show optimization currency if different from base
+        if opt_currency != base_currency:
+            st.info(f"📌 Results shown from **{opt_currency}** investor perspective (portfolio base: {base_currency})")
+
+        # Results tabs
+        result_tab1, result_tab2, result_tab3 = st.tabs([
+            "📊 Weight Comparison", "📈 Metrics", "📋 Rebalancing Trades"
+        ])
+
+        with result_tab1:
+            self._render_weight_comparison(results, locked)
+
+        with result_tab2:
+            self._render_optimization_metrics(results, base_currency, opt_currency)
+
+        with result_tab3:
+            self._render_rebalancing_trades(results, base_currency)
+
+    def _render_weight_comparison(self, results, locked_symbols):
+        """Render weight comparison charts."""
+        st.subheader("Weight Allocation Comparison")
+
+        hrp_result = results.get(OptimizationMethod.HRP)
+        mk_result = results.get(OptimizationMethod.MARKOWITZ)
+
+        if not hrp_result or not hrp_result.weights:
+            st.warning("No HRP results available.")
+            return
+
+        # Prepare data for comparison
+        symbols = sorted(hrp_result.weights.keys())
+        current_weights = [hrp_result.current_weights.get(s, 0) * 100 for s in symbols]
+        hrp_weights = [hrp_result.weights.get(s, 0) * 100 for s in symbols]
+        mk_weights = [mk_result.weights.get(s, 0) * 100 if mk_result and mk_result.weights else 0 for s in symbols]
+
+        # Add cash if there's any cash involvement (current or target)
+        hrp_cash = hrp_result.cash_weight * 100 if hrp_result.cash_weight else 0
+        mk_cash = (mk_result.cash_weight * 100 if mk_result and mk_result.cash_weight else 0)
+
+        # Calculate current cash weight from the difference between total weights
+        # If current weights don't sum to 100%, the remainder is cash
+        current_risky_total = sum(hrp_result.current_weights.values()) if hrp_result.current_weights else 1.0
+        current_cash_weight = max(0, (1.0 - current_risky_total)) * 100
+
+        # Show cash row if there's current cash OR target cash allocation
+        if current_cash_weight > 0.1 or hrp_cash > 0.1 or mk_cash > 0.1:
+            symbols = symbols + ["CASH"]
+            current_weights.append(current_cash_weight)
+            hrp_weights.append(hrp_cash)
+            mk_weights.append(mk_cash)
+
+        # Create comparison bar chart
+        fig = go.Figure()
+
+        fig.add_trace(go.Bar(
+            name='Current',
+            x=symbols,
+            y=current_weights,
+            marker_color='lightgray',
+            text=[f"{w:.1f}%" for w in current_weights],
+            textposition='outside'
+        ))
+
+        fig.add_trace(go.Bar(
+            name='HRP (Recommended)',
+            x=symbols,
+            y=hrp_weights,
+            marker_color='#2ca02c',
+            text=[f"{w:.1f}%" for w in hrp_weights],
+            textposition='outside'
+        ))
+
+        fig.add_trace(go.Bar(
+            name='Markowitz',
+            x=symbols,
+            y=mk_weights,
+            marker_color='#1f77b4',
+            text=[f"{w:.1f}%" for w in mk_weights],
+            textposition='outside'
+        ))
+
+        fig.update_layout(
+            title="Portfolio Weight Comparison",
+            xaxis_title="Asset",
+            yaxis_title="Weight (%)",
+            barmode='group',
+            height=450,
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        )
+
+        st.plotly_chart(fig, use_container_width=True)
+
+        # Pie charts side by side
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.markdown("**HRP Target Allocation**")
+            fig_hrp = px.pie(
+                values=hrp_weights,
+                names=symbols,
+                hole=0.4,
+                color_discrete_sequence=px.colors.qualitative.Set2
+            )
+            fig_hrp.update_layout(height=350, showlegend=True)
+            st.plotly_chart(fig_hrp, use_container_width=True)
+
+        with col2:
+            st.markdown("**Markowitz Target Allocation**")
+            fig_mk = px.pie(
+                values=mk_weights,
+                names=symbols,
+                hole=0.4,
+                color_discrete_sequence=px.colors.qualitative.Set3
+            )
+            fig_mk.update_layout(height=350, showlegend=True)
+            st.plotly_chart(fig_mk, use_container_width=True)
+
+        # Locked symbols indicator
+        if locked_symbols:
+            st.info(f"🔒 Locked positions (unchanged): {', '.join(locked_symbols)}")
+
+    def _render_optimization_metrics(self, results, base_currency: str = "USD", opt_currency: str = None):
+        """Render optimization metrics comparison."""
+        opt_currency = opt_currency or base_currency
+        st.subheader(f"Risk-Return Metrics ({opt_currency})")
+
+        hrp_result = results.get(OptimizationMethod.HRP)
+        mk_result = results.get(OptimizationMethod.MARKOWITZ)
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.markdown("### HRP (Recommended)")
+            if hrp_result and hrp_result.weights:
+                m1, m2, m3 = st.columns(3)
+                with m1:
+                    exp_ret = hrp_result.expected_annual_return
+                    st.metric("Expected Return", f"{exp_ret:.1%}" if exp_ret else "N/A")
+                with m2:
+                    st.metric("Volatility", f"{hrp_result.annual_volatility:.1%}")
+                with m3:
+                    sharpe = hrp_result.sharpe_ratio
+                    st.metric("Sharpe Ratio", f"{sharpe:.2f}" if sharpe else "N/A")
+
+                if hrp_result.cash_weight > 0:
+                    st.info(f"💵 Cash weight: {hrp_result.cash_weight:.1%}")
+
+                if hrp_result.warnings:
+                    for warn in hrp_result.warnings:
+                        st.warning(warn)
+            else:
+                st.error("HRP optimization failed")
+
+        with col2:
+            st.markdown("### Markowitz")
+            if mk_result and mk_result.weights:
+                m1, m2, m3 = st.columns(3)
+                with m1:
+                    exp_ret = mk_result.expected_annual_return
+                    st.metric("Expected Return", f"{exp_ret:.1%}" if exp_ret else "N/A")
+                with m2:
+                    st.metric("Volatility", f"{mk_result.annual_volatility:.1%}")
+                with m3:
+                    sharpe = mk_result.sharpe_ratio
+                    st.metric("Sharpe Ratio", f"{sharpe:.2f}" if sharpe else "N/A")
+
+                # Show if risk-constrained
+                if mk_result.target_volatility:
+                    st.info(f"🎯 Target volatility: {mk_result.target_volatility:.1%}")
+
+                if mk_result.cash_weight > 0:
+                    st.info(f"💵 Cash weight: {mk_result.cash_weight:.1%}")
+
+                if mk_result.warnings:
+                    for warn in mk_result.warnings:
+                        st.warning(warn)
+            else:
+                st.error("Markowitz optimization failed")
+
+        # Risk-Return scatter plot with all assets and Capital Allocation Lines
+        st.markdown("### Risk-Return Comparison")
+
+        # Get settings from session state
+        risk_free_rate = st.session_state.get("optimization_risk_free_rate", 0.04)
+        risk_free_pct = risk_free_rate * 100
+        include_cash_in_plot = st.session_state.get("optimization_include_cash", True)
+
+        # Build plot data with individual assets + portfolio options
+        plot_data = []
+
+        # Add individual assets from asset_metrics
+        if hrp_result and hrp_result.asset_metrics:
+            for am in hrp_result.asset_metrics:
+                plot_data.append({
+                    "Label": am.symbol,
+                    "Type": "Individual Asset",
+                    "Volatility": am.volatility * 100,
+                    "Return": am.expected_return * 100,
+                    "Weight": am.current_weight * 100,
+                })
+
+        # Add portfolio options
+        if hrp_result and hrp_result.weights and hrp_result.expected_annual_return:
+            plot_data.append({
+                "Label": "HRP Portfolio",
+                "Type": "Optimized Portfolio",
+                "Volatility": hrp_result.annual_volatility * 100,
+                "Return": hrp_result.expected_annual_return * 100,
+                "Weight": 100.0,  # Full portfolio
+            })
+        if mk_result and mk_result.weights and mk_result.expected_annual_return:
+            plot_data.append({
+                "Label": "Markowitz Portfolio",
+                "Type": "Optimized Portfolio",
+                "Volatility": mk_result.annual_volatility * 100,
+                "Return": mk_result.expected_annual_return * 100,
+                "Weight": 100.0,
+            })
+
+        if plot_data:
+            df = pd.DataFrame(plot_data)
+
+            # Create scatter plot
+            fig = go.Figure()
+
+            # Add Cash point and CAL lines only when cash is included
+            portfolio_colors = {"HRP Portfolio": "#2ca02c", "Markowitz Portfolio": "#1f77b4"}
+            portfolios_df = df[df["Type"] == "Optimized Portfolio"]
+
+            if include_cash_in_plot:
+                # Add Cash point at (0%, risk_free_rate%)
+                fig.add_trace(go.Scatter(
+                    x=[0],
+                    y=[risk_free_pct],
+                    mode="markers+text",
+                    name="Cash (Risk-Free)",
+                    text=["Cash"],
+                    textposition="top right",
+                    marker=dict(
+                        size=20,
+                        color="#FFD700",  # Gold color for cash
+                        symbol="diamond",
+                        line=dict(width=2, color="black")
+                    ),
+                    hovertemplate="<b>Cash</b><br>Volatility: 0%<br>Return: %{y:.1f}% (risk-free)<extra></extra>",
+                ))
+
+                # Add Capital Allocation Lines from cash to each optimized portfolio
+                for _, row in portfolios_df.iterrows():
+                    portfolio_vol = row["Volatility"]
+                    portfolio_ret = row["Return"]
+                    portfolio_label = row["Label"]
+                    color = portfolio_colors.get(portfolio_label, "#ff7f0e")
+
+                    # Draw CAL line from cash to portfolio
+                    fig.add_trace(go.Scatter(
+                        x=[0, portfolio_vol],
+                        y=[risk_free_pct, portfolio_ret],
+                        mode="lines",
+                        name=f"CAL ({portfolio_label.split()[0]})",
+                        line=dict(color=color, width=2, dash="dash"),
+                        hoverinfo="skip",
+                        showlegend=True,
+                    ))
+
+                    # Add intermediate points along the CAL
+                    num_points = 50
+                    for i in range(1, num_points + 1):
+                        fraction = i / (num_points + 1)  # Points between 0 and 1
+                        point_vol = fraction * portfolio_vol
+                        point_ret = risk_free_pct + fraction * (portfolio_ret - risk_free_pct)
+                        cash_pct = (1 - fraction) * 100
+
+                        fig.add_trace(go.Scatter(
+                            x=[point_vol],
+                            y=[point_ret],
+                            mode="markers",
+                            name=f"{portfolio_label.split()[0]} @ {point_vol:.0f}% vol",
+                            marker=dict(
+                                size=10,
+                                color=color,
+                                opacity=0.5,
+                                symbol="circle",
+                            ),
+                            hovertemplate=f"<b>{portfolio_label.split()[0]} blend</b><br>Volatility: %{{x:.1f}}%<br>Return: %{{y:.1f}}%<br>Cash: {cash_pct:.0f}%<extra></extra>",
+                            showlegend=False,
+                        ))
+
+            # Add individual assets as smaller points
+            assets_df = df[df["Type"] == "Individual Asset"]
+            if not assets_df.empty:
+                fig.add_trace(go.Scatter(
+                    x=assets_df["Volatility"],
+                    y=assets_df["Return"],
+                    mode="markers+text",
+                    name="Individual Assets",
+                    text=assets_df["Label"],
+                    textposition="top center",
+                    marker=dict(
+                        size=assets_df["Weight"] * 2 + 8,  # Size based on weight
+                        color="rgba(128, 128, 128, 0.6)",
+                        line=dict(width=1, color="gray")
+                    ),
+                    hovertemplate="<b>%{text}</b><br>Volatility: %{x:.1f}%<br>Return: %{y:.1f}%<br>Weight: %{customdata:.1f}%<extra></extra>",
+                    customdata=assets_df["Weight"],
+                ))
+
+            # Add optimized portfolios as larger, colored points (stars)
+            for _, row in portfolios_df.iterrows():
+                fig.add_trace(go.Scatter(
+                    x=[row["Volatility"]],
+                    y=[row["Return"]],
+                    mode="markers+text",
+                    name=row["Label"],
+                    text=[row["Label"]],
+                    textposition="top center",
+                    marker=dict(
+                        size=25,
+                        color=portfolio_colors.get(row["Label"], "#ff7f0e"),
+                        symbol="star",
+                        line=dict(width=2, color="white")
+                    ),
+                    hovertemplate="<b>%{text}</b><br>Volatility: %{x:.1f}%<br>Return: %{y:.1f}%<extra></extra>",
+                ))
+
+            plot_title = "Risk-Return Trade-off"
+            if include_cash_in_plot:
+                plot_title += " with Capital Allocation Lines"
+
+            fig.update_layout(
+                title=plot_title,
+                xaxis_title="Annual Volatility (%)",
+                yaxis_title="Expected Annual Return (%)",
+                height=550,
+                showlegend=True,
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+            if include_cash_in_plot:
+                st.caption(
+                    "💡 **Stars**: Optimized portfolios (100% risky). "
+                    "**Diamond**: Cash (risk-free). "
+                    "**Dashed lines**: Capital Allocation Lines showing risk-return at different cash blends. "
+                    "**Small circles**: Intermediate blend points (hover for cash %)."
+                )
+            else:
+                st.caption(
+                    "💡 **Stars**: Optimized portfolios. "
+                    "**Gray circles**: Individual assets (size = current weight)."
+                )
+
+    def _render_rebalancing_trades(self, results, base_currency: str = "USD"):
+        """Render suggested rebalancing trades."""
+        st.subheader("Suggested Rebalancing Trades")
+
+        hrp_result = results.get(OptimizationMethod.HRP)
+
+        if not hrp_result or not hrp_result.rebalancing_trades:
+            st.info("No rebalancing trades needed or optimization hasn't been run yet.")
+            return
+
+        st.markdown("**Based on HRP (Recommended) allocation:**")
+
+        # Show cash weight info if applicable
+        if hrp_result.cash_weight > 0:
+            st.info(f"💵 Cash is {hrp_result.cash_weight:.1%} of portfolio (kept separate from optimization)")
+
+        # Create trades table with currency info
+        trades_data = []
+        for trade in hrp_result.rebalancing_trades:
+            # Handle both old and new RebalancingTrade format
+            currency = getattr(trade, "currency", base_currency)
+            est_value_native = getattr(trade, "estimated_value_native", trade.estimated_value)
+
+            trades_data.append({
+                "Symbol": trade.symbol,
+                "Action": trade.action,
+                "Shares": f"{trade.shares:.0f}",
+                "Value (Base)": f"{trade.estimated_value:,.0f} {base_currency}",
+                "Value (Native)": f"{est_value_native:,.0f} {currency}" if currency != base_currency else "-",
+                "Currency": currency,
+                "Current %": f"{trade.current_weight:.1%}",
+                "Target %": f"{trade.target_weight:.1%}",
+                "Change": f"{(trade.target_weight - trade.current_weight):+.1%}"
+            })
+
+        df = pd.DataFrame(trades_data)
+
+        # Style the dataframe
+        def highlight_action(val):
+            if val == "BUY":
+                return "background-color: #d4edda; color: #155724"  # Green
+            elif val == "SELL":
+                return "background-color: #f8d7da; color: #721c24"  # Red
+            elif val == "HOLD":
+                return "background-color: #cce5ff; color: #004085"  # Blue for cash hold
+            elif val == "DEPLOY":
+                return "background-color: #d4edda; color: #155724"  # Green - deploy cash into assets
+            elif val == "REDUCE":
+                return "background-color: #fff3cd; color: #856404"  # Yellow for reduce
+            return ""
+
+        styled_df = df.style.map(highlight_action, subset=["Action"])
+        st.dataframe(styled_df, use_container_width=True, hide_index=True)
+
+        # Summary
+        total_buy = sum(t.estimated_value for t in hrp_result.rebalancing_trades if t.action == "BUY")
+        total_sell = sum(t.estimated_value for t in hrp_result.rebalancing_trades if t.action == "SELL")
+
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Total to Buy", f"{total_buy:,.0f} {base_currency}")
+        with col2:
+            st.metric("Total to Sell", f"{total_sell:,.0f} {base_currency}")
+        with col3:
+            net = total_buy - total_sell
+            st.metric("Net Cash Flow", f"{net:,.0f} {base_currency}", delta=f"{'Inflow' if net < 0 else 'Outflow'}")
+
+        # Check for multi-currency trades
+        currencies = set(t.currency for t in hrp_result.rebalancing_trades if hasattr(t, "currency"))
+        if len(currencies) > 1:
+            st.info(f"💱 Multi-currency rebalancing: {', '.join(sorted(currencies))}. Values shown in both base ({base_currency}) and native currency.")
+
+        st.caption("⚠️ These are suggestions only. Consider transaction costs, taxes, FX rates, and market conditions before trading.")
 
     def render_scenarios(self, portfolio_manager, metrics_calculator):
         """Render portfolio scenarios and what-if analysis."""

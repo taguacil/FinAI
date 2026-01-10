@@ -17,7 +17,17 @@ from ..data_providers.manager import DataProviderManager
 from ..portfolio.manager import PortfolioManager
 from ..utils.metrics import FinancialMetricsCalculator
 from .analytics_agent import AnalyticsAgent
-from .llm_config import MODEL_REGISTRY, LLMProvider, create_llm, create_llm_from_config
+from .llm_config import (
+    DEFAULT_AZURE_API_VERSION,
+    DEFAULT_AZURE_ENDPOINT,
+    DEFAULT_VERTEX_LOCATION,
+    MODEL_REGISTRY,
+    LLMProvider,
+    create_llm,
+    get_default_model_key,
+    get_default_provider,
+    get_model_by_key,
+)
 from .orchestrator_agent import OrchestratorAgent
 from .shared_state import SharedAgentState
 from .transaction_agent import TransactionAgent
@@ -144,98 +154,95 @@ class PortfolioAgent:
 
     def set_llm_config(
         self,
+        model_key: Optional[str] = None,
         provider: Optional[str] = None,
-        # Azure
+        # Azure overrides
         azure_endpoint: Optional[str] = None,
         azure_api_key: Optional[str] = None,
         azure_model: Optional[str] = None,
-        # OpenAI fallback
-        openai_api_key: Optional[str] = None,
-        openai_model: str = "gpt-4o-mini",
-        # Anthropic
-        anthropic_api_key: Optional[str] = None,
-        anthropic_model: Optional[str] = None,
-        # Google Vertex AI
+        # Vertex AI overrides
         vertex_project: Optional[str] = None,
         vertex_location: Optional[str] = None,
         vertex_model: Optional[str] = None,
+        # Legacy parameters (for backwards compatibility)
+        openai_api_key: Optional[str] = None,
+        openai_model: str = "gpt-4o-mini",
+        anthropic_api_key: Optional[str] = None,
+        anthropic_model: Optional[str] = None,
     ) -> None:
-        """Configure LLM provider and model.
+        """Configure LLM provider and model using central config.
 
-        Supported providers: 'azure-openai', 'openai', 'anthropic', 'vertex-ai'.
+        Uses llm_config.py as the single source of truth.
+        Supports both new model_key parameter and legacy provider-specific parameters.
+
+        Args:
+            model_key: Key from MODEL_REGISTRY (e.g., "claude-sonnet-4.5")
+            provider: Provider name for legacy compatibility
+            azure_endpoint: Optional Azure endpoint override
+            azure_api_key: Optional Azure API key override
+            azure_model: Optional Azure model override (legacy)
+            vertex_project: Optional Vertex AI project override
+            vertex_location: Optional Vertex AI location override
+            vertex_model: Optional Vertex AI model override (legacy)
         """
         try:
-            from langchain_anthropic import ChatAnthropic
-            from langchain_google_vertexai import ChatVertexAI
-            from langchain_openai import AzureChatOpenAI, ChatOpenAI
+            # Determine model key from parameters
+            effective_model_key = model_key
 
-            provider_normalized = (provider or "").lower()
+            if not effective_model_key:
+                # Legacy: map provider + model to model_key
+                provider_normalized = (provider or "").lower()
+                if provider_normalized in ("azure", "azure-openai", "azure_openai"):
+                    # Find matching model in registry
+                    model_id = azure_model or "gpt-4.1-mini"
+                    for key, config in MODEL_REGISTRY.items():
+                        if config.model_id == model_id and config.provider == LLMProvider.AZURE_OPENAI:
+                            effective_model_key = key
+                            break
+                    if not effective_model_key:
+                        effective_model_key = "gpt-4.1-mini"
+                elif provider_normalized in ("vertex", "vertex-ai", "google", "google-vertex"):
+                    model_id = vertex_model or "claude-haiku-4-5"
+                    for key, config in MODEL_REGISTRY.items():
+                        if config.model_id == model_id and config.provider == LLMProvider.VERTEX_AI:
+                            effective_model_key = key
+                            break
+                    if not effective_model_key:
+                        effective_model_key = "claude-haiku-4.5"
+                elif provider_normalized == "anthropic":
+                    effective_model_key = "claude-sonnet-4.5"
+                else:
+                    effective_model_key = get_default_model_key()
 
-            if provider_normalized == "anthropic":
-                key = anthropic_api_key or os.getenv("ANTHROPIC_API_KEY", "")
-                model = anthropic_model or "claude-sonnet-4-20250514"
-                self.llm = ChatAnthropic(model=model, temperature=0.1, api_key=key)
-                self._current_provider = "anthropic"
-                self._current_model = model
-                self._update_specialist_llms()
-                return
+            # Create LLM using central config
+            self.llm = create_llm(
+                model_key=effective_model_key,
+                azure_endpoint=azure_endpoint,
+                azure_api_key=azure_api_key,
+                vertex_project=vertex_project,
+                vertex_location=vertex_location,
+            )
 
-            if provider_normalized in (
-                "vertex",
-                "vertex-ai",
-                "google",
-                "google-vertex",
-            ):
-                project = vertex_project or os.getenv("GOOGLE_VERTEX_PROJECT", "")
-                location = vertex_location or os.getenv(
-                    "GOOGLE_VERTEX_LOCATION", "us-central1"
-                )
-                model_name = vertex_model or "gemini-2.0-flash-lite-001"
-                self.llm = ChatVertexAI(
-                    model_name=model_name,
-                    project=project,
-                    location=location,
-                    temperature=0.1,
-                )
-                self._current_provider = "vertex-ai"
-                self._current_model = model_name
-                self._update_specialist_llms()
-                return
-
-            if provider_normalized in ("azure", "azure-openai", "azure_openai") or (
-                azure_endpoint and azure_api_key and azure_model
-            ):
-                self.llm = AzureChatOpenAI(
-                    azure_endpoint=azure_endpoint
-                    or os.getenv(
-                        "AZURE_OPENAI_ENDPOINT", "https://kallamai.openai.azure.com/"
-                    ),
-                    api_version=self.azure_api_version,
-                    api_key=azure_api_key or os.getenv("AZURE_OPENAI_API_KEY", ""),
-                    model=azure_model or "gpt-4.1-mini",
-                    temperature=0.1,
-                )
-                self._current_provider = "azure-openai"
-                self._current_model = azure_model or "gpt-4.1-mini"
-                self._update_specialist_llms()
-                return
-
-            # Default fallback to OpenAI
-            key = openai_api_key or os.getenv("OPENAI_API_KEY", "")
-            self.llm = ChatOpenAI(model=openai_model, temperature=0.1, api_key=key)
-            self._current_provider = "openai"
-            self._current_model = openai_model
+            # Update tracking
+            config = get_model_by_key(effective_model_key)
+            if config:
+                self._current_provider = config.provider.value
+                self._current_model = config.model_id
+            else:
+                self._current_provider = get_default_provider()
+                self._current_model = effective_model_key
 
             self._update_specialist_llms()
 
-        except Exception:
-            # Last resort minimal fallback to avoid crashing UI
-            from langchain_openai import ChatOpenAI
-
-            key = openai_api_key or os.getenv("OPENAI_API_KEY", "")
-            self.llm = ChatOpenAI(model=openai_model, temperature=0.1, api_key=key)
-            self._current_provider = "openai"
-            self._current_model = openai_model
+        except Exception as e:
+            # Fallback to default model
+            import logging
+            logging.warning(f"Failed to set LLM config: {e}. Using default.")
+            default_key = get_default_model_key()
+            self.llm = create_llm(default_key)
+            config = get_model_by_key(default_key)
+            self._current_provider = config.provider.value if config else "vertex-ai"
+            self._current_model = config.model_id if config else default_key
 
     def _update_specialist_llms(self):
         """Update the LLM for specialist agents after configuration change."""

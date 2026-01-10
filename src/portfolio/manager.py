@@ -333,6 +333,127 @@ class PortfolioManager:
         self.storage.save_portfolio(self.current_portfolio)
         return results
 
+    def set_position_price(
+        self,
+        symbol: str,
+        price: Decimal,
+        target_date: Optional[date] = None,
+        update_current: bool = True,
+    ) -> bool:
+        """Set a custom/manual price for a position on a specific date.
+
+        This is useful when:
+        - Price lookup fails and user wants to use purchase price as market price
+        - User wants to manually set a custom price for an instrument
+        - Correcting historical prices in snapshots
+
+        Args:
+            symbol: The instrument symbol
+            price: The price to set
+            target_date: The date to set the price for (defaults to today)
+            update_current: If True and target_date is today, also update current_price
+                           in the portfolio's position
+
+        Returns:
+            True if successful, False otherwise
+        """
+        if not self.current_portfolio:
+            logging.error("No portfolio loaded")
+            return False
+
+        symbol = symbol.upper().strip()
+        target_date = target_date or date.today()
+
+        # Validate the symbol exists in portfolio
+        if symbol not in self.current_portfolio.positions:
+            logging.error(f"Symbol {symbol} not found in portfolio positions")
+            return False
+
+        try:
+            # Update current portfolio position if target_date is today
+            if update_current and target_date == date.today():
+                self.current_portfolio.positions[symbol].current_price = price
+                self.current_portfolio.positions[symbol].last_updated = datetime.now()
+                self.storage.save_portfolio(self.current_portfolio)
+                logging.info(f"Updated current price for {symbol} to {price}")
+
+            # Update or create snapshot for the target date
+            existing_snapshots = self.storage.load_snapshots(
+                self.current_portfolio.id, target_date, target_date
+            )
+
+            if existing_snapshots:
+                # Update existing snapshot
+                snapshot = existing_snapshots[0]
+                if symbol in snapshot.positions:
+                    snapshot.positions[symbol].current_price = price
+                    snapshot.positions[symbol].last_updated = datetime.now()
+
+                    # Recalculate snapshot totals
+                    self._recalculate_snapshot_totals(snapshot)
+
+                    # Save updated snapshot
+                    self.storage.save_snapshot(self.current_portfolio.id, snapshot)
+                    logging.info(
+                        f"Updated price for {symbol} to {price} in snapshot for {target_date}"
+                    )
+                else:
+                    logging.warning(
+                        f"Symbol {symbol} not found in snapshot for {target_date}"
+                    )
+                    return False
+            else:
+                # Create a new snapshot for the target date with the custom price
+                # First, temporarily set the price in the current portfolio
+                original_price = self.current_portfolio.positions[symbol].current_price
+                self.current_portfolio.positions[symbol].current_price = price
+
+                # Create snapshot for the target date
+                snapshot = self.analyzer.create_snapshot(
+                    self.current_portfolio, target_date, save=True
+                )
+
+                # Restore original price if we're not updating current
+                if not update_current or target_date != date.today():
+                    self.current_portfolio.positions[symbol].current_price = original_price
+
+                logging.info(
+                    f"Created snapshot for {target_date} with {symbol} price set to {price}"
+                )
+
+            return True
+
+        except Exception as e:
+            logging.error(f"Error setting position price: {e}")
+            return False
+
+    def _recalculate_snapshot_totals(self, snapshot: PortfolioSnapshot) -> None:
+        """Recalculate snapshot totals after position price changes."""
+        total_positions_value = Decimal("0")
+        total_cost_basis = Decimal("0")
+        total_unrealized_pnl = Decimal("0")
+
+        for position in snapshot.positions.values():
+            if position.quantity > 0 and position.current_price is not None:
+                position_value = position.quantity * position.current_price
+                position_cost = position.quantity * position.average_cost
+
+                total_positions_value += position_value
+                total_cost_basis += position_cost
+                total_unrealized_pnl += position_value - position_cost
+
+        snapshot.positions_value = total_positions_value
+        snapshot.total_cost_basis = total_cost_basis
+        snapshot.total_unrealized_pnl = total_unrealized_pnl
+        snapshot.total_value = snapshot.cash_balance + total_positions_value
+
+        if total_cost_basis > 0:
+            snapshot.total_unrealized_pnl_percent = (
+                total_unrealized_pnl / total_cost_basis
+            ) * Decimal("100")
+        else:
+            snapshot.total_unrealized_pnl_percent = Decimal("0")
+
     def get_fallback_prices_from_snapshots(self) -> Dict[str, Decimal]:
         """Get fallback prices from the most recent snapshots for positions without current prices.
 

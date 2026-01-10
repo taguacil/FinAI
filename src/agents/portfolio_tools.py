@@ -14,6 +14,7 @@ from pypdf import PdfReader
 from ..data_providers.manager import DataProviderManager
 from ..portfolio.manager import PortfolioManager
 from ..portfolio.models import TransactionType
+from ..portfolio.optimizer import OptimizationMethod, PortfolioOptimizer
 from ..utils.metrics import FinancialMetricsCalculator
 
 
@@ -1588,6 +1589,117 @@ class DeleteTransactionTool(BaseTool):
             return f"❌ Error deleting transaction: {str(e)}"
 
 
+class SetMarketPriceInput(BaseModel):
+    """Input for setting market price."""
+
+    symbol: str = Field(description="Stock/instrument symbol (e.g., AAPL, TSLA)")
+    price: Optional[float] = Field(
+        default=None,
+        description="Price to set. Required unless use_purchase_price is True.",
+    )
+    date: Optional[str] = Field(
+        default=None,
+        description="Date for the price in YYYY-MM-DD format. Defaults to today.",
+    )
+    use_purchase_price: bool = Field(
+        default=False,
+        description="If True, uses the position's purchase price (average_cost) as the market price instead of the 'price' parameter.",
+    )
+
+
+class SetMarketPriceTool(BaseTool):
+    """Tool for setting or updating market prices for instruments."""
+
+    name: str = "set_market_price"
+    description: str = """Set or update the market price for an instrument on a specific date.
+
+    Use cases:
+    - When price lookup fails and user wants to use purchase price as market price
+    - When user wants to manually set a custom price for an instrument
+    - When correcting historical prices in snapshots
+
+    Parameters:
+    - symbol: The instrument symbol (required)
+    - price: The price to set (required unless use_purchase_price is True)
+    - date: Date for the price in YYYY-MM-DD format (optional, defaults to today)
+    - use_purchase_price: If True, uses the position's average_cost as the market price
+
+    Examples:
+    - "Set AAPL price to $150" → set_market_price(symbol="AAPL", price=150)
+    - "Use purchase price for XYZ" → set_market_price(symbol="XYZ", use_purchase_price=True)
+    - "Set TSLA price to $200 for 2024-01-15" → set_market_price(symbol="TSLA", price=200, date="2024-01-15")
+    """
+    args_schema: type[BaseModel] = SetMarketPriceInput
+    portfolio_manager: Optional[PortfolioManager] = None
+
+    def __init__(self, portfolio_manager: PortfolioManager):
+        super().__init__()
+        self.portfolio_manager = portfolio_manager
+
+    def _run(
+        self,
+        symbol: str,
+        price: Optional[float] = None,
+        date: Optional[str] = None,
+        use_purchase_price: bool = False,
+    ) -> str:
+        """Set market price for an instrument."""
+        try:
+            if not self.portfolio_manager.current_portfolio:
+                return "❌ No portfolio loaded."
+
+            symbol = symbol.upper().strip()
+
+            # Check if symbol exists in portfolio
+            if symbol not in self.portfolio_manager.current_portfolio.positions:
+                return f"❌ Symbol '{symbol}' not found in portfolio. Please add a transaction for this symbol first."
+
+            position = self.portfolio_manager.current_portfolio.positions[symbol]
+
+            # Determine the price to use
+            if use_purchase_price:
+                final_price = position.average_cost
+                price_source = "purchase price (average cost)"
+            elif price is not None:
+                final_price = Decimal(str(price))
+                price_source = "custom price"
+            else:
+                return "❌ Please provide either a price or set use_purchase_price=True."
+
+            # Parse date
+            if date:
+                try:
+                    from datetime import datetime as dt
+                    target_date = dt.strptime(date, "%Y-%m-%d").date()
+                except ValueError:
+                    return "❌ Invalid date format. Use YYYY-MM-DD."
+            else:
+                target_date = None  # Will default to today in the manager
+
+            # Set the price
+            success = self.portfolio_manager.set_position_price(
+                symbol=symbol,
+                price=final_price,
+                target_date=target_date,
+                update_current=True,
+            )
+
+            if success:
+                target_date_str = (date if date else "today")
+                return (
+                    f"✅ Set market price for {symbol}:\n"
+                    f"• Price: {final_price:.2f} ({price_source})\n"
+                    f"• Date: {target_date_str}\n"
+                    f"• Position: {position.instrument.name}\n"
+                    f"• Quantity: {position.quantity}"
+                )
+            else:
+                return f"❌ Failed to set price for {symbol}. Check logs for details."
+
+        except Exception as e:
+            return f"❌ Error setting market price: {str(e)}"
+
+
 def create_portfolio_tools(
     portfolio_manager: PortfolioManager,
     data_manager: DataProviderManager,
@@ -1622,6 +1734,7 @@ def create_transaction_tools(
         AddTransactionTool(portfolio_manager),
         ModifyTransactionTool(portfolio_manager),
         DeleteTransactionTool(portfolio_manager),
+        SetMarketPriceTool(portfolio_manager),
         SearchInstrumentTool(data_manager),
         SearchCompanyTool(data_manager),
     ]
@@ -1641,6 +1754,9 @@ def create_analytics_tools(
         SimulateWhatIfTool(portfolio_manager),
         AdvancedWhatIfTool(portfolio_manager),
         HypotheticalPositionTool(portfolio_manager),
+        OptimizePortfolioTool(portfolio_manager, data_manager),
+        ScenarioOptimizationTool(portfolio_manager, data_manager),
+        SetMarketPriceTool(portfolio_manager),
         GetCurrentPriceTool(data_manager),
         CalculatorTool(),
         IngestPdfTool(),
@@ -1704,3 +1820,653 @@ class IngestPdfTool(BaseTool):
             return f"❌ File not found: {path}"
         except Exception as e:
             return f"❌ Error reading PDF: {str(e)}"
+
+
+class OptimizePortfolioInput(BaseModel):
+    """Input for portfolio optimization."""
+
+    locked_symbols: Optional[str] = Field(
+        default=None,
+        description="Comma-separated symbols to keep at current weights (e.g., 'AAPL,GOOG')",
+    )
+    method: str = Field(
+        default="hrp",
+        description="Optimization method: 'hrp' (recommended) or 'markowitz'",
+    )
+    compare: bool = Field(
+        default=True,
+        description="If true, show both HRP and Markowitz for comparison",
+    )
+    lookback_days: int = Field(
+        default=252,
+        description="Days of historical data for covariance (default: 252 = 1 year)",
+    )
+    objective: str = Field(
+        default="max_sharpe",
+        description="Optimization objective: 'max_sharpe' (maximize risk-adjusted return), 'min_volatility' (minimize risk), or 'efficient_risk' (target specific volatility)",
+    )
+    target_volatility: Optional[float] = Field(
+        default=None,
+        description="Target annual volatility as decimal (e.g., 0.15 for 15%). Only used with objective='efficient_risk'",
+    )
+    include_cash: bool = Field(
+        default=True,
+        description="Include cash in portfolio. When True, allows cash allocation to achieve target volatility and includes existing cash in trade calculations.",
+    )
+    risk_free_rate: float = Field(
+        default=0.04,
+        description="Annual risk-free rate for Sharpe calculation (default: 0.04 = 4%)",
+    )
+
+
+class OptimizePortfolioTool(BaseTool):
+    """Tool for optimizing portfolio weights."""
+
+    name: str = "optimize_portfolio"
+    description: str = """Analyze current portfolio and suggest optimal weight allocation for rebalancing.
+
+    Uses two optimization methods:
+    - HRP (Hierarchical Risk Parity): Default, more robust, handles correlated assets well
+    - Markowitz (Mean-Variance): Classic approach, can maximize Sharpe or minimize volatility
+
+    Optimization Objectives:
+    - max_sharpe: Maximize risk-adjusted return (Sharpe ratio)
+    - min_volatility: Minimize portfolio volatility/risk
+    - efficient_risk: Target a specific volatility level (requires target_volatility parameter)
+
+    Features:
+    - Lock specific positions you don't want to change
+    - Compare both methods side-by-side
+    - Include cash for lower volatility targets (blends risky assets with cash)
+    - Shows specific rebalancing trades needed with share counts
+
+    Examples:
+    - optimize_portfolio() - optimize for max Sharpe with cash enabled
+    - optimize_portfolio(objective="min_volatility") - minimize risk
+    - optimize_portfolio(objective="efficient_risk", target_volatility=0.10) - target 10% volatility
+    - optimize_portfolio(locked_symbols="VTI,BND") - keep VTI and BND at current weights
+    - optimize_portfolio(include_cash=False) - don't include cash in rebalancing
+    - optimize_portfolio(lookback_days=126, risk_free_rate=0.05) - 6 months data, 5% risk-free rate
+    """
+    args_schema: type[BaseModel] = OptimizePortfolioInput
+    portfolio_manager: Optional[PortfolioManager] = None
+    data_manager: Optional[DataProviderManager] = None
+
+    def __init__(
+        self, portfolio_manager: PortfolioManager, data_manager: DataProviderManager
+    ):
+        super().__init__()
+        self.portfolio_manager = portfolio_manager
+        self.data_manager = data_manager
+
+    def _run(
+        self,
+        locked_symbols: Optional[str] = None,
+        method: str = "hrp",
+        compare: bool = True,
+        lookback_days: int = 252,
+        objective: str = "max_sharpe",
+        target_volatility: Optional[float] = None,
+        include_cash: bool = True,
+        risk_free_rate: float = 0.04,
+    ) -> str:
+        """Run portfolio optimization."""
+        try:
+            from ..portfolio.optimizer import OptimizationObjective
+
+            if not self.portfolio_manager.current_portfolio:
+                return "❌ No portfolio loaded. Please create or load a portfolio first."
+
+            portfolio = self.portfolio_manager.current_portfolio
+            positions = portfolio.positions
+
+            if len(positions) < 2:
+                return "❌ Need at least 2 positions to optimize portfolio."
+
+            # Parse locked symbols
+            locked_list = []
+            if locked_symbols:
+                locked_list = [s.strip().upper() for s in locked_symbols.split(",")]
+                # Validate locked symbols exist
+                invalid = [s for s in locked_list if s not in positions]
+                if invalid:
+                    return f"❌ Locked symbols not in portfolio: {', '.join(invalid)}"
+
+            # Parse objective
+            objective_map = {
+                "max_sharpe": OptimizationObjective.MAX_SHARPE,
+                "min_volatility": OptimizationObjective.MIN_VOLATILITY,
+                "efficient_risk": OptimizationObjective.EFFICIENT_RISK,
+            }
+            opt_objective = objective_map.get(objective.lower(), OptimizationObjective.MAX_SHARPE)
+
+            # Update current prices before optimization
+            self.portfolio_manager.update_current_prices()
+
+            # Calculate total portfolio value
+            total_value = sum(
+                pos.market_value or (pos.quantity * pos.average_cost)
+                for pos in positions.values()
+                if pos.quantity > 0
+            )
+
+            # Get cash balances if including cash
+            cash_balances = portfolio.cash_balances if include_cash else None
+
+            # Create optimizer
+            optimizer = PortfolioOptimizer(
+                self.data_manager,
+                base_currency=portfolio.base_currency,
+            )
+
+            # Run optimization
+            if compare:
+                results = optimizer.compare_methods(
+                    positions=positions,
+                    locked_symbols=locked_list,
+                    lookback_days=lookback_days,
+                    risk_free_rate=risk_free_rate,
+                    total_portfolio_value=total_value,
+                    cash_balances=cash_balances,
+                    objective=opt_objective,
+                    target_volatility=target_volatility,
+                    include_cash=include_cash,
+                )
+                return self._format_comparison_results(results, locked_list, total_value, include_cash)
+            else:
+                opt_method = (
+                    OptimizationMethod.HRP
+                    if method.lower() == "hrp"
+                    else OptimizationMethod.MARKOWITZ
+                )
+                result = optimizer.optimize(
+                    positions=positions,
+                    locked_symbols=locked_list,
+                    method=opt_method,
+                    lookback_days=lookback_days,
+                    risk_free_rate=risk_free_rate,
+                    total_portfolio_value=total_value,
+                    cash_balances=cash_balances,
+                    objective=opt_objective,
+                    target_volatility=target_volatility,
+                    include_cash=include_cash,
+                )
+                return self._format_single_result(result, total_value, include_cash)
+
+        except ValueError as e:
+            return f"❌ Optimization error: {str(e)}"
+        except Exception as e:
+            return f"❌ Unexpected error: {str(e)}"
+
+    def _format_single_result(self, result, total_value, include_cash: bool = True) -> str:
+        """Format a single optimization result."""
+        lines = [
+            "📊 Portfolio Optimization Results",
+            "━" * 40,
+            "",
+        ]
+
+        if result.locked_symbols:
+            lines.append(f"🔒 Locked positions: {', '.join(result.locked_symbols)}")
+            lines.append("")
+
+        method_name = "HRP (Hierarchical Risk Parity)" if result.method == OptimizationMethod.HRP else "Markowitz (Mean-Variance)"
+        lines.append(f"📈 Method: {method_name}")
+        lines.append("")
+
+        # Metrics
+        if result.expected_annual_return is not None:
+            lines.append(f"Expected Annual Return: {result.expected_annual_return:.1%}")
+        lines.append(f"Annual Volatility: {result.annual_volatility:.1%}")
+        if result.sharpe_ratio is not None:
+            lines.append(f"Sharpe Ratio: {result.sharpe_ratio:.2f}")
+
+        # Cash allocation
+        if include_cash and result.cash_weight and result.cash_weight > 0.001:
+            lines.append(f"Cash Allocation: {result.cash_weight:.1%}")
+        lines.append("")
+
+        # Target weights
+        lines.append("Target Weights:")
+        for sym in sorted(result.weights.keys()):
+            target = result.weights[sym]
+            current = result.current_weights.get(sym, 0)
+            diff = target - current
+            locked = " (locked)" if sym in result.locked_symbols else ""
+            if abs(diff) < 0.001:
+                lines.append(f"  {sym}: {target:.1%}{locked}")
+            else:
+                sign = "+" if diff > 0 else ""
+                lines.append(f"  {sym}: {current:.1%} → {target:.1%} ({sign}{diff:.1%}){locked}")
+
+        # Show cash if allocated
+        if include_cash and result.cash_weight and result.cash_weight > 0.001:
+            lines.append(f"  CASH: {result.cash_weight:.1%}")
+        lines.append("")
+
+        # Rebalancing trades
+        if result.rebalancing_trades:
+            lines.append("📋 Rebalancing Trades:")
+            for trade in result.rebalancing_trades:
+                if trade.shares > 0:
+                    lines.append(
+                        f"  • {trade.action} {trade.shares:.0f} shares {trade.symbol} (~{trade.estimated_value:,.0f} USD)"
+                    )
+                else:
+                    # Cash trade (no shares)
+                    lines.append(
+                        f"  • {trade.action} {trade.symbol} (~{trade.estimated_value:,.0f} USD)"
+                    )
+            lines.append("")
+
+        # Warnings
+        if result.warnings:
+            lines.append("⚠️ Warnings:")
+            for warn in result.warnings:
+                lines.append(f"  • {warn}")
+
+        return "\n".join(lines)
+
+    def _format_comparison_results(self, results, locked_list, total_value, include_cash: bool = True) -> str:
+        """Format comparison of multiple optimization methods."""
+        lines = [
+            "📊 Portfolio Optimization Results",
+            "━" * 50,
+            "",
+        ]
+
+        if locked_list:
+            lines.append(f"🔒 Locked positions: {', '.join(locked_list)}")
+            lines.append("")
+
+        # HRP Results (primary)
+        hrp_result = results.get(OptimizationMethod.HRP)
+        if hrp_result and hrp_result.weights:
+            lines.append("┌" + "─" * 48 + "┐")
+            lines.append("│ HRP (Hierarchical Risk Parity) - RECOMMENDED" + " " * 3 + "│")
+            lines.append("├" + "─" * 48 + "┤")
+
+            if hrp_result.expected_annual_return is not None:
+                exp_ret = f"Expected Return: {hrp_result.expected_annual_return:.1%}"
+            else:
+                exp_ret = "Expected Return: N/A"
+            vol = f"Volatility: {hrp_result.annual_volatility:.1%}"
+            lines.append(f"│ {exp_ret}   {vol}".ljust(49) + "│")
+
+            if hrp_result.sharpe_ratio is not None:
+                lines.append(f"│ Sharpe Ratio: {hrp_result.sharpe_ratio:.2f}".ljust(49) + "│")
+
+            # Cash allocation
+            if include_cash and hrp_result.cash_weight and hrp_result.cash_weight > 0.001:
+                lines.append(f"│ Cash Allocation: {hrp_result.cash_weight:.1%}".ljust(49) + "│")
+
+            lines.append("├" + "─" * 48 + "┤")
+            lines.append("│ Target Weights:".ljust(49) + "│")
+
+            for sym in sorted(hrp_result.weights.keys()):
+                target = hrp_result.weights[sym]
+                current = hrp_result.current_weights.get(sym, 0)
+                diff = target - current
+                locked = " (locked)" if sym in locked_list else ""
+                if abs(diff) < 0.001:
+                    line = f"│   {sym}: {target:.1%}{locked}"
+                else:
+                    sign = "+" if diff > 0 else ""
+                    line = f"│   {sym}: {current:.1%} → {target:.1%} ({sign}{diff:.1%}){locked}"
+                lines.append(line.ljust(49) + "│")
+
+            # Show cash if allocated
+            if include_cash and hrp_result.cash_weight and hrp_result.cash_weight > 0.001:
+                lines.append(f"│   CASH: {hrp_result.cash_weight:.1%}".ljust(49) + "│")
+
+            lines.append("└" + "─" * 48 + "┘")
+            lines.append("")
+
+        # Markowitz Results (comparison)
+        mk_result = results.get(OptimizationMethod.MARKOWITZ)
+        if mk_result and mk_result.weights:
+            lines.append("┌" + "─" * 48 + "┐")
+            lines.append("│ Markowitz (Mean-Variance) - FOR COMPARISON" + " " * 5 + "│")
+            lines.append("├" + "─" * 48 + "┤")
+
+            if mk_result.expected_annual_return is not None:
+                exp_ret = f"Expected Return: {mk_result.expected_annual_return:.1%}"
+            else:
+                exp_ret = "Expected Return: N/A"
+            vol = f"Volatility: {mk_result.annual_volatility:.1%}"
+            lines.append(f"│ {exp_ret}   {vol}".ljust(49) + "│")
+
+            if mk_result.sharpe_ratio is not None:
+                lines.append(f"│ Sharpe Ratio: {mk_result.sharpe_ratio:.2f}".ljust(49) + "│")
+
+            # Cash allocation
+            if include_cash and mk_result.cash_weight and mk_result.cash_weight > 0.001:
+                lines.append(f"│ Cash Allocation: {mk_result.cash_weight:.1%}".ljust(49) + "│")
+
+            lines.append("├" + "─" * 48 + "┤")
+            lines.append("│ Target Weights:".ljust(49) + "│")
+
+            for sym in sorted(mk_result.weights.keys()):
+                target = mk_result.weights[sym]
+                current = mk_result.current_weights.get(sym, 0)
+                diff = target - current
+                locked = " (locked)" if sym in locked_list else ""
+
+                # Flag concentrated positions
+                concentrated = " ⚠️" if target > 0.4 and sym not in locked_list else ""
+
+                if abs(diff) < 0.001:
+                    line = f"│   {sym}: {target:.1%}{locked}{concentrated}"
+                else:
+                    sign = "+" if diff > 0 else ""
+                    line = f"│   {sym}: {current:.1%} → {target:.1%} ({sign}{diff:.1%}){locked}{concentrated}"
+                lines.append(line.ljust(49) + "│")
+
+            # Show cash if allocated
+            if include_cash and mk_result.cash_weight and mk_result.cash_weight > 0.001:
+                lines.append(f"│   CASH: {mk_result.cash_weight:.1%}".ljust(49) + "│")
+
+            lines.append("└" + "─" * 48 + "┘")
+            lines.append("")
+
+        # Rebalancing trades (for HRP)
+        if hrp_result and hrp_result.rebalancing_trades:
+            lines.append("📋 Rebalancing Trades (HRP):")
+            for trade in hrp_result.rebalancing_trades:
+                if trade.shares > 0:
+                    lines.append(
+                        f"  • {trade.action} {trade.shares:.0f} shares {trade.symbol} (~{trade.estimated_value:,.0f} USD)"
+                    )
+                else:
+                    # Cash trade (no shares)
+                    lines.append(
+                        f"  • {trade.action} {trade.symbol} (~{trade.estimated_value:,.0f} USD)"
+                    )
+            lines.append("")
+
+        # Notes
+        lines.append("💡 Notes:")
+        lines.append("  • HRP provides more diversified, robust allocation")
+        lines.append("  • Markowitz may concentrate heavily in few assets")
+        if include_cash:
+            lines.append("  • Cash can be used to reduce portfolio volatility")
+        lines.append("  • Consider transaction costs before rebalancing")
+
+        # Collect warnings
+        all_warnings = []
+        for result in results.values():
+            if result and result.warnings:
+                all_warnings.extend(result.warnings)
+        if all_warnings:
+            lines.append("")
+            lines.append("⚠️ Warnings:")
+            for warn in set(all_warnings):
+                lines.append(f"  • {warn}")
+
+        return "\n".join(lines)
+
+
+class ScenarioOptimizationInput(BaseModel):
+    """Input for scenario-based optimization."""
+
+    scenarios: str = Field(
+        default="optimistic,likely,pessimistic,stress",
+        description="Comma-separated list of scenarios: optimistic, likely, pessimistic, stress",
+    )
+    objective: str = Field(
+        default="max_sharpe",
+        description="Optimization objective: 'max_sharpe' or 'min_volatility'",
+    )
+    include_cash: bool = Field(
+        default=True,
+        description="Include cash in portfolio optimization",
+    )
+    lookback_days: int = Field(
+        default=252,
+        description="Days of historical data for base covariance calculation",
+    )
+
+
+class ScenarioOptimizationTool(BaseTool):
+    """Tool for comparing portfolio optimization under different market scenarios."""
+
+    name: str = "scenario_optimization"
+    description: str = """Compare how optimal portfolio allocation changes under different market scenarios.
+
+    This tool runs optimization under multiple market conditions and shows how the recommended
+    allocation differs. Useful for understanding how to position for different market outcomes.
+
+    Available Scenarios (same as UI scenario analysis):
+    - optimistic: Bull Market Growth - 12% return, 15% volatility, favorable conditions
+    - likely: Historical Average - 8% return, 20% volatility, long-term averages
+    - pessimistic: Economic Downturn - 2% return, 30% volatility, recession/bear market
+    - stress: Market Crash - -5% return, 45% volatility, severe market crash
+
+    Examples:
+    - scenario_optimization() - Compare all 4 scenarios
+    - scenario_optimization(scenarios="optimistic,pessimistic") - Just compare the extremes
+    - scenario_optimization(scenarios="likely,stress") - Compare baseline to worst case
+    - scenario_optimization(objective="min_volatility") - Focus on risk minimization in each scenario
+    """
+    args_schema: type[BaseModel] = ScenarioOptimizationInput
+    portfolio_manager: Optional[PortfolioManager] = None
+    data_manager: Optional[DataProviderManager] = None
+
+    def __init__(
+        self, portfolio_manager: PortfolioManager, data_manager: DataProviderManager
+    ):
+        super().__init__()
+        self.portfolio_manager = portfolio_manager
+        self.data_manager = data_manager
+
+    def _run(
+        self,
+        scenarios: str = "bullish,neutral,bearish",
+        objective: str = "max_sharpe",
+        include_cash: bool = True,
+        lookback_days: int = 252,
+    ) -> str:
+        """Run optimization under different market scenarios."""
+        try:
+            from ..portfolio.optimizer import OptimizationObjective, OptimizationMethod
+
+            if not self.portfolio_manager.current_portfolio:
+                return "❌ No portfolio loaded. Please create or load a portfolio first."
+
+            portfolio = self.portfolio_manager.current_portfolio
+            positions = portfolio.positions
+
+            if len(positions) < 2:
+                return "❌ Need at least 2 positions to optimize portfolio."
+
+            # Parse scenarios
+            scenario_list = [s.strip().lower() for s in scenarios.split(",")]
+
+            # Scenario adjustments matching the UI scenarios (relative to historical mean)
+            # Based on src/portfolio/scenarios.py:
+            # - optimistic: 14% stock return (vs ~10% historical) → +4%
+            # - likely: 10% stock return → 0% (baseline)
+            # - pessimistic: 3% stock return → -7%
+            # - stress: -5% market return → -15%
+            scenario_adjustments = {
+                "optimistic": {
+                    "adjustment": 0.04,
+                    "name": "Bull Market Growth",
+                    "description": "Strong growth, low volatility, favorable conditions"
+                },
+                "likely": {
+                    "adjustment": 0.0,
+                    "name": "Historical Average",
+                    "description": "Markets perform in line with long-term averages"
+                },
+                "pessimistic": {
+                    "adjustment": -0.07,
+                    "name": "Economic Downturn",
+                    "description": "Recession, market stress, high volatility"
+                },
+                "stress": {
+                    "adjustment": -0.15,
+                    "name": "Market Crash",
+                    "description": "Severe market crash, very high volatility"
+                },
+            }
+
+            # Validate scenarios
+            valid_scenarios = []
+            for s in scenario_list:
+                if s in scenario_adjustments:
+                    valid_scenarios.append(s)
+                else:
+                    return f"❌ Unknown scenario '{s}'. Valid options: {', '.join(scenario_adjustments.keys())}"
+
+            # Parse objective
+            objective_map = {
+                "max_sharpe": OptimizationObjective.MAX_SHARPE,
+                "min_volatility": OptimizationObjective.MIN_VOLATILITY,
+            }
+            opt_objective = objective_map.get(objective.lower(), OptimizationObjective.MAX_SHARPE)
+
+            # Update prices
+            self.portfolio_manager.update_current_prices()
+
+            # Calculate total portfolio value
+            total_value = sum(
+                pos.market_value or (pos.quantity * pos.average_cost)
+                for pos in positions.values()
+                if pos.quantity > 0
+            )
+
+            cash_balances = portfolio.cash_balances if include_cash else None
+
+            # Create optimizer
+            optimizer = PortfolioOptimizer(
+                self.data_manager,
+                base_currency=portfolio.base_currency,
+            )
+
+            # Run optimization for each scenario
+            scenario_results = {}
+            for scenario_name in valid_scenarios:
+                scenario_config = scenario_adjustments[scenario_name]
+
+                # Run optimization with return adjustments
+                try:
+                    result = optimizer.optimize(
+                        positions=positions,
+                        method=OptimizationMethod.MARKOWITZ,  # Use Markowitz for scenario-based (it uses expected returns)
+                        lookback_days=lookback_days,
+                        risk_free_rate=0.04,
+                        total_portfolio_value=total_value,
+                        cash_balances=cash_balances,
+                        objective=opt_objective,
+                        include_cash=include_cash,
+                        return_adjustment=scenario_config["adjustment"],
+                    )
+                    scenario_results[scenario_name] = {
+                        "result": result,
+                        "config": scenario_config,
+                    }
+                except Exception as e:
+                    scenario_results[scenario_name] = {
+                        "error": str(e),
+                        "config": scenario_config,
+                    }
+
+            return self._format_scenario_results(scenario_results, total_value, include_cash)
+
+        except Exception as e:
+            return f"❌ Unexpected error: {str(e)}"
+
+    def _format_scenario_results(self, scenario_results, total_value, include_cash) -> str:
+        """Format scenario comparison results."""
+        lines = [
+            "🎭 Scenario-Based Optimization Comparison",
+            "━" * 55,
+            "",
+            "Compare how optimal allocation changes under different market conditions:",
+            "",
+        ]
+
+        # Collect all symbols across all scenarios
+        all_symbols = set()
+        for scenario_name, data in scenario_results.items():
+            if "result" in data and data["result"].weights:
+                all_symbols.update(data["result"].weights.keys())
+
+        # Format each scenario
+        for scenario_name, data in scenario_results.items():
+            config = data["config"]
+            lines.append(f"┌{'─' * 53}┐")
+            emoji = {
+                "optimistic": "📈",
+                "likely": "➡️",
+                "pessimistic": "📉",
+                "stress": "💥"
+            }.get(scenario_name, "📊")
+            header = f"│ {emoji} {config['name']}"
+            lines.append(header.ljust(54) + "│")
+            lines.append(f"│ {config['description'][:51]}".ljust(54) + "│")
+            lines.append(f"├{'─' * 53}┤")
+
+            if "error" in data:
+                lines.append(f"│ ❌ Error: {data['error'][:40]}".ljust(54) + "│")
+            else:
+                result = data["result"]
+
+                # Metrics
+                if result.expected_annual_return is not None:
+                    ret_line = f"│ Expected Return: {result.expected_annual_return:.1%}"
+                else:
+                    ret_line = "│ Expected Return: N/A"
+                lines.append(ret_line.ljust(54) + "│")
+                lines.append(f"│ Volatility: {result.annual_volatility:.1%}".ljust(54) + "│")
+                if result.sharpe_ratio:
+                    lines.append(f"│ Sharpe Ratio: {result.sharpe_ratio:.2f}".ljust(54) + "│")
+                if include_cash and result.cash_weight and result.cash_weight > 0.001:
+                    lines.append(f"│ Cash: {result.cash_weight:.1%}".ljust(54) + "│")
+
+                lines.append(f"├{'─' * 53}┤")
+                lines.append("│ Allocation:".ljust(54) + "│")
+
+                for sym in sorted(all_symbols):
+                    weight = result.weights.get(sym, 0)
+                    if weight > 0.001:
+                        lines.append(f"│   {sym}: {weight:.1%}".ljust(54) + "│")
+
+            lines.append(f"└{'─' * 53}┘")
+            lines.append("")
+
+        # Key insights
+        lines.append("💡 Key Insights:")
+
+        # Find differences between optimistic and pessimistic/stress
+        if len(scenario_results) >= 2:
+            # Try to compare optimistic vs pessimistic, or first vs last
+            first_name = "optimistic" if "optimistic" in scenario_results else list(scenario_results.keys())[0]
+            last_name = "stress" if "stress" in scenario_results else (
+                "pessimistic" if "pessimistic" in scenario_results else list(scenario_results.keys())[-1]
+            )
+
+            first = scenario_results.get(first_name, {})
+            last = scenario_results.get(last_name, {})
+
+            if "result" in first and "result" in last:
+                first_weights = first["result"].weights
+                last_weights = last["result"].weights
+
+                for sym in sorted(all_symbols):
+                    first_w = first_weights.get(sym, 0)
+                    last_w = last_weights.get(sym, 0)
+                    diff = last_w - first_w
+
+                    if abs(diff) > 0.05:  # Significant difference
+                        direction = "increases" if diff > 0 else "decreases"
+                        lines.append(f"  • {sym} weight {direction} from {first_w:.1%} ({first_name}) to {last_w:.1%} ({last_name})")
+
+        lines.append("")
+        lines.append("📋 Interpretation:")
+        lines.append("  • In optimistic scenarios, growth assets get higher weights")
+        lines.append("  • In pessimistic/stress scenarios, defensive assets get higher weights")
+        lines.append("  • Use this to understand how to position based on your market view")
+
+        return "\n".join(lines)

@@ -26,6 +26,7 @@ from .tools import (
     GetTransactionsTool,
     HypotheticalPositionTool,
     IngestPdfTool,
+    SetMarketPriceTool,
     SimulateWhatIfTool,
 )
 from .tools.market_data_tools import create_market_data_tools
@@ -130,6 +131,8 @@ Remember: This is for educational purposes. Always recommend consulting with qua
             SimulateWhatIfTool(portfolio_manager),
             AdvancedWhatIfTool(portfolio_manager),
             HypotheticalPositionTool(portfolio_manager),
+            # Price management
+            SetMarketPriceTool(portfolio_manager),
             # Basic price lookup (legacy)
             GetCurrentPriceTool(data_manager),
             # Utilities
