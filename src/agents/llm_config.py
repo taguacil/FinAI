@@ -13,6 +13,7 @@ from typing import Dict, List, Optional, Tuple
 from langchain_anthropic import ChatAnthropic
 from langchain_core.language_models import BaseChatModel
 from langchain_google_vertexai import ChatVertexAI
+from langchain_google_vertexai.model_garden import ChatAnthropicVertex
 from langchain_openai import AzureChatOpenAI, ChatOpenAI
 
 
@@ -160,12 +161,24 @@ def create_llm_from_config(
         )
 
     elif config.provider == LLMProvider.VERTEX_AI:
-        return ChatVertexAI(
-            model_name=config.model_id,
-            project=vertex_project or os.getenv("GOOGLE_VERTEX_PROJECT", ""),
-            location=vertex_location or os.getenv("GOOGLE_VERTEX_LOCATION", DEFAULT_VERTEX_LOCATION),
-            temperature=temperature,
-        )
+        project = vertex_project or os.getenv("GOOGLE_VERTEX_PROJECT", "")
+        location = vertex_location or os.getenv("GOOGLE_VERTEX_LOCATION", DEFAULT_VERTEX_LOCATION)
+
+        # Use ChatAnthropicVertex for Claude models, ChatVertexAI for Gemini
+        if config.model_id.startswith("claude"):
+            return ChatAnthropicVertex(
+                model=config.model_id,
+                project=project,
+                location=location,
+                temperature=temperature,
+            )
+        else:
+            return ChatVertexAI(
+                model_name=config.model_id,
+                project=project,
+                location=location,
+                temperature=temperature,
+            )
 
     elif config.provider == LLMProvider.OPENAI:
         return ChatOpenAI(

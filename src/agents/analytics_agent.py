@@ -19,6 +19,7 @@ from .base_agent import BaseAgent
 from .tools import (
     AdvancedWhatIfTool,
     CalculatorTool,
+    CheckMarketDataAvailabilityTool,
     GetCurrentPriceTool,
     GetPortfolioMetricsTool,
     GetPortfolioSummaryTool,
@@ -133,8 +134,9 @@ Remember: This is for educational purposes. Always recommend consulting with qua
             HypotheticalPositionTool(portfolio_manager),
             # Price management
             SetMarketPriceTool(portfolio_manager),
-            # Basic price lookup (legacy)
+            # Market data tools
             GetCurrentPriceTool(data_manager),
+            CheckMarketDataAvailabilityTool(data_manager),
             # Utilities
             CalculatorTool(),
             IngestPdfTool(),

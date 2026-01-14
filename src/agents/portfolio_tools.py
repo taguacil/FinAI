@@ -312,9 +312,10 @@ class GetPortfolioSummaryTool(BaseTool):
             positions = self.portfolio_manager.get_position_summary()
             total_value = self.portfolio_manager.get_portfolio_value()
 
+            # Note: Use 'USD' instead of '$' to avoid Streamlit LaTeX interpretation
             summary = [
                 f"Portfolio: {portfolio.name}",
-                f"Total Value: ${total_value:,.2f} {portfolio.base_currency.value}",
+                f"Total Value: {total_value:,.2f} {portfolio.base_currency.value}",
                 f"Created: {portfolio.created_at.strftime('%Y-%m-%d')}",
                 "",
             ]
@@ -324,7 +325,7 @@ class GetPortfolioSummaryTool(BaseTool):
                 summary.append("Cash Balances:")
                 for currency, amount in portfolio.cash_balances.items():
                     code = getattr(currency, "value", str(currency))
-                    summary.append(f"- {code}: ${amount:,.2f}")
+                    summary.append(f"- {code}: {amount:,.2f}")
                 summary.append("")
 
             # Positions
@@ -342,16 +343,16 @@ class GetPortfolioSummaryTool(BaseTool):
                     else:
                         unit_label = "shares"
 
-                    # Format price
-                    price_str = f"${pos['current_price']:,.2f}" if pos['current_price'] else "N/A"
+                    # Format price (avoid $ to prevent Streamlit LaTeX issues)
+                    price_str = f"{pos['current_price']:,.2f} USD" if pos['current_price'] else "N/A"
 
-                    # Format P&L
+                    # Format P&L (avoid $ to prevent Streamlit LaTeX issues)
                     pnl_str = ""
                     if pos["unrealized_pnl"] is not None:
                         pnl = float(pos["unrealized_pnl"])
                         pnl_pct = float(pos["unrealized_pnl_percent"] or 0)
                         sign = "+" if pnl >= 0 else ""
-                        pnl_str = f" ({sign}${pnl:,.2f}, {sign}{pnl_pct:.1f}%)"
+                        pnl_str = f" ({sign}{pnl:,.2f} USD, {sign}{pnl_pct:.1f}%)"
 
                     summary.append(
                         f"- {pos['symbol']} ({pos['name']}): "
@@ -1238,6 +1239,226 @@ class ResolveInstrumentTool(BaseTool):
             lines.append("ACTION REQUIRED: Please ask the user to confirm which instrument they want.")
             lines.append("Example: 'I found these matches. Which one did you mean?'")
             lines.append("Only proceed with add_transaction after user confirms the correct instrument.")
+
+        return "\n".join(lines)
+
+
+class CheckMarketDataAvailabilityInput(BaseModel):
+    """Input for checking market data availability."""
+
+    isin: Optional[str] = Field(
+        default=None, description="ISIN identifier to check"
+    )
+    symbol: Optional[str] = Field(
+        default=None, description="Stock/instrument symbol to check"
+    )
+    name: Optional[str] = Field(
+        default=None, description="Company or instrument name to search"
+    )
+    verify_price_data: bool = Field(
+        default=True,
+        description="If True, also verify that price data can be fetched (lightweight test)"
+    )
+
+
+class CheckMarketDataAvailabilityTool(BaseTool):
+    """Tool for checking if market data is available for an instrument without fetching full data."""
+
+    name: str = "check_market_data_availability"
+    description: str = """Check if market data is available for an instrument without fetching the full data.
+
+    Use this tool to verify data access BEFORE attempting to fetch historical data or add positions.
+
+    Accepts:
+    - ISIN (e.g., US0378331005)
+    - Symbol (e.g., AAPL, TSLA)
+    - Name (e.g., Apple, Tesla)
+
+    Returns:
+    - Whether the instrument is recognized by data providers
+    - Whether price data can be fetched (if verify_price_data=True)
+    - Basic instrument information if found
+
+    This is a lightweight check that doesn't fetch full historical data.
+    """
+    args_schema: type[BaseModel] = CheckMarketDataAvailabilityInput
+    data_manager: Optional[DataProviderManager] = None
+
+    def __init__(self, data_manager: DataProviderManager):
+        super().__init__()
+        self.data_manager = data_manager
+
+    def _run(
+        self,
+        isin: Optional[str] = None,
+        symbol: Optional[str] = None,
+        name: Optional[str] = None,
+        verify_price_data: bool = True,
+    ) -> str:
+        """Check if market data is available for the specified instrument."""
+        try:
+            resolved_symbol = None
+            instrument_info = None
+            lookup_method = None
+
+            # Priority 1: ISIN lookup
+            if isin:
+                isin = isin.strip().upper()
+                lookup_method = "ISIN"
+                instrument_info = self.data_manager.search_by_isin(isin)
+                if instrument_info:
+                    resolved_symbol = instrument_info.symbol
+
+            # Priority 2: Symbol lookup
+            if not resolved_symbol and symbol:
+                symbol = symbol.strip().upper()
+                lookup_method = "symbol"
+                # Validate symbol exists
+                if self.data_manager.validate_symbol(symbol):
+                    resolved_symbol = symbol
+                    instrument_info = self.data_manager.get_instrument_info(symbol)
+
+            # Priority 3: Name search
+            if not resolved_symbol and name:
+                name = name.strip()
+                lookup_method = "name"
+                # Try company name search
+                results = self.data_manager.search_by_company_name(name)
+                if not results:
+                    results = self.data_manager.search_instruments(name)
+                if results:
+                    # Return list of candidates - don't auto-select
+                    return self._format_search_candidates(results, name)
+
+            # No input provided
+            if not isin and not symbol and not name:
+                return "Please provide at least one of: isin, symbol, or name to check."
+
+            # Instrument not found
+            if not resolved_symbol:
+                return self._format_not_found(isin, symbol, name, lookup_method)
+
+            # Instrument found - now check price data availability if requested
+            price_available = False
+            current_price = None
+
+            if verify_price_data:
+                current_price = self.data_manager.get_current_price(resolved_symbol)
+                price_available = current_price is not None
+
+            return self._format_availability_result(
+                resolved_symbol=resolved_symbol,
+                instrument_info=instrument_info,
+                lookup_method=lookup_method,
+                lookup_value=isin or symbol,
+                price_available=price_available,
+                current_price=current_price,
+                verify_price_data=verify_price_data,
+            )
+
+        except Exception as e:
+            return f"Error checking market data availability: {str(e)}"
+
+    def _format_availability_result(
+        self,
+        resolved_symbol: str,
+        instrument_info,
+        lookup_method: str,
+        lookup_value: str,
+        price_available: bool,
+        current_price,
+        verify_price_data: bool,
+    ) -> str:
+        """Format the availability check result."""
+        lines = ["MARKET DATA AVAILABILITY CHECK", "=" * 30, ""]
+
+        # Overall status
+        if verify_price_data:
+            if price_available:
+                lines.append("Status: AVAILABLE - Market data can be fetched")
+            else:
+                lines.append("Status: PARTIAL - Instrument found but price data unavailable")
+        else:
+            lines.append("Status: FOUND - Instrument recognized by data providers")
+
+        lines.append("")
+        lines.append(f"Lookup method: {lookup_method} ({lookup_value})")
+        lines.append(f"Resolved symbol: {resolved_symbol}")
+
+        if instrument_info:
+            lines.append("")
+            lines.append("Instrument Details:")
+            lines.append(f"  Name: {instrument_info.name}")
+            lines.append(f"  Type: {instrument_info.instrument_type.value}")
+            lines.append(f"  Currency: {instrument_info.currency.value}")
+            if instrument_info.isin:
+                lines.append(f"  ISIN: {instrument_info.isin}")
+            if instrument_info.exchange:
+                lines.append(f"  Exchange: {instrument_info.exchange}")
+
+        if verify_price_data:
+            lines.append("")
+            lines.append("Price Data Check:")
+            if price_available:
+                lines.append(f"  Current price: {current_price}")
+                lines.append("  Historical data: Likely available")
+            else:
+                lines.append("  Current price: Not available")
+                lines.append("  Note: Price data may be delayed or unavailable for this instrument")
+
+        return "\n".join(lines)
+
+    def _format_not_found(
+        self,
+        isin: Optional[str],
+        symbol: Optional[str],
+        name: Optional[str],
+        lookup_method: str,
+    ) -> str:
+        """Format a not-found result."""
+        lines = ["MARKET DATA AVAILABILITY CHECK", "=" * 30, ""]
+        lines.append("Status: NOT FOUND - Instrument not recognized")
+        lines.append("")
+
+        if lookup_method == "ISIN":
+            lines.append(f"ISIN '{isin}' was not found in any data provider.")
+            lines.append("Suggestions:")
+            lines.append("  - Verify the ISIN is correct")
+            lines.append("  - Try searching by symbol or company name instead")
+        elif lookup_method == "symbol":
+            lines.append(f"Symbol '{symbol}' was not found in any data provider.")
+            lines.append("Suggestions:")
+            lines.append("  - Check the symbol spelling")
+            lines.append("  - Try searching by company name")
+            lines.append("  - The instrument may not be covered by available data providers")
+        else:
+            lines.append(f"No results found for '{name}'.")
+            lines.append("Suggestions:")
+            lines.append("  - Try a different search term")
+            lines.append("  - Use the exact symbol or ISIN if known")
+
+        return "\n".join(lines)
+
+    def _format_search_candidates(self, results: list, search_term: str) -> str:
+        """Format search candidates when multiple matches found."""
+        lines = ["MARKET DATA AVAILABILITY CHECK", "=" * 30, ""]
+        lines.append(f"Status: MULTIPLE MATCHES - Found {len(results)} potential instruments")
+        lines.append("")
+        lines.append(f"Search term: '{search_term}'")
+        lines.append("")
+        lines.append("Matching instruments:")
+
+        for i, instrument in enumerate(results[:5], 1):
+            lines.append(f"  {i}. {instrument.symbol} - {instrument.name}")
+            lines.append(f"     Type: {instrument.instrument_type.value}, Currency: {instrument.currency.value}")
+            if instrument.isin:
+                lines.append(f"     ISIN: {instrument.isin}")
+
+        if len(results) > 5:
+            lines.append(f"  ... and {len(results) - 5} more")
+
+        lines.append("")
+        lines.append("To check availability for a specific instrument, use its symbol or ISIN.")
 
         return "\n".join(lines)
 

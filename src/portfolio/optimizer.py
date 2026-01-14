@@ -196,7 +196,8 @@ class PortfolioOptimizer:
             )
 
         # Fetch historical prices
-        prices_df = self._fetch_prices(list(active_positions.keys()), lookback_days)
+        prices_df, price_warnings = self._fetch_prices(list(active_positions.keys()), lookback_days)
+        warnings.extend(price_warnings)
 
         if prices_df.empty:
             raise ValueError("Could not fetch historical price data")
@@ -617,8 +618,13 @@ class PortfolioOptimizer:
 
     def _fetch_prices(
         self, symbols: List[str], lookback_days: int
-    ) -> pd.DataFrame:
-        """Fetch historical prices from local snapshots only (no network calls)."""
+    ) -> tuple[pd.DataFrame, List[str]]:
+        """Fetch historical prices from local snapshots only (no network calls).
+
+        Returns:
+            Tuple of (prices_df, warnings) where warnings contains data coverage issues.
+        """
+        warnings: List[str] = []
         end_date = date.today()
         start_date = end_date - timedelta(days=lookback_days + 30)  # Extra buffer
 
@@ -628,7 +634,8 @@ class PortfolioOptimizer:
                 "Please ensure snapshots are available for this portfolio."
             )
 
-        prices_df = self._fetch_prices_from_snapshots(symbols, start_date, end_date)
+        prices_df, gap_warnings = self._fetch_prices_from_snapshots(symbols, start_date, end_date)
+        warnings.extend(gap_warnings)
 
         if prices_df.empty:
             raise ValueError(
@@ -636,29 +643,57 @@ class PortfolioOptimizer:
                 "Please create snapshots using 'Update Snapshots' in the Portfolio tab first."
             )
 
+        # Validate data coverage
+        actual_start = prices_df.index.min()
+        actual_end = prices_df.index.max()
+        if isinstance(actual_start, pd.Timestamp):
+            actual_start = actual_start.date()
+        if isinstance(actual_end, pd.Timestamp):
+            actual_end = actual_end.date()
+
+        actual_days = (actual_end - actual_start).days
+        coverage_pct = (actual_days / lookback_days) * 100 if lookback_days > 0 else 0
+
         self.logger.info(
-            f"Using local snapshot data: {len(prices_df)} days for {len(prices_df.columns)} symbols"
+            f"Using local snapshot data: {len(prices_df)} data points for {len(prices_df.columns)} symbols. "
+            f"Date range: {actual_start} to {actual_end} ({actual_days} days, {coverage_pct:.1f}% of requested {lookback_days} days)"
         )
 
+        # Warn if data coverage is insufficient
+        if actual_days < lookback_days * 0.8:  # Less than 80% coverage
+            warning_msg = (
+                f"Insufficient data coverage: only {actual_days} days available out of {lookback_days} requested "
+                f"({coverage_pct:.1f}% coverage). Optimization results may be unreliable."
+            )
+            self.logger.warning(warning_msg)
+            warnings.append(warning_msg)
+
         if len(prices_df) < 30:
-            self.logger.warning(
+            warning_msg = (
                 f"Only {len(prices_df)} days of local data available. "
                 "Consider creating more snapshots for better optimization results."
             )
+            self.logger.warning(warning_msg)
+            warnings.append(warning_msg)
 
-        return prices_df
+        return prices_df, warnings
 
     def _fetch_prices_from_snapshots(
         self, symbols: List[str], start_date: date, end_date: date
-    ) -> pd.DataFrame:
-        """Extract historical prices from local portfolio snapshots."""
+    ) -> tuple[pd.DataFrame, List[str]]:
+        """Extract historical prices from local portfolio snapshots.
+
+        Returns:
+            Tuple of (prices_df, warnings) where warnings contains gap information.
+        """
+        warnings: List[str] = []
         try:
             snapshots = self.storage.load_snapshots(
                 self.portfolio_id, start_date, end_date
             )
 
             if not snapshots:
-                return pd.DataFrame()
+                return pd.DataFrame(), warnings
 
             # Build price series from snapshots
             prices_dict: Dict[str, Dict[date, float]] = {sym: {} for sym in symbols}
@@ -673,7 +708,7 @@ class PortfolioOptimizer:
 
             # Convert to DataFrame
             if not any(prices_dict.values()):
-                return pd.DataFrame()
+                return pd.DataFrame(), warnings
 
             # Create series for each symbol
             series_dict = {}
@@ -682,19 +717,38 @@ class PortfolioOptimizer:
                     series_dict[symbol] = pd.Series(date_prices)
 
             if not series_dict:
-                return pd.DataFrame()
+                return pd.DataFrame(), warnings
 
             prices_df = pd.DataFrame(series_dict)
             prices_df = prices_df.sort_index()
 
+            # Check for missing values before forward-fill
+            missing_before = prices_df.isna().sum()
+            total_missing = missing_before.sum()
+
             # Forward fill missing values
             prices_df = prices_df.ffill().dropna()
 
-            return prices_df
+            # Warn about significant gaps that were forward-filled
+            if total_missing > 0:
+                symbols_with_gaps = missing_before[missing_before > 0]
+                if not symbols_with_gaps.empty:
+                    gap_info = ", ".join(
+                        f"{sym}: {count} missing"
+                        for sym, count in symbols_with_gaps.items()
+                    )
+                    warning_msg = (
+                        f"Data gaps detected and forward-filled: {gap_info}. "
+                        "This may affect optimization accuracy."
+                    )
+                    self.logger.warning(warning_msg)
+                    warnings.append(warning_msg)
+
+            return prices_df, warnings
 
         except Exception as e:
             self.logger.warning(f"Failed to load prices from snapshots: {e}")
-            return pd.DataFrame()
+            return pd.DataFrame(), warnings
 
     def _convert_prices_to_currency(
         self,

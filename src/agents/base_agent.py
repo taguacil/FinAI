@@ -7,7 +7,7 @@ Provides common functionality for all specialist agents.
 from abc import ABC, abstractmethod
 from typing import List, Optional
 
-from langchain.agents import AgentExecutor, create_openai_tools_agent
+from langchain.agents import AgentExecutor, create_tool_calling_agent
 from langchain.memory import ConversationBufferMemory
 from langchain.tools import BaseTool
 from langchain_core.language_models import BaseChatModel
@@ -85,7 +85,7 @@ class BaseAgent(ABC):
             ]
         )
 
-        agent = create_openai_tools_agent(
+        agent = create_tool_calling_agent(
             llm=self.llm,
             tools=self.tools,
             prompt=prompt,
@@ -99,6 +99,29 @@ class BaseAgent(ABC):
             handle_parsing_errors=True,
             max_iterations=5,
         )
+
+    def _extract_text_from_output(self, output) -> str:
+        """Extract text from agent output, handling various formats.
+
+        Args:
+            output: Raw output from agent (string or list of content blocks)
+
+        Returns:
+            Extracted text string
+        """
+        if isinstance(output, str):
+            return output
+        elif isinstance(output, list):
+            # Handle Anthropic content block format: [{'text': '...', 'type': 'text', ...}]
+            text_parts = []
+            for block in output:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    text_parts.append(block.get("text", ""))
+                elif isinstance(block, str):
+                    text_parts.append(block)
+            return "\n".join(text_parts) if text_parts else str(output)
+        else:
+            return str(output)
 
     def invoke(self, message: str, context: Optional[str] = None) -> str:
         """Invoke this agent with a message.
@@ -116,7 +139,8 @@ class BaseAgent(ABC):
                 enhanced_message = f"Context: {context}\n\nUser message: {message}"
 
             response = self.agent_executor.invoke({"input": enhanced_message})
-            return response.get("output", "I couldn't process that request.")
+            output = response.get("output", "I couldn't process that request.")
+            return self._extract_text_from_output(output)
 
         except Exception as e:
             return f"Error in {self.get_agent_name()}: {str(e)}"

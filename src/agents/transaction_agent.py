@@ -18,6 +18,7 @@ from ..utils.metrics import FinancialMetricsCalculator
 from .base_agent import BaseAgent
 from .tools import (
     AddTransactionTool,
+    CheckMarketDataAvailabilityTool,
     DeleteTransactionTool,
     ModifyTransactionTool,
     ResolveInstrumentTool,
@@ -172,6 +173,7 @@ Remember: This is for educational purposes. Always recommend consulting with qua
         """
         return [
             ResolveInstrumentTool(data_manager),
+            CheckMarketDataAvailabilityTool(data_manager),
             AddTransactionTool(portfolio_manager),
             ModifyTransactionTool(portfolio_manager),
             DeleteTransactionTool(portfolio_manager),
