@@ -61,6 +61,46 @@ class AddTransactionInput(PortfolioToolInput):
     notes: Optional[str] = Field(default=None, description="Additional notes")
 
 
+class TransactionItem(BaseModel):
+    """A single transaction item for bulk operations."""
+
+    symbol: Optional[str] = Field(
+        default=None,
+        description="Stock symbol (e.g., AAPL, TSLA). Not needed for deposit/withdrawal.",
+    )
+    isin: Optional[str] = Field(
+        default=None, description="ISIN identifier (e.g., US0378331005)"
+    )
+    instrument_type: Optional[str] = Field(
+        default=None,
+        description="Type: stock, etf, bond, crypto, cash, mutual_fund, option, future. Auto-detected if not specified.",
+    )
+    transaction_type: str = Field(
+        description="Type: buy, sell, dividend, deposit, withdrawal, fees"
+    )
+    quantity: float = Field(
+        default=1.0,
+        description="Number of shares (for buy/sell). Default 1.0, not needed for deposit/withdrawal.",
+    )
+    price: float = Field(
+        description="Price per share (buy/sell) OR the amount (deposit/withdrawal/dividend)"
+    )
+    currency: Optional[str] = Field(
+        default=None,
+        description="Currency code (e.g., USD, EUR, GBP, CHF). REQUIRED for deposits/withdrawals.",
+    )
+    date: str = Field(description="Trade date in YYYY-MM-DD format. REQUIRED.")
+    notes: Optional[str] = Field(default=None, description="Additional notes")
+
+
+class BulkAddTransactionsInput(BaseModel):
+    """Input for bulk adding transactions."""
+
+    transactions: List[TransactionItem] = Field(
+        description="List of transactions to add"
+    )
+
+
 class GetPortfolioSummaryInput(PortfolioToolInput):
     """Input for portfolio summary."""
 
@@ -309,6 +349,209 @@ class AddTransactionTool(BaseTool):
 
         except Exception as e:
             return f"❌ Error adding transaction: {str(e)}"
+
+
+class BulkAddTransactionsTool(BaseTool):
+    """Tool for adding multiple transactions at once."""
+
+    name: str = "bulk_add_transactions"
+    description: str = """Add multiple transactions to the portfolio in a single call.
+
+    This is more efficient than calling add_transaction multiple times.
+    Pass a list of transaction objects with the same fields as add_transaction.
+
+    TRANSACTION TYPES AND REQUIRED FIELDS:
+
+    BUY/SELL (stocks, bonds, ETFs, crypto):
+    - symbol or isin: REQUIRED (which instrument)
+    - quantity: REQUIRED (number of shares/units)
+    - price: REQUIRED (price per share/unit)
+    - date: REQUIRED (YYYY-MM-DD format)
+    - currency: optional (defaults to instrument currency)
+    - instrument_type: optional (auto-detected if not specified)
+
+    DEPOSIT/WITHDRAWAL (cash movements):
+    - price: REQUIRED (the amount to deposit/withdraw)
+    - currency: REQUIRED (USD, EUR, GBP, etc.)
+    - date: REQUIRED (YYYY-MM-DD format)
+    - symbol/quantity: NOT needed
+
+    DIVIDEND (income from stocks):
+    - symbol or isin: REQUIRED (which stock paid the dividend)
+    - price: REQUIRED (the dividend amount received)
+    - date: REQUIRED (YYYY-MM-DD format)
+    - currency: optional (defaults to instrument currency)
+
+    FEES (broker fees, commissions):
+    - price: REQUIRED (the fee amount)
+    - currency: REQUIRED (USD, EUR, GBP, etc.)
+    - date: REQUIRED (YYYY-MM-DD format)
+
+    EXAMPLE INPUT:
+    {
+        "transactions": [
+            {"transaction_type": "deposit", "price": 50000, "currency": "USD", "date": "2024-01-01"},
+            {"transaction_type": "buy", "symbol": "AAPL", "quantity": 100, "price": 150.0, "date": "2024-01-02"},
+            {"transaction_type": "buy", "symbol": "MSFT", "quantity": 50, "price": 350.0, "date": "2024-01-02"},
+            {"transaction_type": "dividend", "symbol": "AAPL", "price": 25.50, "date": "2024-03-15"}
+        ]
+    }
+    """
+    args_schema: type[BaseModel] = BulkAddTransactionsInput
+    portfolio_manager: Optional[PortfolioManager] = None
+
+    def __init__(self, portfolio_manager: PortfolioManager):
+        super().__init__()
+        self.portfolio_manager = portfolio_manager
+
+    def _run(self, transactions: List[TransactionItem]) -> str:
+        """Add multiple transactions to the portfolio."""
+        if not self.portfolio_manager.current_portfolio:
+            return "❌ No portfolio loaded. Please create or load a portfolio first."
+
+        if not transactions:
+            return "❌ No transactions provided."
+
+        # Convert Pydantic models to dicts if needed
+        txn_list = []
+        for txn in transactions:
+            if isinstance(txn, dict):
+                txn_list.append(txn)
+            else:
+                txn_list.append(txn.model_dump() if hasattr(txn, "model_dump") else txn.dict())
+
+        results = []
+        success_count = 0
+        error_count = 0
+
+        txn_type_map = {
+            "buy": TransactionType.BUY,
+            "sell": TransactionType.SELL,
+            "dividend": TransactionType.DIVIDEND,
+            "deposit": TransactionType.DEPOSIT,
+            "withdrawal": TransactionType.WITHDRAWAL,
+            "withdraw": TransactionType.WITHDRAWAL,
+            "fees": TransactionType.FEES,
+        }
+
+        for i, txn in enumerate(txn_list, 1):
+            try:
+                transaction_type = txn.get("transaction_type", "").lower()
+                txn_type = txn_type_map.get(transaction_type)
+
+                if not txn_type:
+                    error_count += 1
+                    results.append(f"#{i}: ❌ Invalid transaction type: {transaction_type}")
+                    continue
+
+                symbol = txn.get("symbol")
+                isin = txn.get("isin")
+                instrument_type = txn.get("instrument_type")
+                quantity = float(txn.get("quantity", 1.0))
+                price = float(txn.get("price", 0))
+                currency = txn.get("currency")
+                date_str = txn.get("date")
+                notes = txn.get("notes")
+
+                # Validate required fields based on transaction type
+                is_cash_only = txn_type in (
+                    TransactionType.DEPOSIT,
+                    TransactionType.WITHDRAWAL,
+                    TransactionType.FEES,
+                )
+                is_dividend = txn_type == TransactionType.DIVIDEND
+
+                # Determine the amount
+                amount = price if price > 0 else quantity
+
+                if is_cash_only:
+                    if amount <= 0 or not currency or not date_str:
+                        error_count += 1
+                        results.append(
+                            f"#{i}: ❌ {transaction_type} requires price, currency, and date"
+                        )
+                        continue
+                    symbol = "CASH"
+                    isin = None
+                    final_price = amount
+                    quantity = 1.0
+                elif is_dividend:
+                    if (not symbol and not isin) or amount <= 0 or not date_str:
+                        error_count += 1
+                        results.append(
+                            f"#{i}: ❌ dividend requires symbol, price, and date"
+                        )
+                        continue
+                    final_price = amount
+                    quantity = 1.0
+                else:
+                    if (not symbol and not isin) or quantity <= 0 or price <= 0 or not date_str:
+                        error_count += 1
+                        results.append(
+                            f"#{i}: ❌ {transaction_type} requires symbol, quantity, price, and date"
+                        )
+                        continue
+                    final_price = price
+
+                # Parse date
+                try:
+                    timestamp = datetime.strptime(date_str, "%Y-%m-%d")
+                except ValueError:
+                    error_count += 1
+                    results.append(f"#{i}: ❌ Invalid date format: {date_str}")
+                    continue
+
+                # Parse currency
+                from src.portfolio.models import Currency as Cur
+
+                cur_obj = None
+                if currency:
+                    try:
+                        cur_obj = Cur(currency.upper())
+                    except ValueError:
+                        error_count += 1
+                        results.append(f"#{i}: ❌ Invalid currency: {currency}")
+                        continue
+
+                # Add transaction
+                success = self.portfolio_manager.add_transaction(
+                    symbol=symbol.upper() if symbol else None,
+                    transaction_type=txn_type,
+                    quantity=Decimal(str(quantity)),
+                    price=Decimal(str(final_price)),
+                    timestamp=timestamp,
+                    notes=notes,
+                    isin=isin.upper() if isin else None,
+                    currency=cur_obj,
+                    instrument_type=instrument_type,
+                )
+
+                if success:
+                    success_count += 1
+                    label = symbol.upper() if symbol else (isin[:8] if isin else "CASH")
+                    if txn_type == TransactionType.DEPOSIT:
+                        results.append(f"#{i}: ✅ Deposited {final_price:,.2f} {currency or 'USD'}")
+                    elif txn_type == TransactionType.WITHDRAWAL:
+                        results.append(f"#{i}: ✅ Withdrew {final_price:,.2f} {currency or 'USD'}")
+                    elif txn_type == TransactionType.FEES:
+                        results.append(f"#{i}: ✅ Fee {final_price:,.2f} {currency or 'USD'}")
+                    elif txn_type == TransactionType.DIVIDEND:
+                        results.append(f"#{i}: ✅ Dividend {final_price:,.2f} from {label}")
+                    else:
+                        results.append(f"#{i}: ✅ {transaction_type.upper()} {quantity} {label} @ {final_price}")
+                else:
+                    error_count += 1
+                    results.append(f"#{i}: ❌ Failed to add transaction")
+
+            except Exception as e:
+                error_count += 1
+                results.append(f"#{i}: ❌ Error: {str(e)}")
+
+        # Build summary
+        summary = f"Bulk transaction results: {success_count} succeeded, {error_count} failed\n"
+        summary += "\n".join(results)
+
+        return summary
 
 
 class GetPortfolioSummaryTool(BaseTool):
@@ -1955,6 +2198,352 @@ class SetMarketPriceTool(BaseTool):
             return f"❌ Error setting market price: {str(e)}"
 
 
+class FetchAndUpdatePricesInput(BaseModel):
+    """Input for fetching prices from provider and updating portfolio."""
+
+    symbol: str = Field(
+        description="Portfolio symbol (the symbol used in your portfolio, e.g., BTC, CORP_BOND)"
+    )
+    start_date: str = Field(
+        description="Start date in YYYY-MM-DD format"
+    )
+    end_date: str = Field(
+        description="End date in YYYY-MM-DD format"
+    )
+    provider_symbol: Optional[str] = Field(
+        default=None,
+        description="Symbol to use with the data provider if different from portfolio symbol (e.g., BTC-USD for Bitcoin, AAPL for Apple). If not provided, uses the portfolio symbol."
+    )
+
+
+class FetchAndUpdatePricesTool(BaseTool):
+    """Tool for fetching prices from data provider and updating portfolio snapshots."""
+
+    name: str = "fetch_and_update_prices"
+    description: str = """Fetch historical prices from the data provider and update portfolio snapshots.
+
+    Use cases:
+    - Update historical prices for an instrument from market data
+    - Sync portfolio with latest market prices for a date range
+    - Handle cases where portfolio symbol differs from provider symbol
+
+    Parameters:
+    - symbol: The symbol in your portfolio (required)
+    - start_date: Start date in YYYY-MM-DD format (required)
+    - end_date: End date in YYYY-MM-DD format (required)
+    - provider_symbol: The symbol to use with the data provider (optional)
+                       Use when portfolio symbol differs from provider symbol
+                       Example: Portfolio has "BTC" but provider needs "BTC-USD"
+
+    Examples:
+    - Update AAPL prices: fetch_and_update_prices(symbol="AAPL", start_date="2024-01-01", end_date="2024-01-31")
+    - Update Bitcoin (BTC in portfolio, BTC-USD for provider):
+      fetch_and_update_prices(symbol="BTC", start_date="2024-01-01", end_date="2024-01-31", provider_symbol="BTC-USD")
+
+    If this fails, use bulk_set_market_price to manually enter prices.
+    """
+    args_schema: type[BaseModel] = FetchAndUpdatePricesInput
+    portfolio_manager: Optional[PortfolioManager] = None
+    data_manager: Optional[DataProviderManager] = None
+
+    def __init__(self, portfolio_manager: PortfolioManager, data_manager: DataProviderManager):
+        super().__init__()
+        self.portfolio_manager = portfolio_manager
+        self.data_manager = data_manager
+
+    def _run(
+        self,
+        symbol: str,
+        start_date: str,
+        end_date: str,
+        provider_symbol: Optional[str] = None,
+    ) -> str:
+        """Fetch prices from provider and update portfolio."""
+        try:
+            if not self.portfolio_manager.current_portfolio:
+                return "❌ No portfolio loaded."
+
+            portfolio_symbol = symbol.upper().strip()
+            lookup_symbol = (provider_symbol or symbol).upper().strip()
+
+            # Check if symbol exists in portfolio
+            if portfolio_symbol not in self.portfolio_manager.current_portfolio.positions:
+                return f"❌ Symbol '{portfolio_symbol}' not found in portfolio. Please add a transaction for this symbol first."
+
+            # Parse dates
+            try:
+                from datetime import datetime as dt
+                start = dt.strptime(start_date, "%Y-%m-%d").date()
+                end = dt.strptime(end_date, "%Y-%m-%d").date()
+            except ValueError:
+                return "❌ Invalid date format. Use YYYY-MM-DD."
+
+            if start > end:
+                return "❌ Start date must be before or equal to end date."
+
+            # Fetch prices from provider
+            try:
+                prices = self.data_manager.get_historical_prices(
+                    lookup_symbol, start, end
+                )
+            except Exception as e:
+                return (
+                    f"❌ Failed to fetch prices from provider for '{lookup_symbol}':\n"
+                    f"Error: {str(e)}\n\n"
+                    f"💡 Try using bulk_set_market_price to manually enter prices."
+                )
+
+            if not prices:
+                return (
+                    f"❌ No price data returned for '{lookup_symbol}' from {start_date} to {end_date}.\n\n"
+                    f"Possible reasons:\n"
+                    f"• Symbol not found in data provider\n"
+                    f"• No trading data for this date range\n"
+                    f"• Data provider API issue\n\n"
+                    f"💡 Try:\n"
+                    f"• Use a different provider_symbol (e.g., 'BTC-USD' instead of 'BTC')\n"
+                    f"• Use bulk_set_market_price to manually enter prices"
+                )
+
+            # Apply prices to portfolio
+            success_count = 0
+            failed_dates = []
+
+            for price_data in prices:
+                price_date = price_data.date
+                # Use close price, fall back to other prices
+                price_value = (
+                    price_data.close_price
+                    or price_data.open_price
+                    or price_data.high_price
+                    or price_data.low_price
+                )
+
+                if price_value is None:
+                    failed_dates.append(str(price_date))
+                    continue
+
+                success = self.portfolio_manager.set_position_price(
+                    symbol=portfolio_symbol,
+                    price=price_value,
+                    target_date=price_date,
+                    update_current=(price_date == date.today()),
+                )
+
+                if success:
+                    success_count += 1
+                else:
+                    failed_dates.append(str(price_date))
+
+            # Build result message
+            position = self.portfolio_manager.current_portfolio.positions[portfolio_symbol]
+            result_lines = [
+                f"✅ Price update for {portfolio_symbol} ({position.instrument.name}):",
+                f"• Data source: {lookup_symbol}" + (" (provider symbol)" if provider_symbol else ""),
+                f"• Successfully updated: {success_count} prices",
+                f"• Date range: {start_date} to {end_date}",
+            ]
+
+            if failed_dates:
+                result_lines.append(f"• Failed/skipped dates: {len(failed_dates)}")
+                if len(failed_dates) <= 5:
+                    result_lines.append(f"  {', '.join(failed_dates)}")
+
+            return "\n".join(result_lines)
+
+        except Exception as e:
+            return f"❌ Error fetching and updating prices: {str(e)}"
+
+
+class BulkSetMarketPriceInput(BaseModel):
+    """Input for bulk setting market prices."""
+
+    symbol: str = Field(description="Stock/instrument symbol (e.g., AAPL, TSLA)")
+    prices: str = Field(
+        description="""Price data in one of two formats:
+        1. Simple: "YYYY-MM-DD:price,YYYY-MM-DD:price,..." (e.g., "2024-01-01:150.0,2024-01-02:152.5")
+        2. JSON array: '[{"date":"2024-01-01","price":150.0},{"date":"2024-01-02","price":152.5}]'"""
+    )
+
+
+class BulkSetMarketPriceTool(BaseTool):
+    """Tool for bulk setting market prices for an instrument across multiple dates."""
+
+    name: str = "bulk_set_market_price"
+    description: str = """Set market prices for an instrument across multiple dates at once.
+
+    Use cases:
+    - Entering historical price data manually when market data isn't available
+    - Importing price history for instruments without data providers
+    - Correcting multiple historical prices in snapshots
+
+    Parameters:
+    - symbol: The instrument symbol (required)
+    - prices: Price data in one of two formats:
+        1. Simple format: "YYYY-MM-DD:price,YYYY-MM-DD:price,..."
+        2. JSON array: '[{"date":"2024-01-01","price":150.0},{"date":"2024-01-02","price":152.5}]'
+
+    Examples:
+    - Simple format:
+      bulk_set_market_price(symbol="AAPL", prices="2024-01-01:150.0,2024-01-02:152.5,2024-01-03:148.0")
+
+    - JSON format:
+      bulk_set_market_price(symbol="AAPL", prices='[{"date":"2024-01-01","price":150.0},{"date":"2024-01-02","price":152.5}]')
+    """
+    args_schema: type[BaseModel] = BulkSetMarketPriceInput
+    portfolio_manager: Optional[PortfolioManager] = None
+
+    def __init__(self, portfolio_manager: PortfolioManager):
+        super().__init__()
+        self.portfolio_manager = portfolio_manager
+
+    def _parse_prices(self, prices: str) -> tuple[list, list]:
+        """Parse prices from either simple or JSON format.
+
+        Returns:
+            Tuple of (price_entries, errors) where price_entries is list of (date, Decimal) tuples
+        """
+        import json
+        from datetime import datetime as dt
+
+        price_entries = []
+        errors = []
+
+        # Try JSON format first
+        prices_stripped = prices.strip()
+        if prices_stripped.startswith("["):
+            try:
+                data = json.loads(prices_stripped)
+                for item in data:
+                    if not isinstance(item, dict):
+                        errors.append(f"Invalid item in JSON array: {item}")
+                        continue
+
+                    date_str = item.get("date")
+                    price_val = item.get("price")
+
+                    if not date_str or price_val is None:
+                        errors.append(f"Missing 'date' or 'price' in: {item}")
+                        continue
+
+                    try:
+                        entry_date = dt.strptime(str(date_str), "%Y-%m-%d").date()
+                    except ValueError:
+                        errors.append(f"Invalid date '{date_str}' - use YYYY-MM-DD format")
+                        continue
+
+                    try:
+                        entry_price = Decimal(str(price_val))
+                        if entry_price <= 0:
+                            errors.append(f"Invalid price '{price_val}' - must be positive")
+                            continue
+                    except Exception:
+                        errors.append(f"Invalid price '{price_val}' - must be a number")
+                        continue
+
+                    price_entries.append((entry_date, entry_price))
+
+                return price_entries, errors
+            except json.JSONDecodeError:
+                # Not valid JSON, fall through to simple format
+                pass
+
+        # Simple format: "date:price,date:price,..."
+        for entry in prices.split(","):
+            entry = entry.strip()
+            if not entry:
+                continue
+
+            if ":" not in entry:
+                errors.append(f"Invalid format '{entry}' - expected 'YYYY-MM-DD:price'")
+                continue
+
+            parts = entry.split(":", 1)
+            date_str = parts[0].strip()
+            price_str = parts[1].strip()
+
+            try:
+                entry_date = dt.strptime(date_str, "%Y-%m-%d").date()
+            except ValueError:
+                errors.append(f"Invalid date '{date_str}' - use YYYY-MM-DD format")
+                continue
+
+            try:
+                entry_price = Decimal(price_str)
+                if entry_price <= 0:
+                    errors.append(f"Invalid price '{price_str}' - must be positive")
+                    continue
+            except Exception:
+                errors.append(f"Invalid price '{price_str}' - must be a number")
+                continue
+
+            price_entries.append((entry_date, entry_price))
+
+        return price_entries, errors
+
+    def _run(self, symbol: str, prices: str) -> str:
+        """Bulk set market prices for an instrument."""
+        try:
+            if not self.portfolio_manager.current_portfolio:
+                return "❌ No portfolio loaded."
+
+            symbol = symbol.upper().strip()
+
+            # Check if symbol exists in portfolio
+            if symbol not in self.portfolio_manager.current_portfolio.positions:
+                return f"❌ Symbol '{symbol}' not found in portfolio. Please add a transaction for this symbol first."
+
+            # Parse price data (supports both simple and JSON formats)
+            price_entries, errors = self._parse_prices(prices)
+
+            if not price_entries:
+                error_msg = "No valid price entries found."
+                if errors:
+                    error_msg += f"\nErrors:\n" + "\n".join(f"• {e}" for e in errors)
+                return f"❌ {error_msg}"
+
+            # Sort by date
+            price_entries.sort(key=lambda x: x[0])
+
+            # Apply each price
+            success_count = 0
+            failed_dates = []
+
+            for entry_date, entry_price in price_entries:
+                success = self.portfolio_manager.set_position_price(
+                    symbol=symbol,
+                    price=entry_price,
+                    target_date=entry_date,
+                    update_current=(entry_date == date.today()),
+                )
+                if success:
+                    success_count += 1
+                else:
+                    failed_dates.append(str(entry_date))
+
+            # Build result message
+            position = self.portfolio_manager.current_portfolio.positions[symbol]
+            result_lines = [
+                f"✅ Bulk price update for {symbol} ({position.instrument.name}):",
+                f"• Successfully set: {success_count} prices",
+                f"• Date range: {price_entries[0][0]} to {price_entries[-1][0]}",
+            ]
+
+            if failed_dates:
+                result_lines.append(f"• Failed dates: {', '.join(failed_dates)}")
+
+            if errors:
+                result_lines.append(f"\n⚠️ Parsing warnings:")
+                result_lines.extend(f"• {e}" for e in errors[:5])
+                if len(errors) > 5:
+                    result_lines.append(f"  ... and {len(errors) - 5} more")
+
+            return "\n".join(result_lines)
+
+        except Exception as e:
+            return f"❌ Error in bulk price update: {str(e)}"
+
+
 def create_portfolio_tools(
     portfolio_manager: PortfolioManager,
     data_manager: DataProviderManager,
@@ -1963,6 +2552,7 @@ def create_portfolio_tools(
     """Create all portfolio management tools."""
     return [
         AddTransactionTool(portfolio_manager),
+        BulkAddTransactionsTool(portfolio_manager),
         ModifyTransactionTool(portfolio_manager),
         DeleteTransactionTool(portfolio_manager),
         GetPortfolioSummaryTool(portfolio_manager, metrics_calculator),
@@ -1987,6 +2577,7 @@ def create_transaction_tools(
     """Create tools for the Transaction Agent (CRUD operations)."""
     return [
         AddTransactionTool(portfolio_manager),
+        BulkAddTransactionsTool(portfolio_manager),
         ModifyTransactionTool(portfolio_manager),
         DeleteTransactionTool(portfolio_manager),
         SetMarketPriceTool(portfolio_manager),

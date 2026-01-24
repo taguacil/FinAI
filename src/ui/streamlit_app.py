@@ -657,8 +657,9 @@ class PortfolioTrackerUI:
         # Portfolio summary
         portfolio = portfolio_manager.current_portfolio
 
-        total_value = portfolio_manager.get_portfolio_value()
-        positions = portfolio_manager.get_position_summary()
+        # Use snapshot as single source of truth for pricing consistency with analytics
+        total_value = portfolio_manager.get_portfolio_value(use_snapshot=True)
+        positions = portfolio_manager.get_positions_from_snapshot()
 
         # Initialize variables (will be populated if positions exist)
         enriched = []
@@ -784,20 +785,18 @@ class PortfolioTrackerUI:
                         st.error(f"❌ Failed to update: {str(e)}")
 
         with col3:
-            if st.button("💰 Quick Refresh", help="Update current prices only (faster, no snapshots)"):
+            if st.button("💰 Quick Refresh", help="Update current prices and today's snapshot"):
                 with st.spinner("Refreshing prices..."):
-                    if market_data_service and portfolio_manager.current_portfolio:
-                        result = market_data_service.refresh_all(portfolio_manager.current_portfolio)
-                        st.success(f"✅ {result.symbols_updated} prices updated")
-                        st.rerun()
+                    # Update snapshot as single source of truth
+                    snapshot = portfolio_manager.refresh_today_snapshot()
+                    if snapshot:
+                        st.success(f"✅ Updated snapshot with {len(snapshot.positions)} positions")
                     else:
-                        price_results = portfolio_manager.update_current_prices()
-                        success_count = sum(price_results.values())
-                        st.success(f"✅ {success_count} prices updated")
-                        st.rerun()
+                        st.warning("⚠️ No portfolio loaded")
+                    st.rerun()
 
         with col4:
-            st.caption("💡 **Snapshots**: Updates historical data for analytics. **Quick Refresh**: Just updates current prices.")
+            st.caption("💡 **Snapshots**: Updates historical data for analytics. **Quick Refresh**: Updates today's snapshot with current prices.")
 
         # Key metrics - styled container
         st.markdown("### 📈 Portfolio Summary")

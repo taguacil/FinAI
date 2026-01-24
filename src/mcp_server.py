@@ -40,9 +40,12 @@ from src.utils.metrics import FinancialMetricsCalculator
 from src.agents.portfolio_tools import (
     AddTransactionTool,
     AdvancedWhatIfTool,
+    BulkAddTransactionsTool,
+    BulkSetMarketPriceTool,
     CalculatorTool,
     CheckMarketDataAvailabilityTool,
     DeleteTransactionTool,
+    FetchAndUpdatePricesTool,
     GetCurrentPriceTool,
     GetPortfolioMetricsTool,
     GetPortfolioSummaryTool,
@@ -97,6 +100,7 @@ else:
 
 # --- Instantiate LangChain tools ---
 _add_transaction = AddTransactionTool(portfolio_manager)
+_bulk_add_transactions = BulkAddTransactionsTool(portfolio_manager)
 _modify_transaction = ModifyTransactionTool(portfolio_manager)
 _delete_transaction = DeleteTransactionTool(portfolio_manager)
 _get_portfolio_summary = GetPortfolioSummaryTool(portfolio_manager, metrics_calculator)
@@ -112,6 +116,8 @@ _get_current_price = GetCurrentPriceTool(data_manager)
 _get_portfolio_metrics = GetPortfolioMetricsTool(portfolio_manager, metrics_calculator)
 _get_transaction_history = GetTransactionHistoryTool(portfolio_manager)
 _set_market_price = SetMarketPriceTool(portfolio_manager)
+_bulk_set_market_price = BulkSetMarketPriceTool(portfolio_manager)
+_fetch_and_update_prices = FetchAndUpdatePricesTool(portfolio_manager, data_manager)
 _calculator = CalculatorTool()
 _ingest_pdf = IngestPdfTool()
 _optimize_portfolio = OptimizePortfolioTool(portfolio_manager, data_manager)
@@ -322,6 +328,35 @@ def add_transaction(
 
 
 @mcp.tool()
+def bulk_add_transactions(transactions: list) -> str:
+    """Add multiple transactions to the portfolio in a single call.
+
+    More efficient than calling add_transaction multiple times.
+
+    Args:
+        transactions: List of transaction objects. Each transaction should have:
+            - transaction_type: buy, sell, dividend, deposit, withdrawal, fees
+            - price: Price per share (buy/sell) or amount (deposit/withdrawal/dividend)
+            - date: Trade date in YYYY-MM-DD format (REQUIRED)
+            - symbol: Stock symbol (for buy/sell/dividend)
+            - isin: ISIN identifier (alternative to symbol)
+            - quantity: Number of shares (for buy/sell, default 1.0)
+            - currency: Currency code (REQUIRED for deposit/withdrawal)
+            - instrument_type: stock, etf, bond, crypto, etc. (optional)
+            - notes: Additional notes (optional)
+
+    Example:
+        [
+            {"transaction_type": "deposit", "price": 50000, "currency": "USD", "date": "2024-01-01"},
+            {"transaction_type": "buy", "symbol": "AAPL", "quantity": 100, "price": 150.0, "date": "2024-01-02"},
+            {"transaction_type": "buy", "symbol": "MSFT", "quantity": 50, "price": 350.0, "date": "2024-01-02"},
+            {"transaction_type": "dividend", "symbol": "AAPL", "price": 25.50, "date": "2024-03-15"}
+        ]
+    """
+    return _bulk_add_transactions._run(transactions=transactions)
+
+
+@mcp.tool()
 def modify_transaction(
     transaction_id: str,
     quantity: Optional[float] = None,
@@ -476,6 +511,49 @@ def set_market_price(
         price=price,
         date=date,
         use_purchase_price=use_purchase_price,
+    )
+
+
+@mcp.tool()
+def bulk_set_market_price(symbol: str, prices: str) -> str:
+    """Set market prices for an instrument across multiple dates at once.
+
+    Use for entering historical price data manually when market data isn't available.
+
+    Args:
+        symbol: The instrument symbol (e.g., AAPL, CORP_BOND)
+        prices: Price data in one of two formats:
+                1. Simple: "2024-01-01:150.0,2024-01-02:152.5,2024-01-03:148.0"
+                2. JSON: '[{"date":"2024-01-01","price":150.0},{"date":"2024-01-02","price":152.5}]'
+    """
+    return _bulk_set_market_price._run(symbol=symbol, prices=prices)
+
+
+@mcp.tool()
+def fetch_and_update_prices(
+    symbol: str,
+    start_date: str,
+    end_date: str,
+    provider_symbol: Optional[str] = None,
+) -> str:
+    """Fetch historical prices from data provider and update portfolio snapshots.
+
+    Use this to sync portfolio with market prices. If the portfolio symbol differs
+    from the data provider symbol, use provider_symbol to specify the lookup symbol.
+
+    Args:
+        symbol: The symbol in your portfolio (e.g., BTC, CORP_BOND)
+        start_date: Start date in YYYY-MM-DD format
+        end_date: End date in YYYY-MM-DD format
+        provider_symbol: Symbol to use with data provider if different (e.g., BTC-USD for Bitcoin)
+
+    If this fails, use bulk_set_market_price to manually enter prices.
+    """
+    return _fetch_and_update_prices._run(
+        symbol=symbol,
+        start_date=start_date,
+        end_date=end_date,
+        provider_symbol=provider_symbol,
     )
 
 

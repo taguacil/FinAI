@@ -572,11 +572,42 @@ class PortfolioManager:
 
 
 
-    def get_portfolio_value(self) -> Decimal:
-        """Get total portfolio value in base currency."""
+    def refresh_today_snapshot(self) -> Optional[PortfolioSnapshot]:
+        """Refresh current prices and update/create today's snapshot.
+
+        This method fetches current market prices and creates or updates
+        today's snapshot, making snapshots the single source of truth
+        for all portfolio pricing.
+
+        Returns:
+            The updated snapshot, or None if no portfolio is loaded
+        """
+        if not self.current_portfolio:
+            return None
+        self.update_current_prices()
+        today = date.today()
+        snapshot = self.analyzer.create_snapshot(self.current_portfolio, today, save=True)
+        return snapshot
+
+    def get_portfolio_value(self, use_snapshot: bool = True) -> Decimal:
+        """Get total portfolio value in base currency.
+
+        Args:
+            use_snapshot: If True, use the latest snapshot value (single source of truth).
+                         If False, fall back to in-memory calculation.
+
+        Returns:
+            Total portfolio value in base currency
+        """
         if not self.current_portfolio:
             return Decimal("0")
 
+        if use_snapshot:
+            latest_snapshot = self.storage.get_latest_snapshot(self.current_portfolio.id)
+            if latest_snapshot:
+                return latest_snapshot.total_value
+
+        # Fallback to in-memory calculation
         return self.analyzer._calculate_portfolio_value(self.current_portfolio)
 
     def create_snapshot(
@@ -705,6 +736,62 @@ class PortfolioManager:
             )
 
         return summary
+
+    def get_positions_from_snapshot(self) -> List[Dict]:
+        """Get positions with prices from the latest snapshot.
+
+        This method returns position data sourced from the latest snapshot,
+        ensuring consistency with analytics and other pages that use snapshot data.
+        Falls back to in-memory positions with fallback prices if no snapshot exists.
+
+        Returns:
+            List of position dictionaries with snapshot-sourced pricing
+        """
+        if not self.current_portfolio:
+            return []
+
+        latest_snapshot = self.storage.get_latest_snapshot(self.current_portfolio.id)
+        if not latest_snapshot:
+            # Fall back to in-memory calculation with fallback prices
+            return self.get_positions_with_fallback_prices()
+
+        positions = []
+        for symbol, position in latest_snapshot.positions.items():
+            if position.quantity == 0:
+                continue
+
+            # Calculate values from snapshot position
+            current_price = position.current_price
+            market_value = position.market_value if current_price else Decimal("0")
+            cost_basis = position.cost_basis
+
+            # Calculate unrealized P&L
+            unrealized_pnl = Decimal("0")
+            unrealized_pnl_percent = Decimal("0")
+
+            if current_price and position.average_cost > 0 and cost_basis > 0:
+                unrealized_pnl = market_value - cost_basis
+                unrealized_pnl_percent = (unrealized_pnl / cost_basis) * Decimal("100")
+
+            positions.append({
+                "symbol": symbol,
+                "name": position.instrument.name,
+                "isin": getattr(position.instrument, 'isin', None),
+                "instrument_type": position.instrument.instrument_type.value,
+                "quantity": position.quantity,
+                "average_cost": position.average_cost,
+                "cost_basis": cost_basis,
+                "current_price": current_price,
+                "market_value": market_value,
+                "unrealized_pnl": unrealized_pnl,
+                "unrealized_pnl_percent": unrealized_pnl_percent,
+                "currency": position.instrument.currency.value,
+                "last_updated": position.last_updated,
+                "has_current_price": current_price is not None,
+                "snapshot_date": latest_snapshot.date,
+            })
+
+        return positions
 
     def get_transaction_history(self, days: Optional[int] = None) -> List[Dict]:
         """Get transaction history, optionally filtered by days."""
