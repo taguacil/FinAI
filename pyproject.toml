@@ -25,7 +25,11 @@ dependencies = [
     "pypdf>=5.0.0",
     "langchain-community>=0.3.0",
     "tavily-python>=0.3.5",
+    "mcp[cli]>=1.0.0",
 ]
+
+[project.scripts]
+finai-mcp = "src.mcp_server:main"
 
 [tool.uv]
 dev-dependencies = [

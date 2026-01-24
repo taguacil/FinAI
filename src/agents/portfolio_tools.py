@@ -28,7 +28,7 @@ class AddTransactionInput(PortfolioToolInput):
     """Input for adding a transaction."""
 
     symbol: Optional[str] = Field(
-        default=None, description="Stock symbol (e.g., AAPL, TSLA)"
+        default=None, description="Stock symbol (e.g., AAPL, TSLA). Not needed for deposit/withdrawal."
     )
     isin: Optional[str] = Field(
         default=None, description="ISIN identifier (e.g., US0378331005)"
@@ -40,15 +40,20 @@ class AddTransactionInput(PortfolioToolInput):
     transaction_type: str = Field(
         description="Type: buy, sell, dividend, deposit, withdrawal, fees"
     )
-    quantity: float = Field(description="Number of shares or amount")
-    price: float = Field(description="Price per share or total amount")
+    quantity: float = Field(
+        default=1.0,
+        description="Number of shares (for buy/sell). Default 1.0, not needed for deposit/withdrawal."
+    )
+    price: float = Field(
+        description="Price per share (buy/sell) OR the amount (deposit/withdrawal/dividend)"
+    )
     currency: Optional[str] = Field(
         default=None,
-        description="Currency code (e.g., USD, EUR, GBP, CHF). Required for deposits/withdrawals; overrides instrument currency for trades if provided.",
+        description="Currency code (e.g., USD, EUR, GBP, CHF). REQUIRED for deposits/withdrawals.",
     )
     date: Optional[str] = Field(
         default=None,
-        description="Trade date in YYYY-MM-DD format (defaults to today if omitted)",
+        description="Trade date in YYYY-MM-DD format. REQUIRED for all transactions.",
     )
     days_ago: int = Field(
         default=0, description="Fallback: how many days ago (0 for today)"
@@ -87,44 +92,42 @@ class AddTransactionTool(BaseTool):
     """Tool for adding transactions to the portfolio."""
 
     name: str = "add_transaction"
-    description: str = """Add a transaction to the portfolio. CRITICAL: Follow user specifications exactly!
+    description: str = """Add a transaction to the portfolio.
 
-    PRIORITY RULES:
-    1. If user specifies instrument_type (bond, stock, etf, etc.), use that EXACTLY
-    2. If user specifies currency (EUR, USD, etc.), use that EXACTLY
-    3. If user specifies symbol, isin, or notes, use those EXACTLY
-    4. Only auto-detect when user doesn't specify
+    TRANSACTION TYPES AND REQUIRED FIELDS:
 
-    Supports:
-    - buy/sell stocks, bonds, ETFs: specify symbol, quantity, price, ISIN (optional), instrument_type (if specified by user)
-    - deposit/withdraw cash: use 'CASH' as symbol (ISIN not required for cash)
-    - dividends: specify symbol, amount, and optionally ISIN
-    - fees: use 'fees' as transaction type with CASH symbol
+    BUY/SELL (stocks, bonds, ETFs, crypto):
+    - symbol or isin: REQUIRED (which instrument)
+    - quantity: REQUIRED (number of shares/units)
+    - price: REQUIRED (price per share/unit)
+    - date: REQUIRED (YYYY-MM-DD format)
+    - currency: optional (defaults to instrument currency)
+    - instrument_type: optional (auto-detected if not specified)
 
-    Instrument Type Handling:
-    - ALWAYS use user-specified instrument_type if provided (bond, stock, etf, crypto, etc.)
-    - Only auto-detect type when user doesn't specify
-    - Valid instrument types: stock, etf, bond, crypto, cash, mutual_fund, option, future
+    DEPOSIT/WITHDRAWAL (cash movements):
+    - price: REQUIRED (the amount to deposit/withdraw)
+    - currency: REQUIRED (USD, EUR, GBP, etc.)
+    - date: REQUIRED (YYYY-MM-DD format)
+    - symbol/quantity: NOT needed (automatically set)
 
-    The system handles symbol/ISIN/name mapping while respecting user specifications:
-    - If you provide a symbol (e.g., AAPL) + ISIN (e.g., US0378331005), it will find the company name
-    - If you provide only an ISIN (e.g., US0378331005), it will find the symbol and company name
-    - If you provide only a symbol (e.g., AAPL), it will find the company name (no ISIN search)
-    - If you provide only a company name (e.g., Apple), it will automatically find the symbol and proceed
+    DIVIDEND (income from stocks):
+    - symbol or isin: REQUIRED (which stock paid the dividend)
+    - price: REQUIRED (the dividend amount received)
+    - date: REQUIRED (YYYY-MM-DD format)
+    - currency: optional (defaults to instrument currency)
+    - quantity: NOT needed (automatically set to 1)
 
-    Examples with USER SPECIFICATIONS (follow exactly):
-    - "I bought 50 AAPL bonds in EUR at 95%" → instrument_type="bond", currency="EUR" (user said "bonds"!)
-    - "Buy 100 TLT as equity at $90" → instrument_type="stock" (user said "equity"!)
-    - "Purchase 1000 EUR bonds with ISIN XS2472298335" → instrument_type="bond", currency="EUR"
-    - "Add 50 Microsoft stock in USD" → instrument_type="stock", currency="USD"
-    - "Buy 25 Tesla bonds at 98.5%" → instrument_type="bond" (user said "bonds"!)
+    FEES (broker fees, commissions):
+    - price: REQUIRED (the fee amount)
+    - currency: REQUIRED (USD, EUR, GBP, etc.)
+    - date: REQUIRED (YYYY-MM-DD format)
+    - symbol/quantity: NOT needed (automatically set)
 
-    Examples with AUTO-DETECTION (when user doesn't specify):
-    - "I bought 50 shares of AAPL at $150" (auto-detect: type=stock)
-    - "I bought 100 TLT at $90.50" (auto-detect: type=bond based on TLT pattern)
-    - "I bought 100 SPY at $450" (auto-detect: type=etf)
-    - "I bought 5 BTC at $45000" (auto-detect: type=crypto)
-    - "Buy 100 using ISIN XS2472298335 at 98.5%" (auto-detect: type=bond based on XS prefix)
+    EXAMPLES:
+    - Buy 50 AAPL at $150: transaction_type="buy", symbol="AAPL", quantity=50, price=150, date="2024-01-15"
+    - Deposit $25,000: transaction_type="deposit", price=25000, currency="USD", date="2024-01-15"
+    - Dividend from MSFT: transaction_type="dividend", symbol="MSFT", price=125.50, date="2024-01-15"
+    - Broker fee: transaction_type="fees", price=9.99, currency="USD", date="2024-01-15"
     """
     args_schema: type[BaseModel] = AddTransactionInput
     portfolio_manager: Optional[PortfolioManager] = None
@@ -164,16 +167,22 @@ class AddTransactionTool(BaseTool):
                 return f"Invalid transaction type: {transaction_type}. Use: buy, sell, dividend, deposit, withdrawal"
 
             # Validate required fields based on transaction type
-            is_cash_movement = txn_type in (TransactionType.DEPOSIT, TransactionType.WITHDRAWAL)
+            is_cash_only = txn_type in (TransactionType.DEPOSIT, TransactionType.WITHDRAWAL, TransactionType.FEES)
+            is_dividend = txn_type == TransactionType.DIVIDEND
 
-            if is_cash_movement:
-                # For deposits/withdrawals: require amount, currency, and date
+            # Determine the amount - prefer price, fall back to quantity
+            if price > 0:
+                amount = price
+            elif quantity > 0:
+                amount = quantity
+            else:
+                amount = 0
+
+            if is_cash_only:
+                # DEPOSIT/WITHDRAWAL/FEES: need amount, currency, date
                 missing_fields = []
-
-                # Amount can be provided as quantity or price
-                amount = quantity if quantity > 0 else price
                 if amount <= 0:
-                    missing_fields.append("amount (how much to deposit/withdraw)")
+                    missing_fields.append("amount (the monetary value)")
                 if not currency:
                     missing_fields.append("currency (USD, EUR, GBP, etc.)")
                 if not date:
@@ -182,15 +191,34 @@ class AddTransactionTool(BaseTool):
                 if missing_fields:
                     return f"Missing required information for {transaction_type}: {', '.join(missing_fields)}. Please ask the user to provide this information."
 
-                # Set up cash movement
+                # Set up: symbol=CASH, quantity=1, price=amount
                 symbol = "CASH"
                 isin = None
-                price = amount
+                final_price = amount
+                quantity = 1.0
+
+            elif is_dividend:
+                # DIVIDEND: need symbol, amount (as price), date
+                missing_fields = []
+                if not symbol and not isin:
+                    missing_fields.append("symbol (which stock paid the dividend)")
+                if amount <= 0:
+                    missing_fields.append("amount (the dividend amount)")
+                if not date:
+                    missing_fields.append("date (when was it paid)")
+
+                if missing_fields:
+                    return f"Missing required information for dividend: {', '.join(missing_fields)}. Please ask the user to provide this information."
+
+                # Set up: quantity=1, price=amount
+                final_price = amount
                 quantity = 1.0
 
             else:
-                # For buy/sell/dividend: require quantity, price, and date
+                # BUY/SELL: need symbol, quantity, price, date
                 missing_fields = []
+                if not symbol and not isin:
+                    missing_fields.append("symbol or ISIN (which instrument)")
                 if quantity <= 0:
                     missing_fields.append("quantity (how many shares/units)")
                 if price <= 0:
@@ -199,11 +227,9 @@ class AddTransactionTool(BaseTool):
                     missing_fields.append("date (when did this transaction occur)")
 
                 if missing_fields:
-                    return f"Missing required information: {', '.join(missing_fields)}. Please ask the user to provide this information before proceeding."
+                    return f"Missing required information for {transaction_type}: {', '.join(missing_fields)}. Please ask the user to provide this information."
 
-                # Validate that we have at least one identifier for non-cash transactions
-                if not symbol and not isin:
-                    return "Please provide either a symbol (e.g., AAPL) or an ISIN (e.g., US0378331005)."
+                final_price = price
 
             # Determine timestamp
             if date:
@@ -224,15 +250,13 @@ class AddTransactionTool(BaseTool):
                 except ValueError:
                     return f"❌ Invalid currency: {currency}. Use one of {[c.value for c in Cur]}"
 
-            # Handle bond price interpretation (percentages)
-            final_price = price
-            if isin and isin.upper().startswith("XS"):  # XS ISINs are typically bonds
-                # If price looks like a percentage (between 0 and 200), treat as percentage of face value
-                if 0 < price <= 200:
-                    # Keep the percentage as-is for bonds (98.85% -> 98.85)
-                    # This is the standard way bonds are quoted
-                    final_price = price
-                    notes = f"{notes or ''} (Price: {price}% of face value)".strip()
+            # Handle bond price interpretation (percentages) - only for BUY/SELL
+            if not is_cash_only and not is_dividend:
+                if isin and isin.upper().startswith("XS"):  # XS ISINs are typically bonds
+                    # If price looks like a percentage (between 0 and 200), treat as percentage of face value
+                    if 0 < final_price <= 200:
+                        # Keep the percentage as-is for bonds (98.85% -> 98.85)
+                        notes = f"{notes or ''} (Price: {final_price}% of face value)".strip()
 
             # Add transaction
             # The portfolio manager will handle all the symbol/ISIN/name mapping
@@ -249,7 +273,20 @@ class AddTransactionTool(BaseTool):
             )
 
             if success:
-                # Show what was actually stored
+                currency_str = cur_obj.value if cur_obj else "USD"
+
+                # Format success message based on transaction type
+                if txn_type == TransactionType.DEPOSIT:
+                    return f"✅ Deposited {final_price:,.2f} {currency_str}"
+                elif txn_type == TransactionType.WITHDRAWAL:
+                    return f"✅ Withdrew {final_price:,.2f} {currency_str}"
+                elif txn_type == TransactionType.FEES:
+                    return f"✅ Recorded fee of {final_price:,.2f} {currency_str}"
+                elif txn_type == TransactionType.DIVIDEND:
+                    label = symbol.upper() if symbol else (f"ISIN_{isin[:8]}" if isin else "Unknown")
+                    return f"✅ Recorded dividend of {final_price:,.2f} {currency_str} from {label}"
+
+                # BUY/SELL: Show what was actually stored
                 if symbol:
                     label = symbol.upper()
                 elif isin:
@@ -260,16 +297,13 @@ class AddTransactionTool(BaseTool):
                 # Get the actual instrument info to show the resolved name
                 try:
                     if symbol and self.portfolio_manager.current_portfolio:
-                        # Find the transaction we just added
-                        for txn in reversed(
-                            self.portfolio_manager.current_portfolio.transactions
-                        ):
+                        for txn in reversed(self.portfolio_manager.current_portfolio.transactions):
                             if txn.instrument.symbol == symbol.upper():
-                                return f"✅ Added {transaction_type} transaction: {quantity} {txn.instrument.symbol} ({txn.instrument.name}) @ {price}"
+                                return f"✅ {transaction_type.upper()}: {quantity} {txn.instrument.symbol} ({txn.instrument.name}) @ {final_price}"
                 except Exception:
                     pass
 
-                return f"✅ Added {transaction_type} transaction: {quantity} {label} @ {price}"
+                return f"✅ {transaction_type.upper()}: {quantity} {label} @ {final_price}"
             else:
                 return "❌ Failed to add transaction. Make sure a portfolio is loaded."
 

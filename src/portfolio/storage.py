@@ -119,14 +119,73 @@ class FileBasedStorage:
         """List all available portfolio IDs."""
         return [f.stem for f in self.portfolios_dir.glob("*.json")]
 
-    def delete_portfolio(self, portfolio_id: str) -> bool:
-        """Delete a portfolio file."""
-        filepath = self.portfolios_dir / f"{portfolio_id}.json"
+    def delete_portfolio(self, portfolio_id: str, delete_all_data: bool = True) -> dict:
+        """Delete a portfolio and optionally all associated data.
 
+        Args:
+            portfolio_id: The portfolio ID to delete
+            delete_all_data: If True, also deletes snapshots, backups, and exports
+
+        Returns:
+            Dictionary with deletion results:
+            - portfolio_deleted: bool
+            - snapshots_deleted: int (number of snapshots deleted)
+            - backup_deleted: bool
+            - legacy_data_deleted: bool
+        """
+        result = {
+            "portfolio_deleted": False,
+            "snapshots_deleted": 0,
+            "backup_deleted": False,
+            "legacy_data_deleted": False,
+        }
+
+        # Delete portfolio JSON file
+        filepath = self.portfolios_dir / f"{portfolio_id}.json"
         if filepath.exists():
             filepath.unlink()
-            return True
-        return False
+            result["portfolio_deleted"] = True
+
+        # Delete backup file if exists
+        backup_path = filepath.with_suffix(".json.backup")
+        if backup_path.exists():
+            backup_path.unlink()
+            result["backup_deleted"] = True
+
+        if delete_all_data:
+            # Delete all snapshots from SQLite (no date range = delete all)
+            result["snapshots_deleted"] = self._snapshot_store.delete_snapshots(portfolio_id)
+
+            # Delete legacy JSON snapshot file if exists
+            legacy_json = self.snapshots_dir / f"{portfolio_id}.json"
+            if legacy_json.exists():
+                legacy_json.unlink()
+                result["legacy_data_deleted"] = True
+
+            # Delete legacy snapshot directory if exists
+            legacy_dir = self.snapshots_dir / portfolio_id
+            if legacy_dir.exists() and legacy_dir.is_dir():
+                import shutil
+                shutil.rmtree(legacy_dir)
+                result["legacy_data_deleted"] = True
+
+            # Delete backups directory for this portfolio
+            backup_dir = self.data_dir / "backups" / portfolio_id
+            if backup_dir.exists() and backup_dir.is_dir():
+                import shutil
+                shutil.rmtree(backup_dir)
+                result["backup_deleted"] = True
+
+            # Delete exports for this portfolio
+            exports_dir = self.data_dir / "exports"
+            if exports_dir.exists():
+                for export_file in exports_dir.glob(f"{portfolio_id}_*"):
+                    export_file.unlink()
+
+            # Remove from migrated portfolios cache
+            self._migrated_portfolios.discard(portfolio_id)
+
+        return result
 
     def save_snapshot(self, portfolio_id: str, snapshot: PortfolioSnapshot) -> None:
         """Save portfolio snapshot to SQLite store.

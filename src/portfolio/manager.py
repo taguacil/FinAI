@@ -121,6 +121,24 @@ class PortfolioManager:
         """List all available portfolios."""
         return self.storage.list_portfolios()
 
+    def delete_portfolio(self, portfolio_id: str, delete_all_data: bool = True) -> dict:
+        """Delete a portfolio and all associated data.
+
+        Args:
+            portfolio_id: The portfolio ID to delete
+            delete_all_data: If True, also deletes snapshots, backups, and exports
+
+        Returns:
+            Dictionary with deletion results
+        """
+        # Clear current portfolio if it's the one being deleted
+        if self.current_portfolio and self.current_portfolio.id == portfolio_id:
+            self.current_portfolio = None
+
+        result = self.storage.delete_portfolio(portfolio_id, delete_all_data)
+        logging.info(f"Deleted portfolio {portfolio_id}: {result}")
+        return result
+
     def add_transaction(
         self,
         symbol: str,

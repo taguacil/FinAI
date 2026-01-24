@@ -241,6 +241,36 @@ class PortfolioTrackerUI:
             """
             )
 
+            # Delete portfolio button with confirmation
+            with st.sidebar.expander("⚠️ Delete Portfolio", expanded=False):
+                st.warning(
+                    f"This will permanently delete **{portfolio.name}** and all associated data "
+                    "(transactions, snapshots, backups)."
+                )
+                snapshot_count = portfolio_manager.storage.get_snapshot_count(portfolio.id)
+                st.caption(
+                    f"• {len(portfolio.transactions)} transactions\n"
+                    f"• {len(portfolio.positions)} positions\n"
+                    f"• {snapshot_count} snapshots"
+                )
+                confirm_name = st.text_input(
+                    "Type portfolio name to confirm:",
+                    key="delete_confirm_input",
+                    placeholder=portfolio.name,
+                )
+                if st.button("Delete Portfolio", type="primary", use_container_width=True):
+                    if confirm_name == portfolio.name:
+                        try:
+                            portfolio_manager.delete_portfolio(portfolio.id, delete_all_data=True)
+                            st.session_state.portfolio_loaded = False
+                            st.session_state.selected_portfolio = None
+                            st.success(f"Deleted portfolio: {portfolio.name}")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Error deleting portfolio: {e}")
+                    else:
+                        st.error("Portfolio name doesn't match. Deletion cancelled.")
+
             # Data freshness indicator (compact)
             if market_data_service is not None:
                 freshness = market_data_service.freshness
