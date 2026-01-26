@@ -231,15 +231,12 @@ class HealthChecker:
                     portfolio = self.storage.load_portfolio(portfolio_id)
                     if portfolio:
                         # Check portfolio integrity
-                        snapshots = self.storage.load_snapshots(portfolio_id)
-
                         portfolio_health.append(
                             {
                                 "id": portfolio_id,
                                 "name": portfolio.name,
                                 "transactions": len(portfolio.transactions),
                                 "positions": len(portfolio.positions),
-                                "snapshots": len(snapshots),
                                 "status": "healthy",
                             }
                         )

@@ -12,7 +12,9 @@ from ..portfolio_tools import (
     CheckMarketDataAvailabilityTool,
     DeleteTransactionTool,
     GetCurrentPriceTool,
+    GetHistoricalInstrumentsTool,
     GetPortfolioMetricsTool,
+    GetPortfolioSnapshotTool,
     GetPortfolioSummaryTool,
     GetTransactionHistoryTool,
     GetTransactionsTool,
@@ -23,8 +25,10 @@ from ..portfolio_tools import (
     ResolveInstrumentTool,
     SearchCompanyTool,
     SearchInstrumentTool,
+    SetDataProviderSymbolTool,
     SetMarketPriceTool,
     SimulateWhatIfTool,
+    UpdateHistoricalMarketDataTool,
 )
 
 # Re-export market data tools
@@ -45,7 +49,9 @@ __all__ = [
     "CheckMarketDataAvailabilityTool",
     "DeleteTransactionTool",
     "GetCurrentPriceTool",
+    "GetHistoricalInstrumentsTool",
     "GetPortfolioMetricsTool",
+    "GetPortfolioSnapshotTool",
     "GetPortfolioSummaryTool",
     "GetTransactionHistoryTool",
     "GetTransactionsTool",
@@ -56,8 +62,10 @@ __all__ = [
     "ResolveInstrumentTool",
     "SearchCompanyTool",
     "SearchInstrumentTool",
+    "SetDataProviderSymbolTool",
     "SetMarketPriceTool",
     "SimulateWhatIfTool",
+    "UpdateHistoricalMarketDataTool",
     # Market data tools
     "GetPriceHistoryTool",
     "GetFXRateTool",

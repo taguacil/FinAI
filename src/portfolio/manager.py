@@ -1,15 +1,21 @@
 """
 Portfolio manager for handling portfolio operations and transactions.
+
+This module now integrates with MarketDataStore for centralized price storage
+and PortfolioHistory for on-demand portfolio state calculation.
 """
 
 import logging
 import uuid
 from datetime import date, datetime, timedelta
 from decimal import Decimal
-from typing import TYPE_CHECKING, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
+
+import pandas as pd
 
 from ..data_providers.manager import DataProviderManager
 from .analyzer import PortfolioAnalyzer
+from .market_data_store import MarketDataStore, PriceEntry
 from .models import (
     Currency,
     FinancialInstrument,
@@ -20,6 +26,7 @@ from .models import (
     Transaction,
     TransactionType,
 )
+from .portfolio_history import PortfolioHistory, PositionState
 from .storage import FileBasedStorage
 
 if TYPE_CHECKING:
@@ -30,23 +37,31 @@ class PortfolioManager:
     """Manages portfolio operations, transactions, and data updates.
 
     Supports both DataProviderManager (legacy) and MarketDataService (new).
+    Now integrates with MarketDataStore for centralized price storage and
+    PortfolioHistory for on-demand portfolio state calculation.
     """
 
     def __init__(
         self,
         storage: Optional[FileBasedStorage] = None,
         data_manager: Optional[Union[DataProviderManager, "MarketDataService"]] = None,
+        data_dir: str = "data",
     ):
         """Initialize portfolio manager.
 
         Args:
             storage: FileBasedStorage instance
             data_manager: DataProviderManager or MarketDataService instance
+            data_dir: Data directory for MarketDataStore
         """
         self.storage = storage or FileBasedStorage()
         self._data_manager = data_manager or DataProviderManager()
         self.analyzer = PortfolioAnalyzer(self._data_manager, self.storage)
         self.current_portfolio: Optional[Portfolio] = None
+
+        # New centralized components
+        self._market_data_store = MarketDataStore(data_dir)
+        self._portfolio_history: Optional[PortfolioHistory] = None
 
     @property
     def data_manager(self) -> DataProviderManager:
@@ -67,6 +82,31 @@ class PortfolioManager:
         if isinstance(self._data_manager, MarketDataService):
             return self._data_manager
         return None
+
+    @property
+    def market_data_store(self) -> MarketDataStore:
+        """Get the centralized MarketDataStore for price storage."""
+        return self._market_data_store
+
+    def _get_portfolio_history(self) -> Optional[PortfolioHistory]:
+        """Get or create the PortfolioHistory calculator for the current portfolio."""
+        if not self.current_portfolio:
+            return None
+
+        # Create or update portfolio history if needed
+        if self._portfolio_history is None or self._portfolio_history.portfolio.id != self.current_portfolio.id:
+            self._portfolio_history = PortfolioHistory(
+                portfolio=self.current_portfolio,
+                market_data=self._market_data_store,
+                fx_rate_func=self._get_exchange_rate,
+                fx_rate_func_with_date=self._get_exchange_rate_at_date,
+            )
+
+        return self._portfolio_history
+
+    def _invalidate_portfolio_history(self) -> None:
+        """Invalidate the portfolio history cache (call after transactions change)."""
+        self._portfolio_history = None
 
     def create_portfolio(
         self, name: str, base_currency: Currency = Currency.USD
@@ -95,6 +135,10 @@ class PortfolioManager:
         portfolio = self.storage.load_portfolio(portfolio_id)
         if portfolio:
             self.current_portfolio = portfolio
+            # Invalidate portfolio history cache to ensure fresh calculations
+            self._invalidate_portfolio_history()
+            # Clear market data cache to pick up any external updates (e.g., from MCP server)
+            self._market_data_store.clear_cache()
             # Normalize any legacy symbols (strip leading '$', uppercase)
             try:
                 normalized_positions: Dict[str, Position] = {}
@@ -211,6 +255,9 @@ class PortfolioManager:
         self.current_portfolio.add_transaction(transaction)
         self.storage.save_portfolio(self.current_portfolio)
 
+        # Invalidate portfolio history cache since transactions changed
+        self._invalidate_portfolio_history()
+
         logging.info(
             f"Added {transaction_type} transaction: {quantity} {instrument.symbol} ({instrument.name}) @ {price}"
         )
@@ -324,28 +371,59 @@ class PortfolioManager:
         )
 
     def update_current_prices(self) -> Dict[str, bool]:
-        """Update current prices for all positions."""
+        """Update current prices for all positions.
+
+        Uses data_provider_symbol when available to look up prices,
+        mapping the result back to the portfolio symbol.
+        Also stores prices in the centralized MarketDataStore.
+        """
         if not self.current_portfolio:
             return {}
 
         results = {}
-        symbols = list(self.current_portfolio.positions.keys())
 
-        if not symbols:
+        if not self.current_portfolio.positions:
             return {}
 
-        # Get current prices for all symbols
-        prices = self.data_manager.get_multiple_current_prices(symbols)
+        # Build mapping of lookup_symbol -> portfolio_symbol
+        # Use data_provider_symbol when available, otherwise use the portfolio symbol
+        lookup_to_portfolio: Dict[str, str] = {}
+        for symbol, position in self.current_portfolio.positions.items():
+            lookup_symbol = position.instrument.data_provider_symbol or symbol
+            lookup_to_portfolio[lookup_symbol] = symbol
 
-        for symbol, price in prices.items():
-            if symbol in self.current_portfolio.positions and price is not None:
-                self.current_portfolio.positions[symbol].current_price = price
-                self.current_portfolio.positions[symbol].last_updated = datetime.now()
-                results[symbol] = True
-                logging.debug(f"Updated price for {symbol}: {price}")
+        # Get current prices for all lookup symbols
+        lookup_symbols = list(lookup_to_portfolio.keys())
+        prices = self.data_manager.get_multiple_current_prices(lookup_symbols)
+
+        today = date.today()
+        price_entries: List[PriceEntry] = []
+
+        for lookup_symbol, price in prices.items():
+            portfolio_symbol = lookup_to_portfolio.get(lookup_symbol)
+            if portfolio_symbol and portfolio_symbol in self.current_portfolio.positions and price is not None:
+                position = self.current_portfolio.positions[portfolio_symbol]
+                position.current_price = price
+                position.last_updated = datetime.now()
+                results[portfolio_symbol] = True
+                logging.debug(f"Updated price for {portfolio_symbol} (lookup: {lookup_symbol}): {price}")
+
+                # Store in MarketDataStore (use portfolio symbol as the key)
+                price_entries.append(PriceEntry(
+                    symbol=portfolio_symbol,
+                    date=today,
+                    price=price,
+                    currency=position.instrument.currency,
+                    source="live_update",
+                ))
             else:
-                results[symbol] = False
-                logging.warning(f"Could not update price for {symbol}")
+                if portfolio_symbol:
+                    results[portfolio_symbol] = False
+                    logging.warning(f"Could not update price for {portfolio_symbol} (lookup: {lookup_symbol})")
+
+        # Batch store prices in MarketDataStore
+        if price_entries:
+            self._market_data_store.set_prices_batch(price_entries)
 
         # Save updated portfolio
         self.storage.save_portfolio(self.current_portfolio)
@@ -363,7 +441,7 @@ class PortfolioManager:
         This is useful when:
         - Price lookup fails and user wants to use purchase price as market price
         - User wants to manually set a custom price for an instrument
-        - Correcting historical prices in snapshots
+        - Correcting historical prices
 
         Args:
             symbol: The instrument symbol
@@ -382,62 +460,46 @@ class PortfolioManager:
         symbol = symbol.upper().strip()
         target_date = target_date or date.today()
 
-        # Validate the symbol exists in portfolio
-        if symbol not in self.current_portfolio.positions:
-            logging.error(f"Symbol {symbol} not found in portfolio positions")
+        # Check if symbol exists in current portfolio
+        symbol_in_current = symbol in self.current_portfolio.positions
+
+        # For current portfolio updates, symbol must exist
+        if update_current and target_date == date.today() and not symbol_in_current:
+            logging.error(f"Symbol {symbol} not found in current portfolio positions")
             return False
 
         try:
-            # Update current portfolio position if target_date is today
-            if update_current and target_date == date.today():
+            # Determine the currency for the price
+            if symbol_in_current:
+                currency = self.current_portfolio.positions[symbol].instrument.currency
+            else:
+                # Default to portfolio base currency for historical prices
+                currency = self.current_portfolio.base_currency
+
+            # Store price in MarketDataStore
+            success = self._market_data_store.set_price(
+                symbol=symbol,
+                price_date=target_date,
+                price=price,
+                currency=currency,
+                source="manual",
+            )
+
+            if not success:
+                logging.error(f"Failed to store price in MarketDataStore for {symbol}")
+                return False
+
+            logging.info(f"Stored price for {symbol} on {target_date}: {price}")
+
+            # Update current portfolio position if target_date is today and symbol exists
+            if update_current and target_date == date.today() and symbol_in_current:
                 self.current_portfolio.positions[symbol].current_price = price
                 self.current_portfolio.positions[symbol].last_updated = datetime.now()
                 self.storage.save_portfolio(self.current_portfolio)
                 logging.info(f"Updated current price for {symbol} to {price}")
 
-            # Update or create snapshot for the target date
-            existing_snapshots = self.storage.load_snapshots(
-                self.current_portfolio.id, target_date, target_date
-            )
-
-            if existing_snapshots:
-                # Update existing snapshot
-                snapshot = existing_snapshots[0]
-                if symbol in snapshot.positions:
-                    snapshot.positions[symbol].current_price = price
-                    snapshot.positions[symbol].last_updated = datetime.now()
-
-                    # Recalculate snapshot totals
-                    self._recalculate_snapshot_totals(snapshot)
-
-                    # Save updated snapshot
-                    self.storage.save_snapshot(self.current_portfolio.id, snapshot)
-                    logging.info(
-                        f"Updated price for {symbol} to {price} in snapshot for {target_date}"
-                    )
-                else:
-                    logging.warning(
-                        f"Symbol {symbol} not found in snapshot for {target_date}"
-                    )
-                    return False
-            else:
-                # Create a new snapshot for the target date with the custom price
-                # First, temporarily set the price in the current portfolio
-                original_price = self.current_portfolio.positions[symbol].current_price
-                self.current_portfolio.positions[symbol].current_price = price
-
-                # Create snapshot for the target date
-                snapshot = self.analyzer.create_snapshot(
-                    self.current_portfolio, target_date, save=True
-                )
-
-                # Restore original price if we're not updating current
-                if not update_current or target_date != date.today():
-                    self.current_portfolio.positions[symbol].current_price = original_price
-
-                logging.info(
-                    f"Created snapshot for {target_date} with {symbol} price set to {price}"
-                )
+            # Invalidate portfolio history cache since prices changed
+            self._invalidate_portfolio_history()
 
             return True
 
@@ -445,120 +507,113 @@ class PortfolioManager:
             logging.error(f"Error setting position price: {e}")
             return False
 
-    def _recalculate_snapshot_totals(self, snapshot: PortfolioSnapshot) -> None:
-        """Recalculate snapshot totals after position price changes."""
-        total_positions_value = Decimal("0")
-        total_cost_basis = Decimal("0")
-        total_unrealized_pnl = Decimal("0")
+    def set_positions_prices_batch(
+        self,
+        entries: List[Tuple[str, date, Decimal]],
+    ) -> int:
+        """Set prices for multiple positions/symbols in a single batch operation.
 
-        for position in snapshot.positions.values():
-            if position.quantity > 0 and position.current_price is not None:
-                position_value = position.quantity * position.current_price
-                position_cost = position.quantity * position.average_cost
+        This is more efficient than calling set_position_price multiple times.
 
-                total_positions_value += position_value
-                total_cost_basis += position_cost
-                total_unrealized_pnl += position_value - position_cost
-
-        snapshot.positions_value = total_positions_value
-        snapshot.total_cost_basis = total_cost_basis
-        snapshot.total_unrealized_pnl = total_unrealized_pnl
-        snapshot.total_value = snapshot.cash_balance + total_positions_value
-
-        if total_cost_basis > 0:
-            snapshot.total_unrealized_pnl_percent = (
-                total_unrealized_pnl / total_cost_basis
-            ) * Decimal("100")
-        else:
-            snapshot.total_unrealized_pnl_percent = Decimal("0")
-
-    def get_fallback_prices_from_snapshots(self) -> Dict[str, Decimal]:
-        """Get fallback prices from the most recent snapshots for positions without current prices.
+        Args:
+            entries: List of (symbol, date, price) tuples
 
         Returns:
-            Dict mapping symbol to the most recent price found in snapshots
+            Number of prices successfully stored
         """
         if not self.current_portfolio:
-            return {}
+            logging.error("No portfolio loaded")
+            return 0
 
-        fallback_prices = {}
+        if not entries:
+            return 0
 
         try:
-            # Get the most recent snapshots (last 30 days should be sufficient)
-            end_date = date.today()
-            start_date = end_date - timedelta(days=30)
+            # Build PriceEntry objects, determining currency for each symbol
+            price_entries: List[PriceEntry] = []
+            today = date.today()
+            current_price_updates: List[Tuple[str, Decimal]] = []
 
-            snapshots = self.storage.load_snapshots(
-                self.current_portfolio.id, start_date, end_date
-            )
+            for symbol, price_date, price in entries:
+                symbol = symbol.upper().strip()
 
-            if not snapshots:
-                return {}
+                # Determine currency for this symbol
+                if symbol in self.current_portfolio.positions:
+                    currency = self.current_portfolio.positions[symbol].instrument.currency
+                    # Track updates for today's prices on current positions
+                    if price_date == today:
+                        current_price_updates.append((symbol, price))
+                else:
+                    # Default to portfolio base currency for historical/sold instruments
+                    currency = self.current_portfolio.base_currency
 
-            # Scan from most recent to oldest to find the latest price for each symbol
-            for snapshot in reversed(snapshots):
-                for symbol, position in snapshot.positions.items():
-                    if symbol not in fallback_prices and position.current_price is not None:
-                        fallback_prices[symbol] = position.current_price
-                        logging.debug(f"Found fallback price for {symbol}: {position.current_price} from {snapshot.date}")
+                price_entries.append(PriceEntry(
+                    symbol=symbol,
+                    date=price_date,
+                    price=price,
+                    currency=currency,
+                    source="manual_batch",
+                ))
 
-            logging.info(f"Retrieved fallback prices for {len(fallback_prices)} symbols from snapshots")
+            # Batch store prices in MarketDataStore
+            count = self._market_data_store.set_prices_batch(price_entries)
+
+            # Update current prices for today's entries on current positions
+            for symbol, price in current_price_updates:
+                if symbol in self.current_portfolio.positions:
+                    self.current_portfolio.positions[symbol].current_price = price
+                    self.current_portfolio.positions[symbol].last_updated = datetime.now()
+
+            # Save portfolio if there were current price updates
+            if current_price_updates:
+                self.storage.save_portfolio(self.current_portfolio)
+
+            # Invalidate portfolio history cache since prices changed
+            self._invalidate_portfolio_history()
+
+            logging.info(f"Batch stored {count} prices for {len(set(e[0] for e in entries))} symbols")
+            return count
 
         except Exception as e:
-            logging.warning(f"Failed to get fallback prices from snapshots: {e}")
+            logging.error(f"Error in batch price update: {e}")
+            return 0
 
-        return fallback_prices
+    def set_data_provider_symbol(
+        self,
+        symbol: str,
+        data_provider_symbol: str,
+    ) -> bool:
+        """Set the data provider symbol for an existing position.
 
-    def get_positions_with_fallback_prices(self) -> List[Dict]:
-        """Get portfolio positions enhanced with fallback prices from snapshots.
+        This is useful when the portfolio symbol differs from the symbol used
+        by the data provider (e.g., BTC in portfolio, BTC-USD for Yahoo Finance).
 
-        This method ensures that positions have prices even when current market data
-        is not available by using the most recent price from snapshots.
+        Args:
+            symbol: The portfolio symbol
+            data_provider_symbol: The symbol to use when fetching from data providers
 
         Returns:
-            List of position dictionaries with enhanced price information
+            True if successful, False otherwise
         """
         if not self.current_portfolio:
-            return []
+            logging.error("No portfolio loaded")
+            return False
 
-        # Get fallback prices from snapshots
-        fallback_prices = self.get_fallback_prices_from_snapshots()
+        symbol = symbol.upper().strip()
+        data_provider_symbol = data_provider_symbol.upper().strip()
 
-        positions = []
+        if symbol not in self.current_portfolio.positions:
+            logging.error(f"Symbol {symbol} not found in portfolio positions")
+            return False
 
-        for symbol, position in self.current_portfolio.positions.items():
-            # Get fallback price for this symbol
-            fallback_price = fallback_prices.get(symbol)
-
-            # Calculate values using fallback if needed
-            effective_price = position.get_effective_price(fallback_price)
-            market_value = position.get_market_value_with_fallback(fallback_price)
-            unrealized_pnl = position.get_unrealized_pnl_with_fallback(fallback_price)
-            unrealized_pnl_percent = position.get_unrealized_pnl_percent_with_fallback(fallback_price)
-
-            position_data = {
-                "symbol": symbol,
-                "name": position.instrument.name,
-                "isin": position.instrument.isin,
-                "instrument_type": position.instrument.instrument_type.value,
-                "currency": position.instrument.currency.value,
-                "quantity": position.quantity,
-                "average_cost": position.average_cost,
-                "cost_basis": position.cost_basis,
-                "current_price": position.current_price,  # Original price (may be None)
-                "effective_price": effective_price,       # Price with fallback
-                "fallback_price": fallback_price,        # Price from snapshots
-                "market_value": market_value,             # With fallback
-                "unrealized_pnl": unrealized_pnl,        # With fallback
-                "unrealized_pnl_percent": unrealized_pnl_percent,  # With fallback
-                "last_updated": position.last_updated,
-                "has_current_price": position.current_price is not None,
-                "using_fallback": position.current_price is None and fallback_price is not None,
-            }
-
-            positions.append(position_data)
-
-        return positions
+        try:
+            self.current_portfolio.positions[symbol].instrument.data_provider_symbol = data_provider_symbol
+            self.storage.save_portfolio(self.current_portfolio)
+            logging.info(f"Set data_provider_symbol for {symbol} to {data_provider_symbol}")
+            return True
+        except Exception as e:
+            logging.error(f"Error setting data_provider_symbol: {e}")
+            return False
 
     def _get_exchange_rate(
         self, from_currency: Currency, to_currency: Currency
@@ -570,31 +625,30 @@ class PortfolioManager:
         rate = self.data_manager.get_exchange_rate(from_currency, to_currency)
         return rate
 
+    def _get_exchange_rate_at_date(
+        self, from_currency: Currency, to_currency: Currency, as_of: date
+    ) -> Optional[Decimal]:
+        """Get historical exchange rate for a specific date."""
+        if from_currency == to_currency:
+            return Decimal("1")
 
+        # Try MarketDataService first (it supports historical rates)
+        mds = self.market_data_service
+        if mds:
+            result = mds.get_fx_rate(from_currency, to_currency, as_of=as_of)
+            if result and result.rate is not None:
+                return result.rate
 
-    def refresh_today_snapshot(self) -> Optional[PortfolioSnapshot]:
-        """Refresh current prices and update/create today's snapshot.
+        # Fall back to current rate if historical not available
+        return self._get_exchange_rate(from_currency, to_currency)
 
-        This method fetches current market prices and creates or updates
-        today's snapshot, making snapshots the single source of truth
-        for all portfolio pricing.
-
-        Returns:
-            The updated snapshot, or None if no portfolio is loaded
-        """
-        if not self.current_portfolio:
-            return None
-        self.update_current_prices()
-        today = date.today()
-        snapshot = self.analyzer.create_snapshot(self.current_portfolio, today, save=True)
-        return snapshot
-
-    def get_portfolio_value(self, use_snapshot: bool = True) -> Decimal:
+    def get_portfolio_value(self, target_date: Optional[date] = None, use_history: bool = True) -> Decimal:
         """Get total portfolio value in base currency.
 
         Args:
-            use_snapshot: If True, use the latest snapshot value (single source of truth).
-                         If False, fall back to in-memory calculation.
+            target_date: Date to get value for (defaults to today)
+            use_history: If True, use PortfolioHistory for calculation.
+                        If False, fall back to in-memory calculation.
 
         Returns:
             Total portfolio value in base currency
@@ -602,61 +656,183 @@ class PortfolioManager:
         if not self.current_portfolio:
             return Decimal("0")
 
-        if use_snapshot:
-            latest_snapshot = self.storage.get_latest_snapshot(self.current_portfolio.id)
-            if latest_snapshot:
-                return latest_snapshot.total_value
+        target_date = target_date or date.today()
+
+        if use_history:
+            history = self._get_portfolio_history()
+            if history:
+                return history.get_value_at_date(target_date)
 
         # Fallback to in-memory calculation
         return self.analyzer._calculate_portfolio_value(self.current_portfolio)
 
-    def create_snapshot(
-        self, snapshot_date: Optional[date] = None, save: bool = True
-    ) -> PortfolioSnapshot:
-        """Create a comprehensive portfolio snapshot for the given date.
+    def get_portfolio_history(
+        self, start_date: date, end_date: date
+    ) -> pd.DataFrame:
+        """Get portfolio value history as a DataFrame.
 
-        If creating a snapshot for today, fetches fresh current prices first.
-        For historical dates, uses existing prices on the portfolio.
+        Uses PortfolioHistory for on-demand calculation from transactions + prices.
+
+        Args:
+            start_date: Start date
+            end_date: End date
+
+        Returns:
+            DataFrame with columns: total_value, cash_value, positions_value
         """
         if not self.current_portfolio:
-            raise ValueError("No portfolio loaded")
+            return pd.DataFrame()
 
-        # Determine the target date
-        target_date = snapshot_date or date.today()
+        history = self._get_portfolio_history()
+        if history:
+            return history.get_value_history(start_date, end_date)
 
-        # For today's snapshot, fetch fresh current prices
-        if target_date == date.today():
-            logging.info("Fetching fresh current prices for today's snapshot")
-            self.update_current_prices()
+        return pd.DataFrame()
 
-        return self.analyzer.create_snapshot(self.current_portfolio, target_date, save)
+    def update_market_data(
+        self,
+        start_date: Optional[date] = None,
+        end_date: Optional[date] = None,
+        include_historical: bool = True,
+    ) -> Dict[str, bool]:
+        """Update market data in the centralized MarketDataStore.
 
-    def create_snapshots_for_range(
-        self, start_date: date, end_date: date, save: bool = True
-    ) -> List[PortfolioSnapshot]:
-        """Create snapshots for a specific date range."""
+        Fetches historical prices for all portfolio symbols and stores them.
+        Can include instruments from historical transactions (sold positions).
+
+        Args:
+            start_date: Start date for historical data (defaults to 1 year ago)
+            end_date: End date for historical data (defaults to today)
+            include_historical: If True, also fetch prices for instruments from
+                              transactions in the date range (including sold ones)
+
+        Returns:
+            Dict mapping symbol to success status
+        """
         if not self.current_portfolio:
-            raise ValueError("No portfolio loaded")
+            return {}
 
-        return self.analyzer.create_snapshots_for_range(
-            self.current_portfolio, start_date, end_date, save
-        )
+        end_date = end_date or date.today()
+        start_date = start_date or (end_date - timedelta(days=365))
 
-    def simulate_snapshots_for_range(
+        results: Dict[str, bool] = {}
+
+        # Build dict of instruments to update: symbol -> (instrument, lookup_symbol)
+        instruments_to_update: Dict[str, Tuple[FinancialInstrument, str]] = {}
+
+        # Add current positions
+        for symbol, position in self.current_portfolio.positions.items():
+            lookup_symbol = position.instrument.data_provider_symbol or symbol
+            instruments_to_update[symbol] = (position.instrument, lookup_symbol)
+
+        # Add historical instruments from transactions in date range
+        if include_historical:
+            historical_instruments = self.get_instruments_in_date_range(start_date, end_date)
+            for symbol, instrument in historical_instruments.items():
+                if symbol not in instruments_to_update:
+                    lookup_symbol = instrument.data_provider_symbol or symbol
+                    instruments_to_update[symbol] = (instrument, lookup_symbol)
+                    logging.debug(f"Including historical instrument: {symbol}")
+
+        # Fetch and store prices for all instruments
+        for symbol, (instrument, lookup_symbol) in instruments_to_update.items():
+            try:
+                # Fetch historical prices
+                prices = self.data_manager.get_historical_prices(
+                    lookup_symbol, start_date, end_date
+                )
+
+                if prices:
+                    # Convert to price entries
+                    entries = [
+                        PriceEntry(
+                            symbol=symbol,  # Use portfolio symbol for storage
+                            date=p.date,
+                            price=p.close_price or p.open_price or p.high_price or p.low_price,
+                            currency=instrument.currency,
+                            source="historical_update",
+                        )
+                        for p in prices
+                        if p.close_price or p.open_price or p.high_price or p.low_price
+                    ]
+
+                    if entries:
+                        self._market_data_store.set_prices_batch(entries)
+                        results[symbol] = True
+                        logging.info(f"Updated {len(entries)} historical prices for {symbol}")
+                    else:
+                        results[symbol] = False
+                else:
+                    results[symbol] = False
+                    logging.warning(f"No historical prices found for {symbol}")
+
+            except Exception as e:
+                results[symbol] = False
+                logging.error(f"Error updating market data for {symbol}: {e}")
+
+        # Invalidate portfolio history cache since prices changed
+        self._invalidate_portfolio_history()
+
+        return results
+
+    def get_instruments_in_date_range(
+        self, start_date: date, end_date: date
+    ) -> Dict[str, FinancialInstrument]:
+        """Get all instruments that had activity in a date range.
+
+        Returns instruments from transactions (including sold ones) that
+        were active during the specified period.
+
+        Args:
+            start_date: Start date for the range
+            end_date: End date for the range
+
+        Returns:
+            Dict mapping symbol to FinancialInstrument for all instruments
+            with transactions in the date range
+        """
+        if not self.current_portfolio:
+            return {}
+
+        instruments: Dict[str, FinancialInstrument] = {}
+
+        for txn in self.current_portfolio.transactions:
+            txn_date = txn.timestamp.date()
+            if start_date <= txn_date <= end_date:
+                symbol = txn.instrument.symbol
+                # Skip CASH transactions (deposits/withdrawals/fees)
+                if symbol == "CASH":
+                    continue
+                # Add instrument if not already present
+                if symbol not in instruments:
+                    instruments[symbol] = txn.instrument
+
+        return instruments
+
+    def simulate_portfolio_history(
         self,
         start_date: date,
         end_date: date,
         exclude_symbols: Optional[List[str]] = None,
         exclude_transaction_ids: Optional[List[str]] = None,
-    ) -> List[PortfolioSnapshot]:
-        """Simulate snapshots for a date range while excluding certain transactions or symbols.
+    ) -> pd.DataFrame:
+        """Simulate portfolio history for a date range while excluding certain transactions or symbols.
 
-        Does not persist snapshots to storage.
+        Uses PortfolioHistory with a filtered portfolio. Does not persist data.
+
+        Args:
+            start_date: Start date
+            end_date: End date
+            exclude_symbols: Symbols to exclude from simulation
+            exclude_transaction_ids: Transaction IDs to exclude
+
+        Returns:
+            DataFrame with columns: total_value, cash_value, positions_value
         """
         if not self.current_portfolio:
             raise ValueError("No portfolio loaded")
 
-        exclude_symbols = {s.upper() for s in (exclude_symbols or [])}
+        exclude_symbols_set = {s.upper() for s in (exclude_symbols or [])}
         exclude_ids = set(exclude_transaction_ids or [])
 
         original_portfolio = self.current_portfolio
@@ -666,7 +842,7 @@ class PortfolioManager:
         for t in original_portfolio.transactions:
             if exclude_ids and t.id in exclude_ids:
                 continue
-            if exclude_symbols and t.instrument.symbol.upper() in exclude_symbols:
+            if exclude_symbols_set and t.instrument.symbol.upper() in exclude_symbols_set:
                 continue
             filtered_txns.append(t)
 
@@ -678,22 +854,88 @@ class PortfolioManager:
             created_at=original_portfolio.created_at,
             transactions=filtered_txns,
             positions={},
-            cash_balances={},
+            cash_balances=dict(original_portfolio.cash_balances),
         )
 
-        # Initialize cash balances from the original portfolio's initial state
-        # This ensures the simulation starts with the correct cash position
-        for currency, amount in original_portfolio.cash_balances.items():
-            temp_portfolio.cash_balances[currency] = amount
-
-        # Create snapshots using the temp portfolio without swapping global state
-        simulated = self.create_snapshots_for_range(
-            start_date, end_date, save=False, portfolio=temp_portfolio
+        # Create a PortfolioHistory for the temp portfolio
+        from .portfolio_history import PortfolioHistory
+        temp_history = PortfolioHistory(
+            portfolio=temp_portfolio,
+            market_data=self._market_data_store,
+            fx_rate_func=self._get_exchange_rate,
+            fx_rate_func_with_date=self._get_exchange_rate_at_date,
         )
 
-        return simulated
+        return temp_history.get_value_history(start_date, end_date)
 
 
+
+    def get_positions_with_prices(self, target_date: Optional[date] = None) -> List[Dict]:
+        """Get portfolio positions with prices from MarketDataStore.
+
+        This is the preferred method for getting position data with pricing.
+        Uses the centralized MarketDataStore for consistent pricing.
+
+        Args:
+            target_date: Date to get positions for (defaults to today)
+
+        Returns:
+            List of position dictionaries with pricing information
+        """
+        if not self.current_portfolio:
+            return []
+
+        target_date = target_date or date.today()
+        history = self._get_portfolio_history()
+        if not history:
+            return self.get_position_summary()
+
+        positions = history.get_positions_at_date(target_date)
+        base = self.current_portfolio.base_currency
+
+        result = []
+        for symbol, pos_state in positions.items():
+            if pos_state.quantity <= 0:
+                continue
+
+            # Get price from MarketDataStore - try all identifiers
+            price = None
+            # Try data_provider_symbol first
+            if pos_state.data_provider_symbol:
+                price = self._market_data_store.get_price_with_fallback(
+                    pos_state.data_provider_symbol, target_date
+                )
+            # Try portfolio symbol
+            if price is None:
+                price = self._market_data_store.get_price_with_fallback(symbol, target_date)
+            # Try ISIN as fallback
+            if price is None and pos_state.isin:
+                price = self._market_data_store.get_price_with_fallback(pos_state.isin, target_date)
+
+            # Calculate values
+            market_value = pos_state.quantity * price if price else None
+            cost_basis = pos_state.cost_basis
+            unrealized_pnl = market_value - cost_basis if market_value else None
+            unrealized_pnl_percent = (
+                (unrealized_pnl / cost_basis * 100) if unrealized_pnl and cost_basis > 0 else None
+            )
+
+            result.append({
+                "symbol": symbol,
+                "name": pos_state.instrument_name,
+                "instrument_type": pos_state.instrument_type,
+                "currency": pos_state.currency.value,
+                "quantity": pos_state.quantity,
+                "average_cost": pos_state.average_cost,
+                "cost_basis": cost_basis,
+                "current_price": price,
+                "market_value": market_value,
+                "unrealized_pnl": unrealized_pnl,
+                "unrealized_pnl_percent": unrealized_pnl_percent,
+                "has_current_price": price is not None,
+            })
+
+        return result
 
     def get_position_summary(self) -> List[Dict]:
         """Get summary of current positions."""
@@ -737,61 +979,103 @@ class PortfolioManager:
 
         return summary
 
-    def get_positions_from_snapshot(self) -> List[Dict]:
-        """Get positions with prices from the latest snapshot.
+    def create_current_snapshot(self) -> PortfolioSnapshot:
+        """Create a PortfolioSnapshot object representing current portfolio state.
 
-        This method returns position data sourced from the latest snapshot,
-        ensuring consistency with analytics and other pages that use snapshot data.
-        Falls back to in-memory positions with fallback prices if no snapshot exists.
+        This is primarily used for scenario simulations that need a snapshot object.
+        The snapshot is not persisted - it's created on-demand from current data.
 
         Returns:
-            List of position dictionaries with snapshot-sourced pricing
+            PortfolioSnapshot with current positions and values
         """
         if not self.current_portfolio:
-            return []
+            raise ValueError("No portfolio loaded")
 
-        latest_snapshot = self.storage.get_latest_snapshot(self.current_portfolio.id)
-        if not latest_snapshot:
-            # Fall back to in-memory calculation with fallback prices
-            return self.get_positions_with_fallback_prices()
+        today = date.today()
+        history = self._get_portfolio_history()
 
-        positions = []
-        for symbol, position in latest_snapshot.positions.items():
-            if position.quantity == 0:
-                continue
+        # Get positions with current prices
+        positions_dict: Dict[str, Position] = {}
+        total_positions_value = Decimal("0")
+        total_cost_basis = Decimal("0")
+        total_unrealized_pnl = Decimal("0")
 
-            # Calculate values from snapshot position
-            current_price = position.current_price
-            market_value = position.market_value if current_price else Decimal("0")
-            cost_basis = position.cost_basis
+        if history:
+            pos_states = history.get_positions_at_date(today)
+            for symbol, pos_state in pos_states.items():
+                if pos_state.quantity <= 0:
+                    continue
 
-            # Calculate unrealized P&L
-            unrealized_pnl = Decimal("0")
-            unrealized_pnl_percent = Decimal("0")
+                lookup_symbol = pos_state.data_provider_symbol or symbol
+                price = self._market_data_store.get_price_with_fallback(lookup_symbol, today)
+                if price is None:
+                    price = self._market_data_store.get_price_with_fallback(symbol, today)
 
-            if current_price and position.average_cost > 0 and cost_basis > 0:
-                unrealized_pnl = market_value - cost_basis
-                unrealized_pnl_percent = (unrealized_pnl / cost_basis) * Decimal("100")
+                market_value = pos_state.quantity * price if price else None
+                cost_basis = pos_state.cost_basis
 
-            positions.append({
-                "symbol": symbol,
-                "name": position.instrument.name,
-                "isin": getattr(position.instrument, 'isin', None),
-                "instrument_type": position.instrument.instrument_type.value,
-                "quantity": position.quantity,
-                "average_cost": position.average_cost,
-                "cost_basis": cost_basis,
-                "current_price": current_price,
-                "market_value": market_value,
-                "unrealized_pnl": unrealized_pnl,
-                "unrealized_pnl_percent": unrealized_pnl_percent,
-                "currency": position.instrument.currency.value,
-                "last_updated": position.last_updated,
-                "has_current_price": current_price is not None,
-                "snapshot_date": latest_snapshot.date,
-            })
+                # Get original instrument from portfolio if available
+                original_pos = self.current_portfolio.positions.get(symbol)
+                instrument = original_pos.instrument if original_pos else FinancialInstrument(
+                    symbol=symbol,
+                    name=pos_state.instrument_name or symbol,
+                    instrument_type=InstrumentType(pos_state.instrument_type) if pos_state.instrument_type else InstrumentType.STOCK,
+                    currency=pos_state.currency,
+                )
 
-        return positions
+                positions_dict[symbol] = Position(
+                    instrument=instrument,
+                    quantity=pos_state.quantity,
+                    average_cost=pos_state.average_cost,
+                    current_price=price,
+                    market_value=market_value,
+                    last_updated=datetime.now(),
+                )
+
+                if market_value:
+                    total_positions_value += market_value
+                total_cost_basis += cost_basis
+                if market_value:
+                    total_unrealized_pnl += market_value - cost_basis
+        else:
+            # Fallback to current portfolio positions
+            for symbol, pos in self.current_portfolio.positions.items():
+                if pos.quantity <= 0:
+                    continue
+                positions_dict[symbol] = pos
+                if pos.market_value:
+                    total_positions_value += pos.market_value
+                total_cost_basis += pos.quantity * pos.average_cost
+                if pos.market_value:
+                    total_unrealized_pnl += pos.market_value - (pos.quantity * pos.average_cost)
+
+        # Get cash balances
+        cash_balances = dict(self.current_portfolio.cash_balances)
+        base = self.current_portfolio.base_currency
+        cash_balance = sum(
+            amt if curr == base else amt * (self._get_exchange_rate(curr, base) or Decimal("1"))
+            for curr, amt in cash_balances.items()
+        )
+
+        total_value = cash_balance + total_positions_value
+        unrealized_pnl_percent = (
+            (total_unrealized_pnl / total_cost_basis * 100)
+            if total_cost_basis > 0 else Decimal("0")
+        )
+
+        return PortfolioSnapshot(
+            portfolio_id=self.current_portfolio.id,
+            date=today,
+            positions=positions_dict,
+            cash_balances=cash_balances,
+            cash_balance=cash_balance,
+            positions_value=total_positions_value,
+            total_value=total_value,
+            total_cost_basis=total_cost_basis,
+            total_unrealized_pnl=total_unrealized_pnl,
+            total_unrealized_pnl_percent=unrealized_pnl_percent,
+            base_currency=base,
+        )
 
     def get_transaction_history(self, days: Optional[int] = None) -> List[Dict]:
         """Get transaction history, optionally filtered by days."""
@@ -821,10 +1105,11 @@ class PortfolioManager:
         ]
 
     def get_performance_metrics(self, days: int = 365) -> Dict:
-        """Get basic performance metrics."""
+        """Get basic performance metrics using PortfolioHistory."""
         if not self.current_portfolio:
             return {}
-        return self.analyzer.get_performance_metrics(self.current_portfolio, days)
+        history = self._get_portfolio_history()
+        return self.analyzer.get_performance_metrics(self.current_portfolio, days, portfolio_history=history)
 
     def get_external_cash_flows_by_day(
         self, start_date: date, end_date: date

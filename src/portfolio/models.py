@@ -76,6 +76,11 @@ class FinancialInstrument(BaseModel):
     exchange: Optional[str] = Field(
         None, description="Exchange where traded", max_length=100
     )
+    data_provider_symbol: Optional[str] = Field(
+        None,
+        description="Symbol used by the data provider if different from the portfolio symbol (e.g., BTC-USD for Bitcoin)",
+        max_length=50,
+    )
 
     class Config:
         use_enum_values = False
@@ -194,7 +199,15 @@ class Position(BaseModel):
 
 
 class PortfolioSnapshot(BaseModel):
-    """Represents a comprehensive portfolio state at a specific point in time."""
+    """Represents a comprehensive portfolio state at a specific point in time.
+
+    DEPRECATED: This class is being phased out in favor of the MarketDataStore +
+    PortfolioHistory approach. New code should use PortfolioHistory.get_value_at_date()
+    and related methods instead of snapshots.
+
+    Snapshots will be maintained for backward compatibility with existing data,
+    but new snapshot creation should be avoided.
+    """
 
     date: date_type = Field(..., description="Date of the snapshot")
     total_value: Decimal = Field(..., description="Total portfolio value")
@@ -408,6 +421,22 @@ class Portfolio(BaseModel):
     def get_cash_balance(self, currency: Currency) -> Decimal:
         """Get current cash balance for a specific currency."""
         return self.cash_balances.get(currency, Decimal("0"))
+
+    def recalculate_positions(self) -> None:
+        """Recalculate all positions and cash balances from transactions.
+
+        This clears existing positions and cash balances, then replays all
+        transactions in chronological order to rebuild the current state.
+        Use after modifying or deleting transactions.
+        """
+        # Clear existing positions and cash balances
+        self.positions.clear()
+        self.cash_balances.clear()
+
+        # Sort transactions by timestamp and re-apply them
+        sorted_transactions = sorted(self.transactions, key=lambda t: t.timestamp)
+        for transaction in sorted_transactions:
+            self._update_position_from_transaction(transaction)
 
     class Config:
         use_enum_values = False

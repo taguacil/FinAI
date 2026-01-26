@@ -27,10 +27,12 @@ from .tools import (
     GetTransactionsTool,
     HypotheticalPositionTool,
     IngestPdfTool,
+    SetDataProviderSymbolTool,
     SetMarketPriceTool,
     SimulateWhatIfTool,
 )
 from .tools.market_data_tools import create_market_data_tools
+from .portfolio_tools import FetchAndUpdatePricesTool
 
 
 class AnalyticsAgent(BaseAgent):
@@ -65,6 +67,8 @@ You have FULL access to the MarketDataService for:
 - Batch price queries via get_batch_prices
 - Data freshness status via get_data_freshness
 - Forced data refresh via refresh_data
+- Fetch and update prices for specific instruments via fetch_and_update_prices
+- Set data provider symbol mapping via set_data_provider_symbol (use when portfolio symbol differs from data provider symbol, e.g., BTC vs BTC-USD)
 
 You also have READ-ONLY access to transaction data for context.
 
@@ -134,6 +138,8 @@ Remember: This is for educational purposes. Always recommend consulting with qua
             HypotheticalPositionTool(portfolio_manager),
             # Price management
             SetMarketPriceTool(portfolio_manager),
+            SetDataProviderSymbolTool(portfolio_manager),
+            FetchAndUpdatePricesTool(portfolio_manager, data_manager),
             # Market data tools
             GetCurrentPriceTool(data_manager),
             CheckMarketDataAvailabilityTool(data_manager),

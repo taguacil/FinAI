@@ -47,7 +47,9 @@ from src.agents.portfolio_tools import (
     DeleteTransactionTool,
     FetchAndUpdatePricesTool,
     GetCurrentPriceTool,
+    GetHistoricalInstrumentsTool,
     GetPortfolioMetricsTool,
+    GetPortfolioSnapshotTool,
     GetPortfolioSummaryTool,
     GetTransactionHistoryTool,
     GetTransactionsTool,
@@ -59,8 +61,10 @@ from src.agents.portfolio_tools import (
     ScenarioOptimizationTool,
     SearchCompanyTool,
     SearchInstrumentTool,
+    SetDataProviderSymbolTool,
     SetMarketPriceTool,
     SimulateWhatIfTool,
+    UpdateHistoricalMarketDataTool,
 )
 from src.agents.tools.market_data_tools import (
     GetBatchPricesTool,
@@ -82,7 +86,7 @@ PORTFOLIO_NAME = os.environ.get("PORTFOLIO_NAME", "")
 storage = FileBasedStorage(DATA_DIR)
 data_manager = DataProviderManager()
 market_data_service = MarketDataService(data_manager)
-portfolio_manager = PortfolioManager(storage, data_manager)
+portfolio_manager = PortfolioManager(storage, market_data_service, data_dir=DATA_DIR)
 metrics_calculator = FinancialMetricsCalculator(data_manager)
 
 # Load portfolio
@@ -104,6 +108,7 @@ _bulk_add_transactions = BulkAddTransactionsTool(portfolio_manager)
 _modify_transaction = ModifyTransactionTool(portfolio_manager)
 _delete_transaction = DeleteTransactionTool(portfolio_manager)
 _get_portfolio_summary = GetPortfolioSummaryTool(portfolio_manager, metrics_calculator)
+_get_portfolio_snapshot = GetPortfolioSnapshotTool(portfolio_manager)
 _get_transactions = GetTransactionsTool(portfolio_manager)
 _simulate_what_if = SimulateWhatIfTool(portfolio_manager)
 _advanced_what_if = AdvancedWhatIfTool(portfolio_manager)
@@ -118,6 +123,7 @@ _get_transaction_history = GetTransactionHistoryTool(portfolio_manager)
 _set_market_price = SetMarketPriceTool(portfolio_manager)
 _bulk_set_market_price = BulkSetMarketPriceTool(portfolio_manager)
 _fetch_and_update_prices = FetchAndUpdatePricesTool(portfolio_manager, data_manager)
+_set_data_provider_symbol = SetDataProviderSymbolTool(portfolio_manager)
 _calculator = CalculatorTool()
 _ingest_pdf = IngestPdfTool()
 _optimize_portfolio = OptimizePortfolioTool(portfolio_manager, data_manager)
@@ -127,6 +133,8 @@ _get_fx_rate = GetFXRateTool(market_data_service)
 _get_batch_prices = GetBatchPricesTool(market_data_service)
 _get_data_freshness = GetDataFreshnessTool(market_data_service)
 _refresh_data = RefreshDataTool(market_data_service, portfolio_manager)
+_get_historical_instruments = GetHistoricalInstrumentsTool(portfolio_manager)
+_update_historical_market_data = UpdateHistoricalMarketDataTool(portfolio_manager)
 
 # --- Create MCP server ---
 mcp = FastMCP("FinAI Portfolio")
@@ -301,6 +309,13 @@ def add_transaction(
     For DEPOSIT/WITHDRAWAL: specify price (the amount), currency, and date.
     For DIVIDEND: specify symbol, price (dividend amount), and date.
 
+    IMPORTANT - Bond Pricing:
+    For bonds, prices are typically quoted as percentage of par (e.g., 96.32% of face value).
+    You must convert to decimal form: enter 0.9632 (not 96.32).
+    The quantity should be the face value (nominal amount).
+    Market value = quantity (face value) × price (as decimal).
+    Example: Buying 50,000 face value bond at 96.32% → quantity=50000, price=0.9632
+
     Args:
         transaction_type: Type: buy, sell, dividend, deposit, withdrawal, fees
         price: Price per share (buy/sell) or total amount (deposit/withdrawal/dividend)
@@ -332,6 +347,13 @@ def bulk_add_transactions(transactions: list) -> str:
     """Add multiple transactions to the portfolio in a single call.
 
     More efficient than calling add_transaction multiple times.
+
+    IMPORTANT - Bond Pricing:
+    For bonds, prices are typically quoted as percentage of par (e.g., 96.32% of face value).
+    You must convert to decimal form: enter 0.9632 (not 96.32).
+    The quantity should be the face value (nominal amount).
+    Market value = quantity (face value) × price (as decimal).
+    Example: Buying 50,000 face value bond at 96.32% → quantity=50000, price=0.9632
 
     Args:
         transactions: List of transaction objects. Each transaction should have:
@@ -365,6 +387,10 @@ def modify_transaction(
     notes: Optional[str] = None,
 ) -> str:
     """Modify an existing transaction's details.
+
+    IMPORTANT - Bond Pricing:
+    For bonds, prices are typically quoted as percentage of par (e.g., 96.32% of face value).
+    You must convert to decimal form: enter 0.9632 (not 96.32).
 
     Args:
         transaction_id: The ID of the transaction to modify
@@ -448,9 +474,39 @@ def get_portfolio_summary(include_metrics: bool = True) -> str:
 
 
 @mcp.tool()
-def get_transactions() -> str:
-    """Get all transactions in the current portfolio."""
-    return _get_transactions._run()
+def get_portfolio_snapshot(target_date: str) -> str:
+    """Get portfolio positions, cash balances, and total value at a specific historical date.
+
+    Args:
+        target_date: Date to get snapshot for in YYYY-MM-DD format
+    """
+    return _get_portfolio_snapshot._run(target_date=target_date)
+
+
+@mcp.tool()
+def get_transactions(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    symbol: Optional[str] = None,
+    transaction_type: Optional[str] = None,
+    limit: Optional[int] = None,
+) -> str:
+    """Get transactions with optional filters.
+
+    Args:
+        start_date: Start date in YYYY-MM-DD format (inclusive)
+        end_date: End date in YYYY-MM-DD format (inclusive)
+        symbol: Filter by instrument symbol (e.g., AAPL)
+        transaction_type: Filter by type: buy, sell, dividend, deposit, withdrawal, fees
+        limit: Maximum number of transactions to return (most recent)
+    """
+    return _get_transactions._run(
+        start_date=start_date,
+        end_date=end_date,
+        symbol=symbol,
+        transaction_type=transaction_type,
+        limit=limit,
+    )
 
 
 @mcp.tool()
@@ -500,9 +556,17 @@ def set_market_price(
 
     Use when price lookup fails or to manually set a custom price.
 
+    IMPORTANT - Bond Pricing:
+    For bonds, prices are typically quoted as percentage of par (e.g., 96.32% of face value).
+    You must convert to decimal form: enter 0.9632 (not 96.32).
+    Market value = quantity (face value) × price (as decimal).
+    Example: 50,000 face value bond at 96.32% → enter price=0.9632 → value = 48,160
+
     Args:
         symbol: The instrument symbol
-        price: The price to set (required unless use_purchase_price is True)
+        price: The price to set (required unless use_purchase_price is True).
+               For bonds: use decimal (0.9632 for 96.32% of par).
+               For stocks/ETFs: use absolute price per share.
         date: Date for the price in YYYY-MM-DD format (defaults to today)
         use_purchase_price: If True, uses the position's average_cost as the market price
     """
@@ -515,16 +579,27 @@ def set_market_price(
 
 
 @mcp.tool()
-def bulk_set_market_price(symbol: str, prices: str) -> str:
+def bulk_set_market_price(prices: str, symbol: Optional[str] = None) -> str:
     """Set market prices for an instrument across multiple dates at once.
 
     Use for entering historical price data manually when market data isn't available.
 
+    IMPORTANT - Bond Pricing:
+    For bonds, prices are typically quoted as percentage of par (e.g., 96.32% of face value).
+    You must convert to decimal form: enter 0.9632 (not 96.32).
+    Market value = quantity (face value) × price (as decimal).
+    Example: 50,000 face value bond at 96.32% → price=0.9632 → value = 48,160
+
     Args:
         symbol: The instrument symbol (e.g., AAPL, CORP_BOND)
-        prices: Price data in one of two formats:
+        prices: Price data in one of these formats:
                 1. Simple: "2024-01-01:150.0,2024-01-02:152.5,2024-01-03:148.0"
                 2. JSON: '[{"date":"2024-01-01","price":150.0},{"date":"2024-01-02","price":152.5}]'
+                3. Multi-symbol JSON: '[{"symbol":"AAPL","date":"2024-01-01","price":150},{"symbol":"MSFT","date":"2024-01-01","price":350}]'
+                For bonds, use decimal prices (0.9632 for 96.32% of par).
+
+    Note: In multi-symbol mode, ISINs are automatically resolved to portfolio symbols
+    if the instrument has a matching ISIN stored (e.g., XS2472298335 -> GLENCORE_2028).
     """
     return _bulk_set_market_price._run(symbol=symbol, prices=prices)
 
@@ -536,7 +611,7 @@ def fetch_and_update_prices(
     end_date: str,
     provider_symbol: Optional[str] = None,
 ) -> str:
-    """Fetch historical prices from data provider and update portfolio snapshots.
+    """Fetch historical prices from data provider and update market data.
 
     Use this to sync portfolio with market prices. If the portfolio symbol differs
     from the data provider symbol, use provider_symbol to specify the lookup symbol.
@@ -554,6 +629,31 @@ def fetch_and_update_prices(
         start_date=start_date,
         end_date=end_date,
         provider_symbol=provider_symbol,
+    )
+
+
+@mcp.tool()
+def set_data_provider_symbol(
+    symbol: str,
+    data_provider_symbol: str,
+) -> str:
+    """Set the data provider symbol for a portfolio position.
+
+    Use this when the portfolio symbol differs from the symbol used by the data provider.
+    Once set, all future price lookups (Quick Refresh, Update Market Data) will use the
+    data provider symbol automatically.
+
+    Args:
+        symbol: Portfolio symbol (the symbol used in your portfolio)
+        data_provider_symbol: Symbol to use with the data provider (e.g., BTC-USD for Bitcoin)
+
+    Examples:
+        - Bitcoin: set_data_provider_symbol(symbol="BTC", data_provider_symbol="BTC-USD")
+        - Ethereum: set_data_provider_symbol(symbol="ETH", data_provider_symbol="ETH-USD")
+    """
+    return _set_data_provider_symbol._run(
+        symbol=symbol,
+        data_provider_symbol=data_provider_symbol,
     )
 
 
@@ -633,6 +733,46 @@ def refresh_data() -> str:
     return _refresh_data._run()
 
 
+@mcp.tool()
+def get_historical_instruments(start_date: str, end_date: str) -> str:
+    """List instruments that were held in a date range but are no longer in current positions.
+
+    Use cases:
+    - Find sold instruments that need market data updates
+    - See complete instrument history for a period
+    - Identify gaps in market data coverage
+
+    Args:
+        start_date: Start date in YYYY-MM-DD format
+        end_date: End date in YYYY-MM-DD format
+    """
+    return _get_historical_instruments._run(start_date=start_date, end_date=end_date)
+
+
+@mcp.tool()
+def update_historical_market_data(
+    start_date: str,
+    end_date: str,
+    include_historical: bool = True,
+) -> str:
+    """Update market data for all instruments (including sold ones) in a date range.
+
+    Unlike the regular update, this includes:
+    - Current positions
+    - Sold instruments from transaction history
+
+    Args:
+        start_date: Start date in YYYY-MM-DD format
+        end_date: End date in YYYY-MM-DD format
+        include_historical: Whether to include sold instruments (default True)
+    """
+    return _update_historical_market_data._run(
+        start_date=start_date,
+        end_date=end_date,
+        include_historical=include_historical,
+    )
+
+
 # =====================================================================
 # Scenario & Optimization Tools
 # =====================================================================
@@ -676,15 +816,17 @@ def advanced_what_if(
     """Run advanced what-if scenarios with Monte Carlo simulation.
 
     Args:
-        scenario_type: Scenario type (custom, bull, bear, crash)
-        projection_years: Years to project forward
-        monte_carlo_runs: Number of Monte Carlo simulation runs
-        modify_positions: Position modifications (format: "SYMBOL:new_qty,...")
-        add_positions: New positions to add (format: "SYMBOL:qty:price,...")
-        market_return: Expected annual market return
-        market_volatility: Expected annual market volatility
-        recurring_deposits: Monthly recurring deposit amount
-        stress_test: Whether to include stress testing
+        scenario_type: Scenario type (optimistic, likely, pessimistic, stress, custom)
+        projection_years: Years to project forward (0.5 to 10)
+        monte_carlo_runs: Number of Monte Carlo simulation runs (100-5000)
+        modify_positions: Position modifications, e.g. "AAPL:+50%,MSFT:-25%,GOOGL:=150"
+        add_positions: New positions to add. Formats:
+            - With price: "NVDA:100@$800,TSLA:50@$250"
+            - Auto-fetch price: "NVDA:100,TSLA:50" (will fetch current market prices)
+        market_return: Expected annual market return (decimal, e.g. 0.08 for 8%)
+        market_volatility: Expected annual market volatility (decimal, e.g. 0.20 for 20%)
+        recurring_deposits: Monthly recurring deposit amount in USD
+        stress_test: Whether to include stress testing conditions
     """
     return _advanced_what_if._run(
         scenario_type=scenario_type,
@@ -702,21 +844,29 @@ def advanced_what_if(
 @mcp.tool()
 def test_hypothetical_position(
     symbol: str,
-    quantity: float,
-    purchase_price: float,
+    quantity: float = 0,
+    purchase_price: float = 0,
     investment_amount: str = "",
     scenario: str = "likely",
     time_horizon: float = 1.0,
 ) -> str:
     """Test a hypothetical position to see projected outcomes before buying.
 
+    Analyzes the symbol and returns:
+    - Historical volatility (annualized) and risk level
+    - Historical annual return and 1-year price change
+    - Monte Carlo simulation projections under the selected scenario
+
     Args:
         symbol: Stock symbol to test
-        quantity: Number of shares
-        purchase_price: Price per share
-        investment_amount: Total investment amount (alternative to quantity)
+        quantity: Number of shares (use 0 if using investment_amount)
+        purchase_price: Price per share (0 to auto-fetch current market price)
+        investment_amount: Total investment amount (alternative to quantity), e.g. "$5000"
         scenario: Market scenario (optimistic, likely, pessimistic, stress)
-        time_horizon: Projection period in years
+        time_horizon: Projection period in years (0.5 to 5.0)
+
+    Example: test_hypothetical_position("AAPL", investment_amount="$5000") will
+    auto-fetch current AAPL price and calculate shares accordingly.
     """
     return _hypothetical_position._run(
         symbol=symbol,

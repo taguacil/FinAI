@@ -17,7 +17,11 @@ import streamlit as st
 from pypdf import PdfReader
 
 # Add src to path for imports
-sys.path.append(os.path.join(os.path.dirname(__file__), "..", ".."))
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.append(_PROJECT_ROOT)
+
+# Use absolute path for data directory to match MCP server
+_DATA_DIR = os.path.join(_PROJECT_ROOT, "data")
 
 from src.agents.llm_config import MODEL_REGISTRY, get_available_models
 from src.agents.portfolio_agent import PortfolioAgent
@@ -29,6 +33,7 @@ from src.portfolio.storage import FileBasedStorage
 from src.services.market_data_service import MarketDataService
 from src.utils.logging_config import setup_logging
 from src.utils.metrics import FinancialMetricsCalculator
+from src.ui.market_data_page import render_market_data_page
 
 
 class PortfolioTrackerUI:
@@ -55,14 +60,15 @@ class PortfolioTrackerUI:
             # Setup logging
             setup_logging(log_level="INFO", app_name="portfolio-tracker-ui")
 
-            storage = FileBasedStorage()
+            # Use absolute data directory to ensure consistency with MCP server
+            storage = FileBasedStorage(_DATA_DIR)
             data_provider = DataProviderManager()
 
             # Create MarketDataService wrapping the DataProviderManager
             market_data_service = MarketDataService(data_provider)
 
-            # Pass MarketDataService to PortfolioManager
-            portfolio_manager = PortfolioManager(storage, market_data_service)
+            # Pass MarketDataService to PortfolioManager with same data_dir
+            portfolio_manager = PortfolioManager(storage, market_data_service, data_dir=_DATA_DIR)
 
             # Metrics calculator uses the underlying DataProviderManager
             metrics_calculator = FinancialMetricsCalculator(data_provider)
@@ -119,8 +125,8 @@ class PortfolioTrackerUI:
         self.render_sidebar(portfolio_manager, market_data_service)
 
         # Main content tabs
-        tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
-            ["💬 AI Chat", "📊 Portfolio", "📈 Analytics", "⚖️ Optimize", "🔮 Scenarios", "⚙️ Settings"]
+        tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(
+            ["💬 AI Chat", "📊 Portfolio", "📈 Analytics", "⚖️ Optimize", "🔮 Scenarios", "🗄️ Market Data", "⚙️ Settings"]
         )
 
         with tab1:
@@ -139,6 +145,9 @@ class PortfolioTrackerUI:
             self.render_scenarios(portfolio_manager, metrics_calculator)
 
         with tab6:
+            render_market_data_page(_DATA_DIR)
+
+        with tab7:
             self.render_settings()
 
     def init_session_state(self):
@@ -245,13 +254,13 @@ class PortfolioTrackerUI:
             with st.sidebar.expander("⚠️ Delete Portfolio", expanded=False):
                 st.warning(
                     f"This will permanently delete **{portfolio.name}** and all associated data "
-                    "(transactions, snapshots, backups)."
+                    "(transactions, market data, backups)."
                 )
-                snapshot_count = portfolio_manager.storage.get_snapshot_count(portfolio.id)
+                market_data_symbols = len(portfolio_manager.market_data_store.get_symbols())
                 st.caption(
                     f"• {len(portfolio.transactions)} transactions\n"
                     f"• {len(portfolio.positions)} positions\n"
-                    f"• {snapshot_count} snapshots"
+                    f"• {market_data_symbols} symbols with market data"
                 )
                 confirm_name = st.text_input(
                     "Type portfolio name to confirm:",
@@ -287,6 +296,15 @@ class PortfolioTrackerUI:
                 st.sidebar.caption(f"💱 FX: ⚠️ {num_warnings} rate(s) unavailable")
             else:
                 st.sidebar.caption("💱 FX: ✅ All rates available")
+
+            # Cache clear button - forces reload of all data from database
+            st.sidebar.divider()
+            if st.sidebar.button("🔄 Reload Data", help="Clear cache and reload all data from database"):
+                # Clear the cached components to force fresh load
+                st.cache_resource.clear()
+                st.session_state.portfolio_loaded = False
+                st.session_state.selected_portfolio = portfolio.id  # Remember selection
+                st.rerun()
 
     def render_chat_interface(self, agent):
         """Render the AI chat interface."""
@@ -644,6 +662,11 @@ class PortfolioTrackerUI:
         """Render portfolio overview with transactions."""
         st.header("📊 Portfolio Overview")
 
+        # Clear market data cache to pick up any external updates (e.g., from MCP server)
+        portfolio_manager.market_data_store.clear_cache()
+        # Also invalidate portfolio history cache to recalculate values with fresh prices
+        portfolio_manager._invalidate_portfolio_history()
+
         # Show FX rate warnings if any
         self._render_fx_warnings()
 
@@ -657,56 +680,47 @@ class PortfolioTrackerUI:
         # Portfolio summary
         portfolio = portfolio_manager.current_portfolio
 
-        # Use snapshot as single source of truth for pricing consistency with analytics
-        total_value = portfolio_manager.get_portfolio_value(use_snapshot=True)
-        positions = portfolio_manager.get_positions_from_snapshot()
+        # Use PortfolioHistory for on-demand value calculation (single source of truth)
+        total_value = portfolio_manager.get_portfolio_value()
+        positions = portfolio_manager.get_positions_with_prices()
 
         # Initialize variables (will be populated if positions exist)
         enriched = []
         base_currency = portfolio.base_currency
         start_of_year = date(date.today().year, 1, 1)
 
-        # Prepare YTD reference prices from local snapshots (no network)
+        # Prepare YTD reference prices from MarketDataStore (no network)
         ytd_start = date(date.today().year, 1, 1)
+        today = date.today()
         try:
-            ytd_snaps = portfolio_manager.storage.load_snapshots(
-                portfolio.id, ytd_start, date.today()
-            )
-            # Reference price: first available snapshot in YTD where the symbol appears with a price
+            # Get prices from centralized MarketDataStore
+            market_data_store = portfolio_manager.market_data_store
+            symbols = [pos.get("symbol") for pos in positions if pos.get("symbol")]
+
             ref_prices_by_symbol: Dict[str, Decimal] = {}
-            for snap in ytd_snaps:
-                for sym, snap_pos in snap.positions.items():
-                    if (
-                        sym not in ref_prices_by_symbol
-                        and snap_pos.current_price is not None
-                    ):
-                        ref_prices_by_symbol[sym] = snap_pos.current_price
-
-            # Current price: last available snapshot (scan from most recent backwards to fill gaps)
             curr_prices_by_symbol: Dict[str, Decimal] = {}
-            for snap in reversed(ytd_snaps):
-                for sym, snap_pos in snap.positions.items():
-                    if (
-                        sym not in curr_prices_by_symbol
-                        and snap_pos.current_price is not None
-                    ):
-                        curr_prices_by_symbol[sym] = snap_pos.current_price
 
-            # Fallback to latest snapshot overall if YTD list is empty
-            if not ytd_snaps:
-                latest_snap = portfolio_manager.storage.get_latest_snapshot(
-                    portfolio.id
-                )
-                if latest_snap:
-                    for sym, snap_pos in latest_snap.positions.items():
-                        if snap_pos.current_price is not None:
-                            curr_prices_by_symbol[sym] = snap_pos.current_price
+            for sym in symbols:
+                if not sym or sym == "CASH":
+                    continue
+
+                # Get YTD start price (reference)
+                ref_price = market_data_store.get_price_with_fallback(sym, ytd_start, fallback_days=30)
+                if ref_price:
+                    ref_prices_by_symbol[sym] = ref_price
+
+                # Get current price
+                curr_price = market_data_store.get_price_with_fallback(sym, today, fallback_days=7)
+                if curr_price:
+                    curr_prices_by_symbol[sym] = curr_price
+
         except Exception:
             ref_prices_by_symbol = {}
             curr_prices_by_symbol = {}
 
-        # Enable FX conversion for accurate base-currency views
-        fetch_live = True
+        # Disable automatic FX fetching - use cached rates only
+        # FX rates are fetched when user clicks "Update Market Data"
+        fetch_live = False
 
         # Check data freshness
         positions_with_current_prices = [
@@ -742,9 +756,13 @@ class PortfolioTrackerUI:
         # Data status row
         status_col1, status_col2 = st.columns(2)
         with status_col1:
-            latest_snapshot = portfolio_manager.storage.get_latest_snapshot(portfolio.id)
-            if latest_snapshot:
-                st.caption(f"🗓️ Latest snapshot: {latest_snapshot.date.isoformat()}")
+            # Show market data store statistics
+            market_data_store = portfolio_manager.market_data_store
+            price_count = market_data_store.get_price_count()
+            if price_count > 0:
+                st.caption(f"🗓️ Market data: {price_count} price records")
+            else:
+                st.caption("🗓️ Market data: No data yet")
 
         with status_col2:
             if market_data_service is not None:
@@ -766,17 +784,18 @@ class PortfolioTrackerUI:
             )
 
         with col2:
-            if st.button("📈 Update Snapshots", help="Fetch prices and create/update historical snapshots", type="primary"):
-                with st.spinner(f"Updating snapshots for last {days_to_update} days..."):
+            if st.button("📈 Update Market Data", help="Fetch historical prices and store in MarketDataStore", type="primary"):
+                with st.spinner(f"Updating market data for last {days_to_update} days..."):
                     try:
                         end_date = date.today()
                         start_date = end_date - timedelta(days=days_to_update)
-                        logging.info(f"Updating snapshots from {start_date} to {end_date}")
-                        refreshed = portfolio_manager.create_snapshots_for_range(start_date, end_date, save=True)
+                        logging.info(f"Updating market data from {start_date} to {end_date}")
+                        results = portfolio_manager.update_market_data(start_date, end_date)
                         # Update freshness tracking
                         if market_data_service and portfolio_manager.current_portfolio:
                             market_data_service.refresh_all(portfolio_manager.current_portfolio)
-                        st.success(f"✅ Updated {len(refreshed)} snapshots")
+                        successful = sum(1 for v in results.values() if v)
+                        st.success(f"✅ Updated market data for {successful}/{len(results)} symbols")
                         st.rerun()
                     except Exception as e:
                         import traceback
@@ -785,18 +804,19 @@ class PortfolioTrackerUI:
                         st.error(f"❌ Failed to update: {str(e)}")
 
         with col3:
-            if st.button("💰 Quick Refresh", help="Update current prices and today's snapshot"):
+            if st.button("💰 Quick Refresh", help="Update current prices for all positions"):
                 with st.spinner("Refreshing prices..."):
-                    # Update snapshot as single source of truth
-                    snapshot = portfolio_manager.refresh_today_snapshot()
-                    if snapshot:
-                        st.success(f"✅ Updated snapshot with {len(snapshot.positions)} positions")
+                    # Update current prices and store in MarketDataStore
+                    results = portfolio_manager.update_current_prices()
+                    if results:
+                        successful = sum(1 for v in results.values() if v)
+                        st.success(f"✅ Updated prices for {successful}/{len(results)} positions")
                     else:
-                        st.warning("⚠️ No portfolio loaded")
+                        st.warning("⚠️ No portfolio loaded or no positions")
                     st.rerun()
 
         with col4:
-            st.caption("💡 **Snapshots**: Updates historical data for analytics. **Quick Refresh**: Updates today's snapshot with current prices.")
+            st.caption("💡 **Market Data**: Fetches historical prices for analytics. **Quick Refresh**: Updates today's prices only.")
 
         # Key metrics - styled container
         st.markdown("### 📈 Portfolio Summary")
@@ -822,7 +842,7 @@ class PortfolioTrackerUI:
                         Decimal(str(amt)),
                         curr_code,
                         portfolio.base_currency.value,
-                        allow_fetch=True,
+                        allow_fetch=fetch_live,
                     )
             st.metric("💵 Cash (base)", f"${cash_total_base:,.2f}")
 
@@ -840,18 +860,16 @@ class PortfolioTrackerUI:
 
         # YTD performance (time-weighted): remove external cash flows
         try:
-            portfolio_id = portfolio_manager.current_portfolio.id
             today = date.today()
-            ytd_snaps = portfolio_manager.storage.load_snapshots(
-                portfolio_id, start_of_year, today
-            )
+            # Use PortfolioHistory for YTD calculation
+            ytd_history_df = portfolio_manager.get_portfolio_history(start_of_year, today)
 
-            if len(ytd_snaps) >= 2:
+            if not ytd_history_df.empty and len(ytd_history_df) >= 2:
                 # Build external cash flows by day (respect live fetch toggle)
                 if fetch_live:
                     flows_dec = portfolio_manager.get_external_cash_flows_by_day(
                         start_of_year, today
-                )
+                    )
                 else:
                     # Base-only approximation without FX calls
                     flows_dec = {}
@@ -873,9 +891,9 @@ class PortfolioTrackerUI:
 
                 flows_float = {d: float(v) for d, v in flows_dec.items()}
 
-                # Compute TWR using the calculator's return function
+                # Compute TWR using the calculator's DataFrame-based return function
                 calc = FinancialMetricsCalculator(portfolio_manager.data_manager)
-                daily_returns = calc.calculate_returns(ytd_snaps, flows_float)
+                daily_returns = calc.calculate_returns_from_df(ytd_history_df, "total_value", flows_float)
 
                 if daily_returns:
                     # Geometric aggregation for period return
@@ -931,7 +949,7 @@ class PortfolioTrackerUI:
                     mv,
                     currency_code,
                     base_currency.value,
-                    allow_fetch=True,
+                    allow_fetch=fetch_live,
                 )
 
                 # Convert unrealized PnL to base currency
@@ -941,20 +959,20 @@ class PortfolioTrackerUI:
                     unreal_val_native,
                     currency_code,
                     base_currency.value,
-                    allow_fetch=True,
+                    allow_fetch=fetch_live,
                 )
 
                 # Category classification
                 category = self._classify_position(pos, instrument)
 
-                # YTD market-only (local snapshots): compare current price to first YTD snapshot price
+                # YTD market-only: compare current price to first YTD price from market data
                 ytd_market_pnl_native = None
                 ytd_market_pct = None
                 try:
                     if symbol in ref_prices_by_symbol:
                         ref_price = Decimal(str(ref_prices_by_symbol[symbol]))
                         qty_dec = Decimal(str(pos.get("quantity") or 0))
-                        # Prefer latest snapshot price if available; fallback to UI position price
+                        # Prefer latest market data price if available; fallback to UI position price
                         curr_px_val = (
                             curr_prices_by_symbol.get(symbol)
                             if symbol in curr_prices_by_symbol
@@ -1045,7 +1063,7 @@ class PortfolioTrackerUI:
                     for curr, amt in portfolio.cash_balances.items():
                         curr_code = getattr(curr, "value", str(curr))
                         # FX summary for cash (compat with older cached manager)
-                        fx_summary = self._get_cash_fx_summary(portfolio_manager).get(
+                        fx_summary = self._get_cash_fx_summary(portfolio_manager, allow_fetch=fetch_live).get(
                             curr
                         )
                         amt_base = self._convert_to_base(
@@ -1053,7 +1071,7 @@ class PortfolioTrackerUI:
                             Decimal(str(amt)),
                             curr_code,
                             base_currency.value,
-                            allow_fetch=True,
+                            allow_fetch=fetch_live,
                         )
                         # Compute FX P&L percent if base cost available (non-base currency only)
                         is_base_cur = curr_code == base_currency.value
@@ -1290,22 +1308,33 @@ class PortfolioTrackerUI:
             return Decimal("0")
         if not from_currency_code or from_currency_code == base_currency_code:
             return Decimal(str(amount))
-        if not allow_fetch:
-            # Avoid network calls; return native amount (caller decides how to handle)
-            return Decimal(str(amount))
-        try:
-            from src.portfolio.models import Currency
 
-            # Try real-time FX first
-            rate = portfolio_manager.data_manager.get_exchange_rate(
-                Currency(from_currency_code), Currency(base_currency_code)
-            )
+        from src.portfolio.models import Currency
+
+        try:
+            from_currency = Currency(from_currency_code)
+            to_currency = Currency(base_currency_code)
+
+            if not allow_fetch:
+                # Only use cached FX rates - no network calls
+                rate = portfolio_manager.data_manager.fx_cache.get_current_rate(from_currency, to_currency)
+                if not rate:
+                    rate = portfolio_manager.data_manager.fx_cache.get_rate(
+                        from_currency, to_currency, date.today()
+                    )
+                if rate:
+                    return Decimal(str(amount)) * rate
+                # No cached rate available - return unconverted
+                return Decimal(str(amount))
+
+            # allow_fetch=True: Try real-time FX first
+            rate = portfolio_manager.data_manager.get_exchange_rate(from_currency, to_currency)
             if rate:
                 return Decimal(str(amount)) * rate
 
             # Fallback to historical FX for today (handles cases where live quote is missing)
             hist_rate = portfolio_manager.data_manager.get_historical_fx_rate_on(
-                date.today(), Currency(from_currency_code), Currency(base_currency_code)
+                date.today(), from_currency, to_currency
             )
             if hist_rate:
                 return Decimal(str(amount)) * hist_rate
@@ -1313,136 +1342,7 @@ class PortfolioTrackerUI:
             pass
         return Decimal(str(amount))
 
-    def _convert_snapshots_to_currency(
-        self, snapshots, target_currency_code: str, portfolio_manager
-    ):
-        """Convert portfolio snapshots to a different currency."""
-        if not snapshots:
-            return snapshots
-
-        from src.portfolio.models import Currency, PortfolioSnapshot
-
-        converted_snapshots = []
-
-        for snapshot in snapshots:
-            # Get the base currency of the snapshot
-            base_currency_code = (
-                snapshot.base_currency.value
-                if hasattr(snapshot.base_currency, "value")
-                else str(snapshot.base_currency)
-            )
-
-            # Skip conversion if currencies are the same
-            if base_currency_code == target_currency_code:
-                converted_snapshots.append(snapshot)
-                continue
-
-            # Get exchange rate for this date
-            try:
-                from_currency = Currency(base_currency_code)
-                to_currency = Currency(target_currency_code)
-
-                # Try to get historical rate for the snapshot date
-                rate = portfolio_manager.data_manager.get_historical_fx_rate_on(
-                    snapshot.date, from_currency, to_currency
-                )
-
-                # Fallback to current rate if historical rate not available
-                if not rate:
-                    rate = portfolio_manager.data_manager.get_exchange_rate(
-                        from_currency, to_currency
-                    )
-
-                # Default to 1.0 if no rate available - THIS IS A PROBLEM
-                if not rate:
-                    rate = Decimal("1.0")
-                    logging.warning(
-                        f"FX rate unavailable for {from_currency}->{to_currency} on {snapshot.date}, "
-                        f"using 1.0 fallback - snapshot values may be inaccurate"
-                    )
-                    # Track fallback for UI warning
-                    if "fx_fallback_warnings" not in st.session_state:
-                        st.session_state.fx_fallback_warnings = []
-                    warning_msg = f"{from_currency.value}/{to_currency.value} on {snapshot.date}"
-                    if warning_msg not in st.session_state.fx_fallback_warnings:
-                        st.session_state.fx_fallback_warnings.append(warning_msg)
-
-                # Convert all monetary values
-                # Use model_copy to avoid Pydantic validation issues with existing Position objects
-                converted_snapshot = snapshot.model_copy(update={
-                    'total_value': snapshot.total_value * rate,
-                    'cash_balance': snapshot.cash_balance * rate,
-                    'positions_value': snapshot.positions_value * rate,
-                    'base_currency': Currency(target_currency_code),
-                    'cash_balances': {Currency(target_currency_code): snapshot.cash_balance * rate},
-                    'total_cost_basis': snapshot.total_cost_basis * rate,
-                    'total_unrealized_pnl': snapshot.total_unrealized_pnl * rate,
-                    # positions and total_unrealized_pnl_percent stay the same
-                })
-
-                converted_snapshots.append(converted_snapshot)
-
-            except Exception as e:
-                # If conversion fails, use original snapshot
-                st.warning(f"Failed to convert snapshot for {snapshot.date}: {e}")
-                converted_snapshots.append(snapshot)
-
-        return converted_snapshots
-
-    def _convert_cash_flows_to_currency(
-        self, cash_flows: dict, from_currency_code: str, target_currency_code: str, portfolio_manager
-    ):
-        """Convert cash flows from one currency to another."""
-        if from_currency_code == target_currency_code:
-            return cash_flows
-
-        if not cash_flows:
-            return cash_flows
-
-        from src.portfolio.models import Currency
-
-        converted_cash_flows = {}
-
-        for flow_date, flow_amount in cash_flows.items():
-            try:
-                from_currency = Currency(from_currency_code)
-                to_currency = Currency(target_currency_code)
-
-                # Get exchange rate for the cash flow date
-                rate = portfolio_manager.data_manager.get_historical_fx_rate_on(
-                    flow_date, from_currency, to_currency
-                )
-
-                # Fallback to current rate if historical rate not available
-                if not rate:
-                    rate = portfolio_manager.data_manager.get_exchange_rate(
-                        from_currency, to_currency
-                    )
-
-                # Default to 1.0 if no rate available - THIS IS A PROBLEM
-                if not rate:
-                    rate = Decimal("1.0")
-                    logging.warning(
-                        f"FX rate unavailable for {from_currency}->{to_currency} on {flow_date}, "
-                        f"using 1.0 fallback - cash flow values may be inaccurate"
-                    )
-                    # Track fallback for UI warning
-                    if "fx_fallback_warnings" not in st.session_state:
-                        st.session_state.fx_fallback_warnings = []
-                    warning_msg = f"{from_currency.value}/{to_currency.value} on {flow_date}"
-                    if warning_msg not in st.session_state.fx_fallback_warnings:
-                        st.session_state.fx_fallback_warnings.append(warning_msg)
-
-                converted_cash_flows[flow_date] = flow_amount * float(rate)
-
-            except Exception as e:
-                # If conversion fails, use original amount
-                st.warning(f"Failed to convert cash flow for {flow_date}: {e}")
-                converted_cash_flows[flow_date] = flow_amount
-
-        return converted_cash_flows
-
-    def _get_cash_fx_summary(self, portfolio_manager) -> Dict:
+    def _get_cash_fx_summary(self, portfolio_manager, allow_fetch: bool = False) -> Dict:
         """Safely get cash FX summary even if the manager instance is from an older cache.
 
         Tries PortfolioManager.get_cash_fx_summary(); if missing, computes locally.
@@ -1480,12 +1380,19 @@ class PortfolioTrackerUI:
             if cur == base:
                 fx = Decimal("1")
             else:
-                fx = (
-                    portfolio_manager.data_manager.get_historical_fx_rate_on(
-                        txn.timestamp.date(), cur, base
+                fx = None
+                if allow_fetch:
+                    fx = (
+                        portfolio_manager.data_manager.get_historical_fx_rate_on(
+                            txn.timestamp.date(), cur, base
+                        )
+                        or portfolio_manager.data_manager.get_exchange_rate(cur, base)
                     )
-                    or portfolio_manager.data_manager.get_exchange_rate(cur, base)
-                )
+                else:
+                    # Only use cached FX rates
+                    fx = portfolio_manager.data_manager.fx_cache.get_rate(
+                        cur, base, txn.timestamp.date()
+                    )
                 if not fx:
                     fx = Decimal("1")
                     logging.warning(
@@ -1519,12 +1426,22 @@ class PortfolioTrackerUI:
             if cur == base:
                 rate = Decimal("1")
             else:
-                rate = (
-                    portfolio_manager.data_manager.get_exchange_rate(cur, base)
-                    or portfolio_manager.data_manager.get_historical_fx_rate_on(
-                        date.today(), cur, base
+                rate = None
+                if allow_fetch:
+                    rate = (
+                        portfolio_manager.data_manager.get_exchange_rate(cur, base)
+                        or portfolio_manager.data_manager.get_historical_fx_rate_on(
+                            date.today(), cur, base
+                        )
                     )
-                )
+                else:
+                    # Only use cached FX rates - try current rate from cache
+                    rate = portfolio_manager.data_manager.fx_cache.get_current_rate(cur, base)
+                    if not rate:
+                        # Fall back to most recent cached rate
+                        rate = portfolio_manager.data_manager.fx_cache.get_rate(
+                            cur, base, date.today()
+                        )
                 if not rate:
                     rate = Decimal("1")
                     logging.warning(
@@ -1733,6 +1650,12 @@ class PortfolioTrackerUI:
         st.header("📈 Portfolio Analytics")
         st.caption("Historical performance analysis and risk metrics. See **Portfolio** tab for current positions and values.")
 
+        # Clear market data cache to pick up any external updates (e.g., from MCP server)
+        # This ensures fresh data is loaded from SQLite on each page view
+        portfolio_manager.market_data_store.clear_cache()
+        # Also invalidate portfolio history cache to recalculate values with fresh prices
+        portfolio_manager._invalidate_portfolio_history()
+
         # Show FX rate warnings if any
         self._render_fx_warnings()
 
@@ -1785,30 +1708,25 @@ class PortfolioTrackerUI:
         if start_date > end_date:
             st.error("Start date must be on or before end date.")
             return
-        snapshots = portfolio_manager.storage.load_snapshots(
-            portfolio_manager.current_portfolio.id, start_date, end_date
-        )
 
-        if len(snapshots) < 2:
+        # Get data from PortfolioHistory (new approach)
+        history_df = portfolio_manager.get_portfolio_history(start_date, end_date)
+
+        if history_df.empty or len(history_df) < 2:
             st.warning(
-                "Insufficient data for selected period. Please add more historical data or create snapshots."
+                "Insufficient data for selected period. Click 'Update Market Data' in the Portfolio tab to fetch historical prices."
             )
             return
 
-        # Show snapshot data freshness
-        if snapshots:
-            latest_snapshot_date = max(snapshot.date for snapshot in snapshots)
-            days_since_latest = (date.today() - latest_snapshot_date).days
-            if days_since_latest > 1:
-                st.warning(
-                    f"⚠️ Latest snapshot is {days_since_latest} days old. Use 'Create Snapshots Since Last' to update."
-                )
-            else:
-                st.success(
-                    f"✅ Latest snapshot: {latest_snapshot_date.strftime('%Y-%m-%d')}"
-                )
+        # Show data freshness
+        market_data_store = portfolio_manager.market_data_store
+        price_count = market_data_store.get_price_count()
+        if price_count > 0:
+            st.success(f"✅ Market data: {price_count} price records available")
+        else:
+            st.warning("⚠️ No market data available. Use 'Update Market Data' to fetch prices.")
 
-        # Calculate metrics using proper time-weighted methods from metrics calculator
+        # Calculate metrics using DataFrame-based methods from metrics calculator
         with st.spinner("Calculating time-weighted metrics..."):
             # Get external cash flows for the period
             external_cash_flows = portfolio_manager.get_external_cash_flows_by_day(
@@ -1818,47 +1736,37 @@ class PortfolioTrackerUI:
             # Convert cash flows to float for metrics calculator
             cash_flows_float = {d: float(v) for d, v in external_cash_flows.items()}
 
-            # Calculate time-weighted returns using the metrics calculator
-            portfolio_returns_twr = metrics_calculator.calculate_time_weighted_return(
-                snapshots, cash_flows_float
+            # Calculate returns using DataFrame
+            portfolio_returns_twr = metrics_calculator.calculate_returns_from_df(
+                history_df, "total_value", cash_flows_float
             )
 
             if not portfolio_returns_twr:
-                # Check if this is due to portfolio starting from zero
-                nonzero_snapshots = [s for s in snapshots if float(s.total_value) > 0]
-                if len(nonzero_snapshots) < 2:
-                    st.warning("⚠️ Cannot calculate time-weighted returns: Portfolio needs at least 2 snapshots with positive values.")
+                # Check if portfolio has value
+                has_positive_values = (history_df["total_value"] > 0).sum() >= 2
+                if not has_positive_values:
+                    st.warning("⚠️ Cannot calculate returns: Portfolio needs at least 2 days with positive values.")
                     st.info("💡 This typically happens when:")
-                    st.info("   • Portfolio is just starting (only recent snapshots have value)")
-                    st.info("   • Not enough historical data has been captured")
+                    st.info("   • Portfolio is just starting")
+                    st.info("   • Not enough market data has been fetched")
                     st.info("   • Portfolio values are zero or negative")
 
-                    # Show snapshot values for context
-                    st.write("**Snapshot values:**")
-                    for i, snapshot in enumerate(snapshots[:5]):  # Show first 5 snapshots
-                        st.write(f"  {snapshot.date}: ${float(snapshot.total_value):,.2f}")
-                    if len(snapshots) > 5:
-                        st.write(f"  ... and {len(snapshots) - 5} more snapshots")
+                    # Show values for context
+                    st.write("**Portfolio values:**")
+                    for idx in history_df.index[:5]:
+                        val = history_df.loc[idx, "total_value"]
+                        date_str = idx.strftime('%Y-%m-%d') if hasattr(idx, 'strftime') else str(idx)
+                        st.write(f"  {date_str}: ${float(val):,.2f}")
+                    if len(history_df) > 5:
+                        st.write(f"  ... and {len(history_df) - 5} more days")
                 else:
-                    st.error(f"Could not calculate time-weighted returns for technical reasons.")
-                    st.error(f"Snapshots: {len(snapshots)}, Date range: {snapshots[0].date} to {snapshots[-1].date}")
-                    st.error(f"Cash flows: {len(cash_flows_float)} entries")
+                    st.error("Could not calculate time-weighted returns.")
 
                 return
 
-            # Convert snapshots to display currency for accurate metrics
-            display_currency_snapshots = self._convert_snapshots_to_currency(
-                snapshots, display_currency_code, portfolio_manager
-            )
-
-            # Convert cash flows to display currency
-            display_currency_cash_flows = self._convert_cash_flows_to_currency(
-                cash_flows_float, snapshots[0].base_currency.value, display_currency_code, portfolio_manager
-            )
-
-            # Calculate comprehensive metrics using the metrics calculator
-            comprehensive_metrics = metrics_calculator.calculate_portfolio_metrics(
-                display_currency_snapshots, benchmark, display_currency_cash_flows
+            # Calculate comprehensive metrics using DataFrame-based method
+            comprehensive_metrics = metrics_calculator.calculate_metrics_from_df(
+                history_df, "total_value", benchmark, cash_flows_float
             )
 
             if "error" in comprehensive_metrics:
@@ -1867,40 +1775,22 @@ class PortfolioTrackerUI:
 
             # Extract key metrics
             metrics = {
-                "total_return_twr": comprehensive_metrics.get(
-                    "total_return", 0.0
-                ),  # Fixed: now uses actual total return
-                "annualized_return_twr": comprehensive_metrics.get(
-                    "annualized_return", 0.0
-                ),  # Fixed: now uses actual annualized return
-                "time_weighted_annualized_return": comprehensive_metrics.get(
-                    "time_weighted_annualized_return", 0.0
-                ),
-                "modified_dietz_return": comprehensive_metrics.get(
-                    "modified_dietz_return", 0.0
-                ),
+                "total_return_twr": comprehensive_metrics.get("total_return", 0.0),
+                "annualized_return_twr": comprehensive_metrics.get("annualized_return", 0.0),
                 "volatility": comprehensive_metrics.get("volatility", 0.0),
                 "sharpe_ratio": comprehensive_metrics.get("sharpe_ratio", 0.0),
                 "sortino_ratio": comprehensive_metrics.get("sortino_ratio", 0.0),
                 "max_drawdown": comprehensive_metrics.get("max_drawdown", 0.0),
-                "max_drawdown_duration": comprehensive_metrics.get(
-                    "max_drawdown_duration", 0
-                ),
+                "max_drawdown_duration": comprehensive_metrics.get("max_drawdown_duration", 0),
                 "var_5pct": comprehensive_metrics.get("var_5pct", 0.0),
                 "cvar_5pct": comprehensive_metrics.get("cvar_5pct", 0.0),
                 "calmar_ratio": comprehensive_metrics.get("calmar_ratio", 0.0),
                 "beta": comprehensive_metrics.get("beta", 0.0),
                 "alpha": comprehensive_metrics.get("alpha", 0.0),
-                "information_ratio": comprehensive_metrics.get(
-                    "information_ratio", 0.0
-                ),
+                "information_ratio": comprehensive_metrics.get("information_ratio", 0.0),
                 "benchmark_return": comprehensive_metrics.get("benchmark_return", 0.0),
-                "benchmark_volatility": comprehensive_metrics.get(
-                    "benchmark_volatility", 0.0
-                ),
-                "benchmark_available": comprehensive_metrics.get(
-                    "benchmark_available", False
-                ),
+                "benchmark_volatility": comprehensive_metrics.get("benchmark_volatility", 0.0),
+                "benchmark_available": comprehensive_metrics.get("benchmark_available", False),
             }
 
         # Display unified metrics with descriptions
@@ -1922,28 +1812,19 @@ class PortfolioTrackerUI:
                 ytd_start = date(date.today().year, 1, 1)
                 if end_date < ytd_start:
                     ytd_start = end_date
-                ytd_snaps = portfolio_manager.storage.load_snapshots(
-                    portfolio_manager.current_portfolio.id, ytd_start, end_date
-                )
 
-                if len(ytd_snaps) >= 2:
-                    # Convert YTD snapshots to display currency for accurate YTD performance
-                    ytd_display_currency_snapshots = self._convert_snapshots_to_currency(
-                        ytd_snaps, display_currency_code, portfolio_manager
-                    )
+                # Get YTD data from PortfolioHistory
+                ytd_df = portfolio_manager.get_portfolio_history(ytd_start, end_date)
 
+                if not ytd_df.empty and len(ytd_df) >= 2:
                     ytd_flows = portfolio_manager.get_external_cash_flows_by_day(
                         ytd_start, end_date
                     )
                     ytd_flows_f = {d: float(v) for d, v in ytd_flows.items()}
 
-                    # Convert YTD cash flows to display currency
-                    ytd_display_currency_flows = self._convert_cash_flows_to_currency(
-                        ytd_flows_f, ytd_snaps[0].base_currency.value, display_currency_code, portfolio_manager
-                    )
-
-                    daily_returns = metrics_calculator.calculate_time_weighted_return(
-                        ytd_display_currency_snapshots, ytd_display_currency_flows
+                    # Calculate YTD returns using DataFrame
+                    daily_returns = metrics_calculator.calculate_returns_from_df(
+                        ytd_df, "total_value", ytd_flows_f
                     )
 
                     if daily_returns:
@@ -2034,26 +1915,18 @@ class PortfolioTrackerUI:
             st.markdown("**Understanding Different Return Calculation Methods**")
 
             try:
-                                # Calculate MWR using IRR (Internal Rate of Return) for accurate money-weighted return
-                # IRR expects deposits as negative values (investor outflows)
-                irr_cash_flows = {d: -v for d, v in cash_flows_float.items()} if cash_flows_float else {}
-                irr_annual = metrics_calculator.calculate_internal_rate_of_return(
-                    snapshots, irr_cash_flows
-                )
+                # Calculate simple return (MWR approximation)
+                first_value = float(history_df["total_value"].iloc[0])
+                last_value = float(history_df["total_value"].iloc[-1])
+                total_cash_flows = sum(cash_flows_float.values()) if cash_flows_float else 0.0
 
-                # Convert annual IRR to period return for comparison with TWR
-                start_date_calc = snapshots[0].date
-                end_date_calc = snapshots[-1].date
-                days = (end_date_calc - start_date_calc).days
-                years = days / 365.25
-
-                if years > 0 and irr_annual != 0:
-                    # Convert annual IRR to period return: (1 + annual_irr)^years - 1
-                    mwr_period_pct = ((1 + irr_annual) ** years - 1) * 100.0
+                # Simple MWR: (End - Start - Cash Flows) / (Start + weighted cash flows)
+                if first_value > 0:
+                    mwr_period_pct = ((last_value - first_value - total_cash_flows) / first_value) * 100.0
                 else:
                     mwr_period_pct = 0.0
 
-                # Use the same TWR calculation as YTD (total return for period, not annualized)
+                # Use the same TWR calculation (total return for period)
                 twr_period_pct = metrics.get('total_return_twr', 0) * 100
 
                 col1, col2, col3 = st.columns(3)
@@ -2087,25 +1960,26 @@ class PortfolioTrackerUI:
         # Use benchmark prices from metrics calculation (avoids duplicate fetch)
         bench_map: Dict[date, float] = comprehensive_metrics.get("benchmark_prices", {})
 
-        # Align benchmark prices to snapshot dates with forward-fill
+        # Align benchmark prices to history dates with forward-fill
         bench_prices_aligned: List[Optional[float]] = []
         last_px: Optional[float] = None
-        for s in snapshots:
-            px = bench_map.get(s.date, last_px)
+        for idx in history_df.index:
+            day = idx.date() if hasattr(idx, 'date') else idx
+            px = bench_map.get(day, last_px)
             bench_prices_aligned.append(px)
             if px is not None:
                 last_px = px
 
-        # Portfolio value chart with category overlays and benchmark in selected currency
-        self.plot_portfolio_and_categories(
-            display_currency_snapshots,  # Use converted snapshots for charts
+        # Portfolio value chart using PortfolioHistory DataFrame
+        self.plot_portfolio_value_chart(
+            history_df,
             display_currency_code,
             portfolio_manager,
             start_date,
             end_date,
             benchmark_symbol=benchmark,
             benchmark_prices_aligned=bench_prices_aligned,
-            portfolio_returns_twr=portfolio_returns_twr,  # Pass TWR returns for plotting
+            portfolio_returns_twr=portfolio_returns_twr,
         )
 
 
@@ -2144,15 +2018,15 @@ class PortfolioTrackerUI:
             # Convert returns to percentages for better readability
             daily_returns_pct = [r * 100 for r in portfolio_returns_twr]
 
-            # Create dates list from snapshots (skip first date since returns start from second snapshot)
-            dates = [s.date for s in snapshots]
+            # Create dates list from history_df (skip first date since returns start from second day)
+            dates = list(history_df.index)
 
             fig3 = go.Figure()
             fig3.add_trace(
                 go.Scatter(
                     x=dates[
                         1:
-                    ],  # Skip first date since returns start from second snapshot
+                    ],  # Skip first date since returns start from second day
                     y=daily_returns_pct,
                     mode="lines+markers",
                     name="Daily TWR",
@@ -2193,128 +2067,29 @@ class PortfolioTrackerUI:
                     f"{sum(1 for r in daily_returns_pct if r > 0)}/{len(daily_returns_pct)}",
                 )
 
-    def plot_portfolio_and_categories(
+    def plot_portfolio_value_chart(
         self,
-        snapshots,
+        history_df: pd.DataFrame,
         display_currency_code: str,
         portfolio_manager,
         start_date: date,
         end_date: date,
         benchmark_symbol: Optional[str] = None,
         benchmark_prices_aligned: Optional[List[Optional[float]]] = None,
-        portfolio_returns_twr: Optional[float] = None,
+        portfolio_returns_twr: Optional[List[float]] = None,
     ):
-        """Plot portfolio and category series in selected currency, plus cumulative returns."""
-        if len(snapshots) < 2:
+        """Plot portfolio value chart using PortfolioHistory DataFrame."""
+        import plotly.graph_objects as go
+
+        if history_df.empty or len(history_df) < 2:
+            st.warning("Insufficient data for chart")
             return
 
-        # FX rate cache and last-known fallback per pair
-        fx_cache: Dict[tuple, Optional[Decimal]] = {}
-        fx_last_rate: Dict[tuple, Optional[Decimal]] = {}
+        # Extract dates and values
+        dates = [idx.date() if hasattr(idx, 'date') else idx for idx in history_df.index]
+        portfolio_values = [float(v) for v in history_df["total_value"].values]
 
-        def get_rate(day: date, from_code: str, to_code: str) -> Optional[Decimal]:
-            if from_code == to_code:
-                return Decimal("1")
-            key = (day, from_code, to_code)
-            if key in fx_cache:
-                return fx_cache[key]
-            from src.portfolio.models import Currency as Cur
-
-            try:
-                rate = portfolio_manager.data_manager.get_historical_fx_rate_on(
-                    day, Cur(from_code), Cur(to_code)
-                )
-            except Exception:
-                rate = None
-            fx_cache[key] = rate
-            pair_key = (from_code, to_code)
-            if rate is not None:
-                fx_last_rate[pair_key] = rate
-            else:
-                # Fallback to last known rate for this pair if available
-                last = fx_last_rate.get(pair_key)
-                if last is not None:
-                    rate = last
-                    fx_cache[key] = rate
-            return rate
-
-        # Category classifier (reuse UI logic)
-        def classify(instrument) -> str:
-            itype = (
-                instrument.instrument_type.value
-                if hasattr(instrument.instrument_type, "value")
-                else str(instrument.instrument_type)
-            )
-            itype = itype.lower()
-            name = (instrument.name or "").lower()
-            symbol = (instrument.symbol or "").upper()
-            if itype == "cash":
-                return "Short Term"
-            if itype == "bond":
-                if any(h in name for h in ["treasury", "t-bill", "bill", "tbill"]):
-                    return "Short Term"
-                return "Bonds"
-            if itype == "crypto":
-                return "Alternatives"
-            if any(h in name for h in ["gold", "bullion"]) or symbol in {
-                "GLD",
-                "IAU",
-                "PHYS",
-            }:
-                return "Alternatives"
-            if itype in {"stock", "etf"}:
-                return "Equities"
-            return "Miscellaneous"
-
-        dates: List[date] = [s.date for s in snapshots]
-        # Portfolio line in display currency
-        portfolio_values: List[float] = []
-        base_code = (
-            snapshots[0].base_currency.value
-            if hasattr(snapshots[0].base_currency, "value")
-            else str(snapshots[0].base_currency)
-        )
-        for s in snapshots:
-            val = Decimal(str(s.total_value))
-            rate = get_rate(s.date, base_code, display_currency_code)
-            if rate is not None:
-                val = val * rate
-            portfolio_values.append(float(val))
-
-        # Category lines in display currency
-        categories = [
-            "Short Term",
-            "Bonds",
-            "Equities",
-            "Alternatives",
-            "Miscellaneous",
-        ]
-        cat_series: Dict[str, List[float]] = {c: [] for c in categories}
-
-        for s in snapshots:
-            # init per-snapshot sums
-            sums = {c: Decimal("0") for c in categories}
-            for pos in s.positions.values():
-                if pos.market_value is None:
-                    continue
-                instr = pos.instrument
-                cat = classify(instr)
-                from_code = (
-                    instr.currency.value
-                    if hasattr(instr.currency, "value")
-                    else str(instr.currency)
-                )
-                val = Decimal(str(pos.market_value))
-                # convert directly to display currency
-                rate = get_rate(s.date, from_code, display_currency_code)
-                if rate is not None:
-                    val = val * rate
-                sums[cat] += val
-            # append floats
-            for c in categories:
-                cat_series[c].append(float(sums[c]))
-
-        # Plot portfolio and categories
+        # Create main portfolio line chart
         fig = go.Figure()
         fig.add_trace(
             go.Scatter(
@@ -2322,33 +2097,13 @@ class PortfolioTrackerUI:
                 y=portfolio_values,
                 mode="lines",
                 name="Portfolio",
-                line=dict(width=2),
+                line=dict(color="blue", width=2),
             )
         )
-        color_map = {
-            "Short Term": "#1f77b4",
-            "Bonds": "#ff7f0e",
-            "Equities": "#2ca02c",
-            "Alternatives": "#d62728",
-            "Miscellaneous": "#9467bd",
-        }
-        for c in categories:
-            fig.add_trace(
-                go.Scatter(
-                    x=dates,
-                    y=cat_series[c],
-                    mode="lines",
-                    name=c,
-                    line=dict(color=color_map.get(c)),
-                )
-            )
 
-        # Add benchmark to value chart (scaled to start portfolio value for comparability)
+        # Add benchmark if available
         if benchmark_symbol and benchmark_prices_aligned:
-            # Create scaled series: benchmark normalized to its first non-None, then scaled to portfolio initial value
-            first_bench = next(
-                (p for p in benchmark_prices_aligned if p is not None), None
-            )
+            first_bench = next((p for p in benchmark_prices_aligned if p is not None), None)
             if first_bench and portfolio_values:
                 scaled = []
                 for p in benchmark_prices_aligned:
@@ -2367,7 +2122,7 @@ class PortfolioTrackerUI:
                 )
 
         fig.update_layout(
-            title=f"Portfolio Value Over Time (in {display_currency_code}) - Time-Weighted Analysis",
+            title=f"Portfolio Value Over Time ({display_currency_code})",
             xaxis_title="Date",
             yaxis_title=f"Value ({display_currency_code})",
             height=420,
@@ -2376,125 +2131,36 @@ class PortfolioTrackerUI:
         fig.update_xaxes(range=[start_date, end_date])
         st.plotly_chart(fig, use_container_width=True)
 
-        # Cumulative returns for portfolio and categories (using time-weighted returns)
-        def to_cum_returns_twr(returns: List[float]) -> List[Optional[float]]:
-            """Calculate cumulative returns from time-weighted daily returns."""
-            if not returns:
-                return []
-
-            # Calculate cumulative return using geometric linking: (1+r1)*(1+r2)*...*(1+rn) - 1
+        # Cumulative returns chart using TWR
+        if portfolio_returns_twr:
             cumulative = []
             running_product = 1.0
-
-            for daily_return in returns:
+            for daily_return in portfolio_returns_twr:
                 running_product *= 1 + daily_return
-                cumulative_return = (running_product - 1.0) * 100.0
-                cumulative.append(cumulative_return)
+                cumulative.append((running_product - 1.0) * 100.0)
 
-            return cumulative
+            # Use dates from day 2 onwards (first return is between day 1 and day 2)
+            return_dates = dates[1:len(cumulative)+1]
 
-        def to_cum_returns(values: List[float]) -> List[Optional[float]]:
-            """Calculate cumulative returns from absolute values (for categories)."""
-            if not values:
-                return []
-            # Find first non-zero starting point
-            start_idx = None
-            for i, v in enumerate(values):
-                if abs(v) > 1e-12:
-                    start_idx = i
-                    break
-            if start_idx is None:
-                return [None for _ in values]
-            base = values[start_idx]
-            if abs(base) <= 1e-12:
-                return [None for _ in values]
-            out: List[Optional[float]] = [None] * start_idx
-            for v in values[start_idx:]:
-                out.append(((v / base) - 1.0) * 100.0)
-            return out
-
-        # Portfolio cumulative returns using TWR
-        portfolio_cum_returns = (
-            to_cum_returns_twr(portfolio_returns_twr) if portfolio_returns_twr else []
-        )
-
-        fig2 = go.Figure()
-        if portfolio_cum_returns:
+            fig2 = go.Figure()
             fig2.add_trace(
                 go.Scatter(
-                    x=dates[
-                        1:
-                    ],  # Skip first date since returns start from second snapshot
-                    y=portfolio_cum_returns,
+                    x=return_dates,
+                    y=cumulative,
                     mode="lines",
-                    name="Portfolio (TWR)",
-                    line=dict(width=2, color="#000"),
+                    name="Portfolio Cumulative Return",
+                    line=dict(color="green", width=2),
                 )
             )
 
-        # Category cumulative returns (using time-weighted returns for consistency)
-        for c in categories:
-            # Calculate daily returns for this category using TWR methodology
-            cat_returns = []
-            for i in range(1, len(cat_series[c])):
-                prev_val = cat_series[c][i - 1]
-                curr_val = cat_series[c][i]
-
-                # Apply TWR formula: (V_t - V_{t-1} - External_CF_t) / V_{t-1}
-                # For categories, we assume no external cash flows (they're internal portfolio movements)
-                if prev_val > 0:
-                    daily_return = (curr_val - prev_val) / prev_val
-                    cat_returns.append(daily_return)
-                else:
-                    cat_returns.append(0.0)
-
-            # Calculate cumulative TWR returns for the category
-            cat_cum_returns = to_cum_returns_twr(cat_returns) if cat_returns else []
-
-            if cat_cum_returns:
-                fig2.add_trace(
-                    go.Scatter(
-                        x=dates[
-                            1:
-                        ],  # Skip first date since returns start from second snapshot
-                        y=cat_cum_returns,
-                        mode="lines",
-                        name=f"{c} (TWR)",
-                        line=dict(color=color_map.get(c)),
-                    )
-                )
-
-        # Add benchmark cumulative returns
-        if benchmark_symbol and benchmark_prices_aligned:
-            first_bench = next(
-                (p for p in benchmark_prices_aligned if p is not None), None
+            fig2.update_layout(
+                title="Cumulative Return (%)",
+                xaxis_title="Date",
+                yaxis_title="Cumulative Return (%)",
+                height=350,
+                showlegend=True,
             )
-            if first_bench:
-                bench_cum = []
-                for p in benchmark_prices_aligned:
-                    if p is None:
-                        bench_cum.append(None)
-                    else:
-                        bench_cum.append(((p / first_bench) - 1.0) * 100.0)
-                fig2.add_trace(
-                    go.Scatter(
-                        x=dates,
-                        y=bench_cum,
-                        mode="lines",
-                        name=f"{benchmark_symbol} (cum %)",
-                        line=dict(color="#888", dash="dot"),
-                    )
-                )
-
-        fig2.update_layout(
-            title=f"Cumulative Returns - All Series (Time-Weighted) in {display_currency_code}",
-            xaxis_title="Date",
-            yaxis_title="Return (%)",
-            height=320,
-            showlegend=True,
-        )
-        fig2.update_xaxes(range=[start_date, end_date])
-        st.plotly_chart(fig2, use_container_width=True)
+            st.plotly_chart(fig2, use_container_width=True)
 
     def render_optimization(self, portfolio_manager, market_data_service):
         """Render portfolio optimization with weight suggestions and visualizations."""
@@ -2624,7 +2290,7 @@ class PortfolioTrackerUI:
                     # Get cash balances if including cash
                     cash_balances = portfolio.cash_balances if include_cash else None
 
-                    # Create optimizer with storage for local snapshot data
+                    # Create optimizer with storage for historical data
                     optimizer = PortfolioOptimizer(
                         portfolio_manager.data_manager,
                         base_currency=portfolio.base_currency,
@@ -3107,6 +2773,8 @@ class PortfolioTrackerUI:
             st.warning("No portfolio currently loaded. Please load or create a portfolio first.")
             return
 
+        current_portfolio = portfolio_manager.current_portfolio
+
         # Import here to avoid circular imports
         from src.portfolio.scenarios import PortfolioScenarioEngine, ScenarioType
 
@@ -3121,11 +2789,14 @@ class PortfolioTrackerUI:
 
         engine = st.session_state.scenario_engine
 
-        # Get current portfolio snapshot
+        # Get current portfolio value
         try:
-            current_portfolio = portfolio_manager.create_snapshot(save=False)
+            current_portfolio_value = portfolio_manager.get_portfolio_value()
+            if current_portfolio_value is None or current_portfolio_value <= 0:
+                st.error("Could not calculate current portfolio value. Update market data first.")
+                return
         except Exception as e:
-            st.error(f"Could not create current portfolio snapshot: {e}")
+            st.error(f"Could not get current portfolio value: {e}")
             return
 
         # Simulation Settings (in main tab area)
@@ -3195,8 +2866,15 @@ class PortfolioTrackerUI:
         # Run simulations button
         if st.button("🚀 Run Scenario Analysis", type="primary"):
 
+            # Create a snapshot for the simulation (run_scenario_simulation expects PortfolioSnapshot)
+            try:
+                portfolio_snapshot = portfolio_manager.create_current_snapshot()
+            except Exception as e:
+                st.error(f"Error creating portfolio snapshot: {e}")
+                return
+
             # Get predefined scenarios
-            scenarios = engine.create_predefined_scenarios(current_portfolio.total_value)
+            scenarios = engine.create_predefined_scenarios(float(current_portfolio_value))
 
             # Filter selected scenarios
             selected_scenarios = {}
@@ -3231,7 +2909,7 @@ class PortfolioTrackerUI:
                 progress_bar.progress((i + 1) / len(selected_scenarios))
 
                 try:
-                    result = engine.run_scenario_simulation(current_portfolio, config)
+                    result = engine.run_scenario_simulation(portfolio_snapshot, config)
                     simulation_results[name] = result
                 except Exception as e:
                     st.error(f"Error running {name} scenario: {e}")
@@ -3335,9 +3013,11 @@ class PortfolioTrackerUI:
                     showlegend=False
                 ))
 
-        # Add starting value line
+        # Add starting value line (get from first simulation result)
+        first_result = next(iter(simulation_results.values()))
+        start_value = float(first_result.start_value)
         fig.add_hline(
-            y=float(current_portfolio.total_value),
+            y=start_value,
             line_dash="dash",
             line_color="gray",
             annotation_text="Current Value"
@@ -3457,7 +3137,7 @@ class PortfolioTrackerUI:
             )
 
             # Show current portfolio context
-            current_value = float(current_portfolio.total_value)
+            current_value = float(portfolio_manager.get_portfolio_value() or 0)
             if current_value > 0:
                 allocation_pct = (investment_amount / current_value) * 100
                 st.caption(f"This would be **{allocation_pct:.1f}%** of your portfolio")
@@ -3509,14 +3189,24 @@ class PortfolioTrackerUI:
 
                 tool = HypotheticalPositionTool(portfolio_manager)
 
-                # Estimate share price (use $100 as default, tool will fetch real price if available)
-                estimated_price = 100.0
+                # Fetch current market price for the symbol
+                with st.spinner(f"Fetching current price for {symbol}..."):
+                    current_price = portfolio_manager.data_manager.get_current_price(symbol)
+
+                if current_price is None:
+                    st.error(f"Could not fetch current price for {symbol}. Please check the symbol is valid.")
+                    return
+
+                current_price_float = float(current_price)
+                quantity = investment_amount / current_price_float
+
+                st.info(f"Current price for {symbol}: ${current_price_float:,.2f} → {quantity:,.2f} shares")
 
                 with st.spinner(f"Analyzing {symbol}..."):
                     result = tool._run(
                         symbol=symbol,
-                        quantity=investment_amount / estimated_price,
-                        purchase_price=estimated_price,
+                        quantity=quantity,
+                        purchase_price=current_price_float,
                         scenario=scenario,
                         time_horizon=time_horizon
                     )
@@ -3559,7 +3249,7 @@ class PortfolioTrackerUI:
 
         st.subheader("📊 Data Management")
         st.info(
-            "Market data updates are now handled in the main portfolio view. Use the '📈 Update Market Data' button there to refresh snapshots with current prices."
+            "Market data updates are now handled in the main portfolio view. Use the '📈 Update Market Data' button there to refresh prices."
         )
 
         # Get current portfolio
@@ -3569,33 +3259,36 @@ class PortfolioTrackerUI:
             and hasattr(portfolio_manager, "current_portfolio")
             and portfolio_manager.current_portfolio
         ):
-            portfolio_id = portfolio_manager.current_portfolio.id
             portfolio_name = portfolio_manager.current_portfolio.name
 
             st.write(f"**Current Portfolio:** {portfolio_name}")
 
-            # Show latest snapshot info
-            latest_snapshot = portfolio_manager.storage.get_latest_snapshot(portfolio_id)
-            if latest_snapshot:
-                st.write(f"**Latest Snapshot:** {latest_snapshot.date.isoformat()}")
-                st.write(f"**Snapshot Value:** ${latest_snapshot.total_value:,.2f}")
+            # Show market data info
+            market_data = portfolio_manager.market_data_store
+            symbols = market_data.get_symbols()
+            if symbols:
+                st.write(f"**Market Data:** {len(symbols)} symbols tracked")
+                # Show current portfolio value
+                current_value = portfolio_manager.get_portfolio_value()
+                if current_value:
+                    st.write(f"**Current Value:** ${float(current_value):,.2f}")
             else:
-                st.warning("No snapshots found for this portfolio")
+                st.warning("No market data found. Use 'Update Market Data' to fetch prices.")
 
             # Keep a simple button for emergency data refresh but discourage its use
             if st.button("🔄 Emergency Data Refresh", help="Only use if the main update button isn't working"):
-                with st.spinner("Updating snapshots..."):
+                with st.spinner("Updating market data..."):
                     try:
                         end_date = date.today()
                         start_date = end_date - timedelta(days=30)
-                        refreshed = portfolio_manager.create_snapshots_for_range(start_date, end_date, save=True)
-                        st.success(f"✅ Updated {len(refreshed)} snapshots with fresh market data (saved to storage)")
+                        portfolio_manager.update_market_data(start_date, end_date)
+                        st.success("✅ Updated market data with fresh prices")
 
                     except Exception as e:
                         import traceback
                         error_details = traceback.format_exc()
                         logging.error(f"Emergency refresh failed: {error_details}")
-                        st.error(f"❌ Error updating snapshots: {e}")
+                        st.error(f"❌ Error updating market data: {e}")
         else:
             st.warning(
                 "No portfolio loaded. Please select a portfolio in the sidebar first."

@@ -2,7 +2,7 @@
 Financial metrics calculator for portfolio analysis.
 
 This module provides comprehensive portfolio performance analysis with multiple return calculation
-methodologies:
+methodologies. Supports both legacy PortfolioSnapshot lists and DataFrames from PortfolioHistory.
 
 1. Time-Weighted Returns (TWR):
    - calculate_time_weighted_return(): Daily returns ignoring external cash flows
@@ -20,21 +20,17 @@ methodologies:
    - calculate_modified_dietz_return(): Time-weighted with cash flow timing consideration
    - Provides balance between TWR and MWR methodologies
 
-4. Comprehensive Analysis:
-   - calculate_all_return_metrics(): All return metrics in one call
-   - calculate_portfolio_metrics(): Complete portfolio analysis including returns
-
-Note: Time-weighted returns are the industry standard for performance measurement as they
-eliminate the distorting effects of EXTERNAL cash flows (deposits/withdrawals), while
-preserving INTERNAL cash flows (dividends, interest, fees) as part of investment performance.
-Money-weighted returns show the actual return experienced by the investor including all cash flows.
+4. DataFrame-based methods (from PortfolioHistory):
+   - calculate_metrics_from_df(): Calculate metrics from a DataFrame
+   - calculate_returns_from_df(): Calculate returns from a DataFrame
 """
 
 import logging
 from datetime import date
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
+import pandas as pd
 
 from ..data_providers.manager import DataProviderManager
 from ..portfolio.models import PortfolioSnapshot
@@ -1023,3 +1019,212 @@ class FinancialMetricsCalculator:
             }
 
         return {}
+
+    # DataFrame-based methods for PortfolioHistory integration
+
+    def calculate_returns_from_df(
+        self,
+        df: pd.DataFrame,
+        value_column: str = "total_value",
+        cash_flows_by_day: Optional[Dict[date, float]] = None,
+    ) -> List[float]:
+        """Calculate time-weighted returns from a portfolio history DataFrame.
+
+        Args:
+            df: DataFrame with date index and value columns (from PortfolioHistory)
+            value_column: Column name containing portfolio values
+            cash_flows_by_day: Optional external cash flows
+
+        Returns:
+            List of daily returns
+        """
+        if df.empty or len(df) < 2:
+            return []
+
+        if value_column not in df.columns:
+            logging.error(f"Column {value_column} not found in DataFrame")
+            return []
+
+        returns = []
+        values = df[value_column].values
+        dates = df.index.to_pydatetime() if hasattr(df.index, 'to_pydatetime') else df.index
+
+        for i in range(1, len(values)):
+            prev_value = float(values[i - 1])
+            curr_value = float(values[i])
+
+            # Extract external cash flow for this day if provided
+            external_cf = 0.0
+            if cash_flows_by_day:
+                if hasattr(dates[i], 'date'):
+                    day = dates[i].date()
+                else:
+                    day = dates[i]
+                external_cf = float(cash_flows_by_day.get(day, 0.0))
+
+            if prev_value > 0:
+                daily_return = (curr_value - prev_value - external_cf) / prev_value
+                returns.append(daily_return)
+
+        return returns
+
+    def calculate_metrics_from_df(
+        self,
+        df: pd.DataFrame,
+        value_column: str = "total_value",
+        benchmark_symbol: str = "SPY",
+        cash_flows_by_day: Optional[Dict[date, float]] = None,
+        risk_free_rate: float = 0.02,
+    ) -> Dict:
+        """Calculate comprehensive portfolio metrics from a DataFrame.
+
+        This is the DataFrame-based equivalent of calculate_portfolio_metrics().
+
+        Args:
+            df: DataFrame with date index and value columns (from PortfolioHistory)
+            value_column: Column name containing portfolio values
+            benchmark_symbol: Benchmark symbol for comparison
+            cash_flows_by_day: Optional external cash flows
+            risk_free_rate: Risk-free rate for Sharpe ratio
+
+        Returns:
+            Dict with comprehensive metrics
+        """
+        if df.empty or len(df) < 2:
+            return {"error": "Insufficient data for metrics calculation"}
+
+        # Calculate returns from DataFrame
+        returns = self.calculate_returns_from_df(df, value_column, cash_flows_by_day)
+
+        if not returns:
+            return {"error": "Could not calculate returns from DataFrame"}
+
+        # Get date range
+        start_date = df.index[0].date() if hasattr(df.index[0], 'date') else df.index[0]
+        end_date = df.index[-1].date() if hasattr(df.index[-1], 'date') else df.index[-1]
+
+        # Calculate basic metrics
+        total_return = self._calculate_total_return_from_daily_returns(returns)
+
+        # Calculate years for annualization
+        days = (end_date - start_date).days
+        years = days / 365.25 if days > 0 else 0
+
+        # Annualized return
+        if years > 0:
+            annualized_return = (1 + total_return) ** (1 / years) - 1
+        else:
+            annualized_return = 0.0
+
+        # Get benchmark data
+        benchmark_returns, benchmark_prices = self.get_benchmark_data(
+            benchmark_symbol, start_date, end_date
+        )
+
+        # Align returns
+        min_length = min(len(returns), len(benchmark_returns))
+        if min_length > 0:
+            returns_aligned = returns[-min_length:]
+            benchmark_aligned = benchmark_returns[-min_length:]
+        else:
+            returns_aligned = returns
+            benchmark_aligned = []
+
+        # Calculate max drawdown from values
+        values = df[value_column].values
+        max_drawdown, max_drawdown_duration = self._calculate_max_drawdown_from_values(
+            [float(v) for v in values]
+        )
+
+        metrics = {
+            "total_return": total_return,
+            "annualized_return": annualized_return,
+            "volatility": self.calculate_volatility(returns),
+            "sharpe_ratio": self.calculate_sharpe_ratio(returns, risk_free_rate),
+            "sortino_ratio": self.calculate_sortino_ratio(returns, risk_free_rate=risk_free_rate),
+            "max_drawdown": max_drawdown,
+            "max_drawdown_duration": max_drawdown_duration,
+            "var_5pct": self.calculate_value_at_risk(returns, 0.05),
+            "cvar_5pct": self.calculate_conditional_var(returns, 0.05),
+            "calmar_ratio": annualized_return / max_drawdown if max_drawdown > 0 else float("inf"),
+            "benchmark_symbol": benchmark_symbol,
+            "benchmark_available": len(benchmark_aligned) > 0,
+            "benchmark_prices": benchmark_prices,
+            "days_analyzed": len(df),
+            "start_value": float(values[0]),
+            "end_value": float(values[-1]),
+        }
+
+        # Benchmark comparison metrics
+        if len(benchmark_aligned) > 0:
+            metrics.update({
+                "beta": self.calculate_beta(returns_aligned, benchmark_aligned),
+                "alpha": self.calculate_alpha(returns_aligned, benchmark_aligned, risk_free_rate),
+                "information_ratio": self.calculate_information_ratio(returns_aligned, benchmark_aligned),
+                "benchmark_return": float(np.mean(benchmark_aligned) * 252),
+                "benchmark_volatility": self.calculate_volatility(benchmark_aligned),
+            })
+
+        return metrics
+
+    def _calculate_max_drawdown_from_values(
+        self, values: List[float]
+    ) -> Tuple[float, int]:
+        """Calculate maximum drawdown from a list of values."""
+        if len(values) < 2:
+            return 0.0, 0
+
+        peak = values[0]
+        max_drawdown = 0.0
+        max_duration = 0
+        current_duration = 0
+
+        for value in values:
+            if value > peak:
+                peak = value
+                current_duration = 0
+            else:
+                if peak > 0:
+                    drawdown = (peak - value) / peak
+                    max_drawdown = max(max_drawdown, drawdown)
+                current_duration += 1
+                max_duration = max(max_duration, current_duration)
+
+        return max_drawdown, max_duration
+
+    def calculate_time_weighted_return_from_df(
+        self,
+        df: pd.DataFrame,
+        value_column: str = "total_value",
+        cash_flows_by_day: Optional[Dict[date, float]] = None,
+    ) -> float:
+        """Calculate annualized time-weighted return from DataFrame.
+
+        Args:
+            df: DataFrame with date index and value columns
+            value_column: Column name containing portfolio values
+            cash_flows_by_day: Optional external cash flows
+
+        Returns:
+            Annualized time-weighted return as a decimal
+        """
+        returns = self.calculate_returns_from_df(df, value_column, cash_flows_by_day)
+        if not returns:
+            return 0.0
+
+        total_return = self._calculate_total_return_from_daily_returns(returns)
+
+        # Calculate years
+        start_date = df.index[0].date() if hasattr(df.index[0], 'date') else df.index[0]
+        end_date = df.index[-1].date() if hasattr(df.index[-1], 'date') else df.index[-1]
+        days = (end_date - start_date).days
+        years = days / 365.25
+
+        if years <= 0:
+            return 0.0
+
+        if abs(years - 1.0) < 0.01:
+            return float(total_return)
+
+        annualized_return = (1 + total_return) ** (1 / years) - 1
+        return float(annualized_return)

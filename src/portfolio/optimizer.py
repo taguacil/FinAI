@@ -20,6 +20,7 @@ from pypfopt import HRPOpt, expected_returns, risk_models
 from pypfopt.efficient_frontier import EfficientFrontier
 
 from ..data_providers.manager import DataProviderManager
+from .market_data_store import MarketDataStore
 from .models import Currency, Position, PortfolioSnapshot
 from .storage import FileBasedStorage
 
@@ -90,7 +91,7 @@ class PortfolioOptimizer:
 
     Supports locking positions that shouldn't change during optimization.
     Handles multi-currency portfolios with FX conversion.
-    Uses local snapshot data by default for efficiency.
+    Uses MarketDataStore for historical price data.
     """
 
     def __init__(
@@ -99,6 +100,7 @@ class PortfolioOptimizer:
         base_currency: Currency = Currency.USD,
         storage: Optional[FileBasedStorage] = None,
         portfolio_id: Optional[str] = None,
+        market_data_store: Optional[MarketDataStore] = None,
     ):
         # Handle both DataProviderManager and MarketDataService
         if hasattr(data_provider, "data_manager"):
@@ -110,6 +112,7 @@ class PortfolioOptimizer:
         self.base_currency = base_currency
         self.storage = storage
         self.portfolio_id = portfolio_id
+        self.market_data_store = market_data_store or MarketDataStore()
         self.logger = logging.getLogger(__name__)
 
     def optimize(
@@ -509,36 +512,25 @@ class PortfolioOptimizer:
     def _get_fx_rate(
         self, from_currency: Currency, to_currency: Currency
     ) -> Decimal:
-        """Get FX rate from local snapshot data only (no network calls).
+        """Get FX rate for currency conversion.
 
-        Uses the most recent FX rate found in snapshots, or 1.0 if unavailable.
+        For optimization purposes, uses 1.0 as a fallback since weights are relative.
         """
         if from_currency == to_currency:
             return Decimal("1")
 
-        # Try to get FX rate from latest snapshot's position data
-        # Positions in foreign currency implicitly contain FX info via their base value
-        if self.storage and self.portfolio_id:
-            try:
-                latest_snap = self.storage.get_latest_snapshot(self.portfolio_id)
-                if latest_snap:
-                    # Look for a position in the from_currency to estimate rate
-                    # by comparing market_value (native) to what we'd expect in base
-                    for pos in latest_snap.positions.values():
-                        if pos.instrument and pos.instrument.currency == from_currency:
-                            if pos.current_price and pos.quantity > 0:
-                                native_value = pos.quantity * pos.current_price
-                                if pos.market_value and native_value > 0:
-                                    # market_value might be in base currency
-                                    # This is an approximation
-                                    pass
-            except Exception as e:
-                self.logger.debug(f"Could not derive FX from snapshots: {e}")
+        # Try to get FX rate from data provider cache
+        try:
+            rate = self.data_provider.fx_cache.get_rate(from_currency, to_currency)
+            if rate:
+                return rate
+        except Exception as e:
+            self.logger.debug(f"Could not get FX rate from cache: {e}")
 
         # For optimization purposes, use 1.0 - the weights are relative anyway
         # FX only matters for absolute trade values, not weight calculations
         self.logger.debug(
-            f"Using 1.0 for {from_currency.value}/{to_currency.value} (local only mode)"
+            f"Using 1.0 for {from_currency.value}/{to_currency.value} (no cached rate available)"
         )
         return Decimal("1")
 
@@ -619,7 +611,7 @@ class PortfolioOptimizer:
     def _fetch_prices(
         self, symbols: List[str], lookback_days: int
     ) -> tuple[pd.DataFrame, List[str]]:
-        """Fetch historical prices from local snapshots only (no network calls).
+        """Fetch historical prices from MarketDataStore.
 
         Returns:
             Tuple of (prices_df, warnings) where warnings contains data coverage issues.
@@ -628,19 +620,13 @@ class PortfolioOptimizer:
         end_date = date.today()
         start_date = end_date - timedelta(days=lookback_days + 30)  # Extra buffer
 
-        if not self.storage or not self.portfolio_id:
-            raise ValueError(
-                "Optimizer requires storage and portfolio_id to fetch local price data. "
-                "Please ensure snapshots are available for this portfolio."
-            )
-
-        prices_df, gap_warnings = self._fetch_prices_from_snapshots(symbols, start_date, end_date)
+        prices_df, gap_warnings = self._fetch_prices_from_market_data(symbols, start_date, end_date)
         warnings.extend(gap_warnings)
 
         if prices_df.empty:
             raise ValueError(
-                f"No local snapshot data found for period {start_date} to {end_date}. "
-                "Please create snapshots using 'Update Snapshots' in the Portfolio tab first."
+                f"No market data found for period {start_date} to {end_date}. "
+                "Please update market data using 'Update Market Data' in the Portfolio tab first."
             )
 
         # Validate data coverage
@@ -655,7 +641,7 @@ class PortfolioOptimizer:
         coverage_pct = (actual_days / lookback_days) * 100 if lookback_days > 0 else 0
 
         self.logger.info(
-            f"Using local snapshot data: {len(prices_df)} data points for {len(prices_df.columns)} symbols. "
+            f"Using market data: {len(prices_df)} data points for {len(prices_df.columns)} symbols. "
             f"Date range: {actual_start} to {actual_end} ({actual_days} days, {coverage_pct:.1f}% of requested {lookback_days} days)"
         )
 
@@ -671,56 +657,28 @@ class PortfolioOptimizer:
         if len(prices_df) < 30:
             warning_msg = (
                 f"Only {len(prices_df)} days of local data available. "
-                "Consider creating more snapshots for better optimization results."
+                "Consider updating market data for better optimization results."
             )
             self.logger.warning(warning_msg)
             warnings.append(warning_msg)
 
         return prices_df, warnings
 
-    def _fetch_prices_from_snapshots(
+    def _fetch_prices_from_market_data(
         self, symbols: List[str], start_date: date, end_date: date
     ) -> tuple[pd.DataFrame, List[str]]:
-        """Extract historical prices from local portfolio snapshots.
+        """Extract historical prices from MarketDataStore.
 
         Returns:
             Tuple of (prices_df, warnings) where warnings contains gap information.
         """
         warnings: List[str] = []
         try:
-            snapshots = self.storage.load_snapshots(
-                self.portfolio_id, start_date, end_date
-            )
+            # Use MarketDataStore to get price matrix
+            prices_df = self.market_data_store.get_price_matrix(symbols, start_date, end_date)
 
-            if not snapshots:
+            if prices_df.empty:
                 return pd.DataFrame(), warnings
-
-            # Build price series from snapshots
-            prices_dict: Dict[str, Dict[date, float]] = {sym: {} for sym in symbols}
-
-            for snap in snapshots:
-                snap_date = snap.date
-                for symbol in symbols:
-                    if symbol in snap.positions:
-                        pos = snap.positions[symbol]
-                        if pos.current_price is not None:
-                            prices_dict[symbol][snap_date] = float(pos.current_price)
-
-            # Convert to DataFrame
-            if not any(prices_dict.values()):
-                return pd.DataFrame(), warnings
-
-            # Create series for each symbol
-            series_dict = {}
-            for symbol, date_prices in prices_dict.items():
-                if date_prices:
-                    series_dict[symbol] = pd.Series(date_prices)
-
-            if not series_dict:
-                return pd.DataFrame(), warnings
-
-            prices_df = pd.DataFrame(series_dict)
-            prices_df = prices_df.sort_index()
 
             # Check for missing values before forward-fill
             missing_before = prices_df.isna().sum()
@@ -747,7 +705,7 @@ class PortfolioOptimizer:
             return prices_df, warnings
 
         except Exception as e:
-            self.logger.warning(f"Failed to load prices from snapshots: {e}")
+            self.logger.warning(f"Failed to load prices from market data: {e}")
             return pd.DataFrame(), warnings
 
     def _convert_prices_to_currency(

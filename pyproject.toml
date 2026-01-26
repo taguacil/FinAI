@@ -18,7 +18,6 @@ dependencies = [
     "python-dotenv>=1.1.1",
     "requests>=2.32.4",
     "beautifulsoup4>=4.13.4",
-
     "langchain-anthropic>=0.3.18",
     "langchain-google-vertexai>=2.0.28",
     "pyportfolioopt @ git+https://github.com/robertmartin8/PyPortfolioOpt.git",

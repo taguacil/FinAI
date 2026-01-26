@@ -1,8 +1,8 @@
 """
-Portfolio analyzer for calculating metrics and creating snapshots.
+Portfolio analyzer for calculating metrics.
 
-SIMPLE RULE: This class only does CALCULATIONS - it NEVER fetches data.
-The manager is responsible for fetching prices before calling analyzer methods.
+This class provides calculation methods for portfolio analysis.
+Uses PortfolioHistory for value calculations and MarketDataStore for prices.
 """
 
 import logging
@@ -14,11 +14,12 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Union
 import pandas as pd
 
 from ..data_providers.manager import DataProviderManager
-from .models import Currency, Portfolio, PortfolioSnapshot, Position, TransactionType
+from .models import Currency, Portfolio, Position, TransactionType
 from .storage import FileBasedStorage
 
 if TYPE_CHECKING:
     from ..services.market_data_service import MarketDataService
+    from .portfolio_history import PortfolioHistory
 
 
 class PortfolioAnalyzer:
@@ -52,119 +53,32 @@ class PortfolioAnalyzer:
             return self._data_manager.data_manager
         return self._data_manager
 
-    def create_snapshot(
-        self, portfolio: Portfolio, snapshot_date: date, save: bool = True
-    ) -> PortfolioSnapshot:
-        """Create snapshot from portfolio state. Prices must already be set!
+    def get_performance_metrics(
+        self,
+        portfolio: Portfolio,
+        days: int = 365,
+        portfolio_history: Optional["PortfolioHistory"] = None,
+    ) -> Dict:
+        """Calculate performance metrics using PortfolioHistory.
 
-        This is a PURE calculation - it does NOT fetch any prices.
+        Args:
+            portfolio: The portfolio to analyze
+            days: Number of days to analyze
+            portfolio_history: PortfolioHistory instance for value calculations
+
+        Returns:
+            Dict with performance metrics
         """
-        # Calculate metrics from current state
-        total_value = self._calculate_portfolio_value(portfolio)
-        cash_balance = self._calculate_cash_balance(portfolio)
-        positions_value = total_value - cash_balance
-
-        total_cost_basis = sum(pos.cost_basis for pos in portfolio.positions.values())
-        total_unrealized_pnl = sum(
-            pos.unrealized_pnl for pos in portfolio.positions.values()
-            if pos.unrealized_pnl
-        )
-        total_unrealized_pnl_percent = (
-            (total_unrealized_pnl / total_cost_basis * 100)
-            if total_cost_basis > 0
-            else Decimal("0")
-        )
-
-        # Deep copy positions
-        snapshot_positions = {
-            symbol: Position(
-                instrument=pos.instrument,
-                quantity=pos.quantity,
-                average_cost=pos.average_cost,
-                current_price=pos.current_price,
-                last_updated=pos.last_updated,
-            )
-            for symbol, pos in portfolio.positions.items()
-        }
-
-        # Deep copy cash balances
-        snapshot_cash_balances = dict(portfolio.cash_balances)
-
-        snapshot = PortfolioSnapshot(
-            date=snapshot_date,
-            total_value=total_value,
-            cash_balance=cash_balance,
-            positions_value=positions_value,
-            base_currency=portfolio.base_currency,
-            positions=snapshot_positions,
-            cash_balances=snapshot_cash_balances,
-            total_cost_basis=total_cost_basis,
-            total_unrealized_pnl=total_unrealized_pnl,
-            total_unrealized_pnl_percent=total_unrealized_pnl_percent,
-        )
-
-        if save:
-            self.storage.save_snapshot(portfolio.id, snapshot)
-
-        return snapshot
-
-    def create_snapshots_for_range(
-        self, portfolio: Portfolio, start_date: date, end_date: date, save: bool = True
-    ) -> List[PortfolioSnapshot]:
-        """Create historical snapshots by replaying transactions with historical prices."""
-        if start_date > end_date:
-            raise ValueError("Start date must be before end date")
-
-        # Get all symbols
-        symbols = {
-            txn.instrument.symbol
-            for txn in portfolio.transactions
-            if txn.instrument.symbol != "CASH" and txn.timestamp.date() <= end_date
-        }
-
-        # Fetch ALL historical prices once
-        logging.info(f"Fetching historical prices for {len(symbols)} symbols from {start_date} to {end_date}")
-        price_map = self._fetch_historical_prices(symbols, start_date, end_date)
-
-        snapshots = []
-        current_date = start_date
-
-        while current_date <= end_date:
-            try:
-                # 1. Rebuild portfolio for this date
-                temp_portfolio = self._rebuild_portfolio_for_date(portfolio, current_date)
-
-                # 2. Set historical prices
-                self._apply_historical_prices(temp_portfolio, price_map, current_date)
-
-                # 3. Create snapshot (pure calculation)
-                snapshot = self.create_snapshot(temp_portfolio, current_date, save=False)
-                snapshots.append(snapshot)
-
-                logging.debug(f"Created snapshot for {current_date}")
-
-            except Exception as e:
-                logging.error(f"Failed snapshot for {current_date}: {e}")
-
-            current_date += timedelta(days=1)
-
-        # Batch save
-        if save and snapshots:
-            self.storage.save_snapshots_batch(portfolio.id, snapshots)
-            logging.info(f"Saved {len(snapshots)} snapshots")
-
-        return snapshots
-
-    def get_performance_metrics(self, portfolio: Portfolio, days: int = 365) -> Dict:
-        """Calculate performance metrics from historical snapshots."""
         end_date = date.today()
         start_date = end_date - timedelta(days=days)
 
-        # Try DataFrame approach first (more efficient)
-        df = self.storage.load_snapshots_df(portfolio.id, start_date, end_date)
+        if not portfolio_history:
+            return {"error": "PortfolioHistory required for metrics calculation"}
+
+        df = portfolio_history.get_value_history(start_date, end_date)
 
         if df.empty or len(df) < 2:
-            return {"error": "Insufficient data"}
+            return {"error": "Insufficient data - update market data first"}
 
         first_value = Decimal(str(df["total_value"].iloc[0]))
         last_value = Decimal(str(df["total_value"].iloc[-1]))
@@ -193,16 +107,28 @@ class PortfolioAnalyzer:
         }
 
     def get_performance_metrics_df(
-        self, portfolio: Portfolio, days: int = 365
+        self,
+        portfolio: Portfolio,
+        days: int = 365,
+        portfolio_history: Optional["PortfolioHistory"] = None,
     ) -> pd.DataFrame:
         """Calculate performance metrics and return as DataFrame.
 
-        Returns a DataFrame with daily values and returns.
+        Args:
+            portfolio: The portfolio to analyze
+            days: Number of days to analyze
+            portfolio_history: PortfolioHistory instance for value calculations
+
+        Returns:
+            DataFrame with daily values and returns
         """
+        if not portfolio_history:
+            return pd.DataFrame()
+
         end_date = date.today()
         start_date = end_date - timedelta(days=days)
 
-        df = self.storage.load_snapshots_df(portfolio.id, start_date, end_date)
+        df = portfolio_history.get_value_history(start_date, end_date)
 
         if df.empty:
             return pd.DataFrame()
@@ -214,14 +140,28 @@ class PortfolioAnalyzer:
         return df
 
     def calculate_volatility(
-        self, portfolio: Portfolio, days: int = 365
+        self,
+        portfolio: Portfolio,
+        days: int = 365,
+        portfolio_history: Optional["PortfolioHistory"] = None,
     ) -> Optional[Decimal]:
-        """Calculate annualized volatility using daily returns."""
-        df = self.storage.load_snapshots_df(
-            portfolio.id,
-            date.today() - timedelta(days=days),
-            date.today(),
-        )
+        """Calculate annualized volatility using daily returns.
+
+        Args:
+            portfolio: The portfolio to analyze
+            days: Number of days to analyze
+            portfolio_history: PortfolioHistory instance for value calculations
+
+        Returns:
+            Annualized volatility as percentage or None if insufficient data
+        """
+        if not portfolio_history:
+            return None
+
+        end_date = date.today()
+        start_date = end_date - timedelta(days=days)
+
+        df = portfolio_history.get_value_history(start_date, end_date)
 
         if df.empty or len(df) < 2:
             return None
@@ -234,14 +174,28 @@ class PortfolioAnalyzer:
         return Decimal(str(vol))
 
     def calculate_max_drawdown(
-        self, portfolio: Portfolio, days: int = 365
+        self,
+        portfolio: Portfolio,
+        days: int = 365,
+        portfolio_history: Optional["PortfolioHistory"] = None,
     ) -> Optional[Decimal]:
-        """Calculate maximum drawdown over the period."""
-        df = self.storage.load_snapshots_df(
-            portfolio.id,
-            date.today() - timedelta(days=days),
-            date.today(),
-        )
+        """Calculate maximum drawdown over the period.
+
+        Args:
+            portfolio: The portfolio to analyze
+            days: Number of days to analyze
+            portfolio_history: PortfolioHistory instance for value calculations
+
+        Returns:
+            Maximum drawdown as percentage or None if insufficient data
+        """
+        if not portfolio_history:
+            return None
+
+        end_date = date.today()
+        start_date = end_date - timedelta(days=days)
+
+        df = portfolio_history.get_value_history(start_date, end_date)
 
         if df.empty or len(df) < 2:
             return None
@@ -259,6 +213,7 @@ class PortfolioAnalyzer:
         portfolio: Portfolio,
         days: int = 365,
         risk_free_rate: float = 0.04,
+        portfolio_history: Optional["PortfolioHistory"] = None,
     ) -> Optional[Decimal]:
         """Calculate Sharpe ratio.
 
@@ -266,15 +221,18 @@ class PortfolioAnalyzer:
             portfolio: The portfolio
             days: Number of days to analyze
             risk_free_rate: Annual risk-free rate (default 4%)
+            portfolio_history: PortfolioHistory instance for value calculations
 
         Returns:
             Sharpe ratio or None if insufficient data
         """
-        df = self.storage.load_snapshots_df(
-            portfolio.id,
-            date.today() - timedelta(days=days),
-            date.today(),
-        )
+        if not portfolio_history:
+            return None
+
+        end_date = date.today()
+        start_date = end_date - timedelta(days=days)
+
+        df = portfolio_history.get_value_history(start_date, end_date)
 
         if df.empty or len(df) < 2:
             return None
@@ -359,88 +317,3 @@ class PortfolioAnalyzer:
                 if rate:
                     cash += amount * rate
         return cash
-
-    def _rebuild_portfolio_for_date(
-        self, original: Portfolio, target_date: date
-    ) -> Portfolio:
-        """Replay transactions up to target_date to get portfolio state."""
-        temp = Portfolio(
-            id=original.id,
-            name=original.name,
-            base_currency=original.base_currency,
-            created_at=original.created_at,
-            transactions=[],
-            positions={},
-            cash_balances={},
-        )
-
-        # Replay transactions
-        for txn in sorted(original.transactions, key=lambda t: t.timestamp):
-            if txn.timestamp.date() <= target_date:
-                temp.add_transaction(txn)
-
-        return temp
-
-    def _fetch_historical_prices(
-        self, symbols: set, start_date: date, end_date: date
-    ) -> Dict[str, Dict[date, Decimal]]:
-        """Fetch prices for all symbols, forward-fill missing dates."""
-        price_map: Dict[str, Dict[date, Decimal]] = {}
-
-        for symbol in symbols:
-            try:
-                series = self.data_manager.get_historical_prices(symbol, start_date, end_date)
-
-                daily = {}
-                for item in series:
-                    px = item.close_price or item.open_price or item.high_price or item.low_price
-                    if px:
-                        daily[item.date] = px
-
-                # Forward-fill
-                filled = {}
-                current = start_date
-                last_price = None
-
-                while current <= end_date:
-                    if current in daily:
-                        last_price = daily[current]
-                        filled[current] = last_price
-                    elif last_price:
-                        filled[current] = last_price
-                    current += timedelta(days=1)
-
-                if filled:
-                    price_map[symbol] = filled
-                    logging.debug(f"Loaded {len(filled)} prices for {symbol}")
-
-            except Exception as e:
-                logging.error(f"Failed to fetch prices for {symbol}: {e}")
-
-        return price_map
-
-    def _apply_historical_prices(
-        self, portfolio: Portfolio, price_map: Dict[str, Dict[date, Decimal]], target_date: date
-    ) -> None:
-        """Apply prices from price_map to positions."""
-        for pos in portfolio.positions.values():
-            symbol = pos.instrument.symbol
-
-            # Get from map
-            if symbol in price_map and target_date in price_map[symbol]:
-                pos.current_price = price_map[symbol][target_date]
-                pos.last_updated = datetime.combine(target_date, datetime.min.time())
-            else:
-                # Fallback: fetch current price only for today
-                if target_date == date.today():
-                    try:
-                        price = self.data_manager.get_current_price(symbol)
-                        if price:
-                            pos.current_price = price
-                            pos.last_updated = datetime.now()
-                        else:
-                            logging.warning(f"No price for {symbol} on {target_date}")
-                    except Exception as e:
-                        logging.error(f"Failed to get price for {symbol}: {e}")
-                else:
-                    logging.warning(f"No historical price for {symbol} on {target_date}")

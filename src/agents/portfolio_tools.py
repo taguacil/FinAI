@@ -2,6 +2,7 @@
 LangChain tools for portfolio management and analysis.
 """
 
+import logging
 import math
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -660,30 +661,223 @@ class GetPortfolioSummaryTool(BaseTool):
             return f"Error getting portfolio summary: {str(e)}"
 
 
-class GetTransactionsTool(BaseTool):
-    """Tool for exporting transactions and history with metrics-ready fields."""
+class GetPortfolioSnapshotInput(BaseModel):
+    """Input for getting portfolio snapshot at a specific date."""
 
-    name: str = "get_transactions"
-    description: str = (
-        "Return all transactions with key fields for analysis (ids, timestamps, symbols, quantities, prices, currency)."
+    target_date: str = Field(
+        description="Date to get portfolio snapshot for in YYYY-MM-DD format"
     )
+
+
+class GetPortfolioSnapshotTool(BaseTool):
+    """Tool for getting portfolio state at a specific historical date."""
+
+    name: str = "get_portfolio_snapshot"
+    description: str = (
+        "Get portfolio positions, cash balances, and total value at a specific historical date. "
+        "Use this to see what the portfolio looked like on any past date."
+    )
+    args_schema: type[BaseModel] = GetPortfolioSnapshotInput
     portfolio_manager: Optional[PortfolioManager] = None
 
     def __init__(self, portfolio_manager: PortfolioManager):
         super().__init__()
         self.portfolio_manager = portfolio_manager
 
-    def _run(self) -> str:
+    def _run(self, target_date: str) -> str:
+        """Get portfolio snapshot at a specific date."""
+        try:
+            if not self.portfolio_manager.current_portfolio:
+                return "❌ No portfolio loaded."
+
+            # Parse date
+            try:
+                dt = datetime.strptime(target_date, "%Y-%m-%d").date()
+            except ValueError:
+                return f"❌ Invalid date format: {target_date}. Use YYYY-MM-DD."
+
+            portfolio = self.portfolio_manager.current_portfolio
+
+            # Get positions at date
+            positions = self.portfolio_manager.get_positions_with_prices(dt)
+
+            # Get portfolio history for cash and total value
+            history = self.portfolio_manager._get_portfolio_history()
+            if not history:
+                return "❌ Unable to calculate historical portfolio state."
+
+            cash_balances = history.get_cash_at_date(dt)
+            total_value = history.get_value_at_date(dt)
+
+            # Build output
+            lines = [
+                f"📊 Portfolio Snapshot: {portfolio.name}",
+                f"📅 Date: {target_date}",
+                f"💰 Total Value: {total_value:,.2f} {portfolio.base_currency.value}",
+                "",
+            ]
+
+            # Cash balances
+            if cash_balances:
+                lines.append("💵 Cash Balances:")
+                for currency, amount in cash_balances.items():
+                    currency_code = currency.value if hasattr(currency, 'value') else currency
+                    lines.append(f"  • {currency_code}: {amount:,.2f}")
+                lines.append("")
+
+            # Positions
+            if positions:
+                lines.append(f"📈 Positions ({len(positions)}):")
+                # Group by type
+                by_type = {}
+                for pos in positions:
+                    itype = pos.get("instrument_type", "other")
+                    if itype not in by_type:
+                        by_type[itype] = []
+                    by_type[itype].append(pos)
+
+                for itype, type_positions in sorted(by_type.items()):
+                    lines.append(f"  [{itype.upper()}]")
+                    for pos in type_positions:
+                        symbol = pos.get("symbol", "???")
+                        qty = pos.get("quantity", 0)
+                        price = pos.get("current_price")
+                        market_value = pos.get("market_value")
+                        pnl = pos.get("unrealized_pnl")
+                        pnl_pct = pos.get("unrealized_pnl_percent")
+
+                        price_str = f"@ {price:,.2f}" if price else "(no price)"
+                        value_str = f"= {market_value:,.2f}" if market_value else ""
+
+                        pnl_str = ""
+                        if pnl is not None and pnl_pct is not None:
+                            sign = "+" if pnl >= 0 else ""
+                            pnl_str = f" ({sign}{pnl:,.2f}, {sign}{pnl_pct:.1f}%)"
+
+                        lines.append(f"    • {symbol}: {qty:,.4g} {price_str} {value_str}{pnl_str}")
+            else:
+                lines.append("📈 Positions: None")
+
+            return "\n".join(lines)
+
+        except Exception as e:
+            return f"❌ Error getting portfolio snapshot: {str(e)}"
+
+
+class GetTransactionsInput(BaseModel):
+    """Input for getting transactions with optional filters."""
+
+    start_date: Optional[str] = Field(
+        default=None,
+        description="Start date filter in YYYY-MM-DD format (inclusive)",
+    )
+    end_date: Optional[str] = Field(
+        default=None,
+        description="End date filter in YYYY-MM-DD format (inclusive)",
+    )
+    symbol: Optional[str] = Field(
+        default=None,
+        description="Filter by instrument symbol (e.g., AAPL, MSFT)",
+    )
+    transaction_type: Optional[str] = Field(
+        default=None,
+        description="Filter by type: buy, sell, dividend, deposit, withdrawal, fees",
+    )
+    limit: Optional[int] = Field(
+        default=None,
+        description="Maximum number of transactions to return (most recent first if filtering)",
+    )
+
+
+class GetTransactionsTool(BaseTool):
+    """Tool for exporting transactions and history with metrics-ready fields."""
+
+    name: str = "get_transactions"
+    description: str = (
+        "Return transactions with optional filters. Supports date range, symbol, and type filtering. "
+        "Use start_date/end_date for date ranges, symbol for specific instruments, limit to cap results."
+    )
+    args_schema: type[BaseModel] = GetTransactionsInput
+    portfolio_manager: Optional[PortfolioManager] = None
+
+    def __init__(self, portfolio_manager: PortfolioManager):
+        super().__init__()
+        self.portfolio_manager = portfolio_manager
+
+    def _run(
+        self,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        symbol: Optional[str] = None,
+        transaction_type: Optional[str] = None,
+        limit: Optional[int] = None,
+    ) -> str:
         try:
             if not self.portfolio_manager.current_portfolio:
                 return "❌ No portfolio loaded."
 
             txns = self.portfolio_manager.current_portfolio.transactions
+
+            # Parse date filters
+            start_dt = None
+            end_dt = None
+            if start_date:
+                try:
+                    start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+                except ValueError:
+                    return f"❌ Invalid start_date format: {start_date}. Use YYYY-MM-DD."
+            if end_date:
+                try:
+                    # End of day for end_date
+                    end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(
+                        hour=23, minute=59, second=59
+                    )
+                except ValueError:
+                    return f"❌ Invalid end_date format: {end_date}. Use YYYY-MM-DD."
+
+            # Apply filters
+            filtered = []
+            for t in txns:
+                # Date filter
+                if start_dt and t.timestamp < start_dt:
+                    continue
+                if end_dt and t.timestamp > end_dt:
+                    continue
+                # Symbol filter (case-insensitive)
+                if symbol and t.instrument.symbol.upper() != symbol.upper():
+                    continue
+                # Transaction type filter
+                if transaction_type and t.transaction_type.value.lower() != transaction_type.lower():
+                    continue
+                filtered.append(t)
+
+            # Sort by timestamp
+            filtered = sorted(filtered, key=lambda x: x.timestamp)
+
+            # Apply limit (take most recent if limit specified)
+            if limit and len(filtered) > limit:
+                filtered = filtered[-limit:]
+
+            # Build header with filter info
+            filter_parts = []
+            if start_date:
+                filter_parts.append(f"from {start_date}")
+            if end_date:
+                filter_parts.append(f"to {end_date}")
+            if symbol:
+                filter_parts.append(f"symbol={symbol}")
+            if transaction_type:
+                filter_parts.append(f"type={transaction_type}")
+
+            filter_desc = f" ({', '.join(filter_parts)})" if filter_parts else " (all)"
+            total_count = len(self.portfolio_manager.current_portfolio.transactions)
+            header = f"🧾 Transactions{filter_desc}: {len(filtered)}/{total_count}"
+
             lines = [
-                "🧾 Transactions (all):",
+                header,
                 "id,timestamp,symbol,type,quantity,price,currency,notes",
             ]
-            for t in sorted(txns, key=lambda x: x.timestamp):
+            for t in filtered:
                 lines.append(
                     ",".join(
                         [
@@ -708,7 +902,7 @@ class SimulateWhatIfTool(BaseTool):
 
     name: str = "simulate_what_if"
     description: str = (
-        "Simulate snapshots for a date range excluding certain symbols or transactions; returns end total value and basic stats."
+        "Simulate portfolio history for a date range excluding certain symbols or transactions; returns end total value and basic stats."
     )
     portfolio_manager: Optional[PortfolioManager] = None
 
@@ -743,32 +937,32 @@ class SimulateWhatIfTool(BaseTool):
             ]
             ids = [x.strip() for x in splitter.split(exclude_txn_ids) if x.strip()]
 
-            # Baseline (no exclusions)
-            baseline_snaps = self.portfolio_manager.simulate_snapshots_for_range(
+            # Baseline (no exclusions) - returns DataFrame
+            baseline_df = self.portfolio_manager.simulate_portfolio_history(
                 start_date, end_date
             )
 
-            # What-if with exclusions
-            snaps = self.portfolio_manager.simulate_snapshots_for_range(
+            # What-if with exclusions - returns DataFrame
+            whatif_df = self.portfolio_manager.simulate_portfolio_history(
                 start_date,
                 end_date,
                 exclude_symbols=symbols,
                 exclude_transaction_ids=ids,
             )
 
-            if not snaps or not baseline_snaps:
-                return "No snapshots generated for the specified range."
+            if whatif_df.empty or baseline_df.empty:
+                return "No data generated for the specified range. Update market data first."
 
-            end_value = float(snaps[-1].total_value)
-            start_value = float(snaps[0].total_value)
+            end_value = float(whatif_df["total_value"].iloc[-1])
+            start_value = float(whatif_df["total_value"].iloc[0])
             total_return = (
                 ((end_value - start_value) / start_value * 100)
                 if start_value > 0
                 else 0.0
             )
 
-            base_end = float(baseline_snaps[-1].total_value)
-            base_start = float(baseline_snaps[0].total_value)
+            base_end = float(baseline_df["total_value"].iloc[-1])
+            base_start = float(baseline_df["total_value"].iloc[0])
             base_return = (
                 ((base_end - base_start) / base_start * 100) if base_start > 0 else 0.0
             )
@@ -819,12 +1013,14 @@ class AdvancedWhatIfTool(BaseTool):
 
         Args:
             scenario_type: Type of scenario (optimistic, likely, pessimistic, stress, custom)
-            projection_years: Years to project (1-10)
+            projection_years: Years to project (0.5-10)
             monte_carlo_runs: Number of simulations (100-5000)
-            modify_positions: JSON-like string of position modifications, e.g.,
+            modify_positions: Position modifications string, e.g.,
                             "AAPL:+50%,MSFT:-25%,GOOGL:=150" (increase by 50%, decrease by 25%, set to 150 shares)
-            add_positions: JSON-like string of new positions to add, e.g.,
-                         "NVDA:100@$800,TSLA:50@$250" (100 shares at $800, 50 shares at $250)
+            add_positions: New positions to add. Formats supported:
+                         - With price: "NVDA:100@$800,TSLA:50@$250"
+                         - Auto-fetch price: "NVDA:100,TSLA:50" (fetches current market prices)
+                         - Mixed: "NVDA:100@$800,AAPL:25" (explicit price for NVDA, auto-fetch for AAPL)
             market_return: Expected annual market return (as decimal, e.g., 0.08 for 8%)
             market_volatility: Market volatility (as decimal, e.g., 0.20 for 20%)
             recurring_deposits: Monthly recurring deposits in USD
@@ -849,7 +1045,7 @@ class AdvancedWhatIfTool(BaseTool):
             market_volatility = max(0.01, min(2.0, market_volatility))
 
             # Create current portfolio snapshot
-            current_snapshot = self.portfolio_manager.create_snapshot(save=False)
+            current_snapshot = self.portfolio_manager.create_current_snapshot()
 
             # Apply portfolio modifications
             modified_snapshot = self._apply_portfolio_modifications(
@@ -967,13 +1163,13 @@ class AdvancedWhatIfTool(BaseTool):
         return modifications
 
     def _parse_new_positions(self, add_string):
-        """Parse new position string like 'NVDA:100@$800,TSLA:50@$250'."""
+        """Parse new position string like 'NVDA:100@$800,TSLA:50@$250' or 'NVDA:100' (auto-fetch price)."""
         new_positions = {}
         if not add_string:
             return new_positions
 
         for item in add_string.split(','):
-            if ':' not in item or '@' not in item:
+            if ':' not in item:
                 continue
 
             symbol, details = item.strip().split(':', 1)
@@ -982,7 +1178,28 @@ class AdvancedWhatIfTool(BaseTool):
             if '@' in details:
                 quantity_str, price_str = details.split('@', 1)
                 quantity = float(quantity_str.strip())
-                price = float(price_str.strip().replace('$', ''))
+                price_str = price_str.strip().replace('$', '')
+
+                # If price is empty or zero, auto-fetch current market price
+                if not price_str or float(price_str) <= 0:
+                    fetched_price = self.portfolio_manager.data_manager.get_current_price(symbol)
+                    if fetched_price is None:
+                        continue  # Skip this position if we can't get the price
+                    price = float(fetched_price)
+                else:
+                    price = float(price_str)
+
+                new_positions[symbol] = {
+                    'quantity': quantity,
+                    'price': price
+                }
+            else:
+                # No @ sign - just quantity, auto-fetch price
+                quantity = float(details.strip())
+                fetched_price = self.portfolio_manager.data_manager.get_current_price(symbol)
+                if fetched_price is None:
+                    continue  # Skip this position if we can't get the price
+                price = float(fetched_price)
 
                 new_positions[symbol] = {
                     'quantity': quantity,
@@ -1158,7 +1375,10 @@ class HypotheticalPositionTool(BaseTool):
     name: str = "test_hypothetical_position"
     description: str = (
         "Test adding a hypothetical position to your portfolio and see how it would perform "
-        "under different market scenarios. Useful for exploring new investment opportunities."
+        "under different market scenarios. Returns the symbol's historical volatility, risk level, "
+        "annual return, and Monte Carlo projections. Provide a symbol and either quantity or "
+        "investment_amount. If purchase_price is omitted or 0, the current market price will be "
+        "fetched automatically."
     )
     portfolio_manager: Optional[PortfolioManager] = None
 
@@ -1169,8 +1389,8 @@ class HypotheticalPositionTool(BaseTool):
     def _run(
         self,
         symbol: str,
-        quantity: float,
-        purchase_price: float,
+        quantity: float = 0,
+        purchase_price: float = 0,
         investment_amount: str = "",
         scenario: str = "likely",
         time_horizon: float = 1.0,
@@ -1180,7 +1400,7 @@ class HypotheticalPositionTool(BaseTool):
         Args:
             symbol: Stock symbol to test (e.g., "AAPL", "MSFT")
             quantity: Number of shares to hypothetically purchase (use 0 if using investment_amount)
-            purchase_price: Price per share for the hypothetical purchase
+            purchase_price: Price per share (0 or omit to auto-fetch current market price)
             investment_amount: Alternative to quantity - dollar amount to invest (e.g., "$5000")
             scenario: Market scenario to test (optimistic, likely, pessimistic, stress)
             time_horizon: Years to project the investment (0.5 to 5.0)
@@ -1188,6 +1408,18 @@ class HypotheticalPositionTool(BaseTool):
         try:
             if not self.portfolio_manager.current_portfolio:
                 return "❌ No portfolio loaded."
+
+            symbol = symbol.upper().strip()
+
+            # Auto-fetch current market price if not provided
+            if purchase_price <= 0:
+                fetched_price = self.portfolio_manager.data_manager.get_current_price(symbol)
+                if fetched_price is None:
+                    return f"❌ Could not fetch current price for {symbol}. Please provide a purchase_price or check the symbol."
+                purchase_price = float(fetched_price)
+
+            # Fetch historical data to calculate volatility and returns
+            symbol_volatility, symbol_annual_return, price_change_1y = self._calculate_symbol_metrics(symbol)
 
             # Parse investment amount if provided
             if investment_amount:
@@ -1199,14 +1431,14 @@ class HypotheticalPositionTool(BaseTool):
                     return f"❌ Invalid investment amount: {investment_amount}"
 
             if quantity <= 0:
-                return "❌ Quantity must be positive"
+                return "❌ Quantity must be positive. Provide either quantity or investment_amount."
 
             # Validate parameters
             time_horizon = max(0.5, min(5.0, time_horizon))
             symbol = symbol.upper().strip()
 
             # Get current portfolio value for context
-            current_snapshot = self.portfolio_manager.create_snapshot(save=False)
+            current_snapshot = self.portfolio_manager.create_current_snapshot()
             current_value = float(current_snapshot.total_value)
             investment_value = quantity * purchase_price
 
@@ -1239,26 +1471,120 @@ class HypotheticalPositionTool(BaseTool):
             # Add hypothetical-specific formatting
             investment_pct = (investment_value / current_value) * 100
 
+            # Build symbol metrics section
+            metrics_lines = []
+            if symbol_volatility is not None:
+                metrics_lines.append(f"   • Historical Volatility: {symbol_volatility:.1f}% (annualized)")
+            if symbol_annual_return is not None:
+                metrics_lines.append(f"   • Historical Annual Return: {symbol_annual_return:+.1f}%")
+            if price_change_1y is not None:
+                metrics_lines.append(f"   • 1-Year Price Change: {price_change_1y:+.1f}%")
+
+            # Determine risk level based on volatility
+            risk_level = "Unknown"
+            if symbol_volatility is not None:
+                if symbol_volatility < 20:
+                    risk_level = "🟢 Low"
+                elif symbol_volatility < 35:
+                    risk_level = "🟡 Moderate"
+                elif symbol_volatility < 50:
+                    risk_level = "🟠 High"
+                else:
+                    risk_level = "🔴 Very High"
+                metrics_lines.append(f"   • Risk Level: {risk_level}")
+
             header = [
                 f"🧪 Hypothetical Position Analysis",
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
                 f"",
                 f"💼 Hypothetical Investment:",
                 f"   • Symbol: {symbol}",
-                f"   • Quantity: {quantity:,.0f} shares",
+                f"   • Quantity: {quantity:,.2f} shares",
                 f"   • Purchase Price: {purchase_price:,.2f} USD",
                 f"   • Total Investment: {investment_value:,.2f} USD ({investment_pct:.1f}% of portfolio)",
                 f"   • Scenario: {scenario.title()}",
                 f"   • Time Horizon: {time_horizon:.1f} years",
                 f"",
+            ]
+
+            # Add symbol metrics section if we have any data
+            if metrics_lines:
+                header.extend([
+                    f"📈 Symbol Metrics ({symbol}):",
+                ] + metrics_lines + [""])
+
+            header.extend([
                 f"📊 Impact on Portfolio:",
                 ""
-            ]
+            ])
 
             return "\n".join(header) + result.split("📊 Portfolio Modifications Applied:")[1] if "📊 Portfolio Modifications Applied:" in result else result
 
         except Exception as e:
             return f"❌ Error testing hypothetical position: {str(e)}"
+
+    def _calculate_symbol_metrics(self, symbol: str) -> tuple:
+        """Calculate historical volatility and returns for a symbol.
+
+        Returns:
+            Tuple of (annualized_volatility_pct, annualized_return_pct, 1y_price_change_pct)
+            Any value may be None if data is unavailable.
+        """
+        import numpy as np
+        from datetime import date, timedelta
+
+        try:
+            # Get 1 year of historical data
+            end_date = date.today()
+            start_date = end_date - timedelta(days=365)
+
+            prices = self.portfolio_manager.data_manager.get_historical_prices(
+                symbol, start_date, end_date
+            )
+
+            if not prices or len(prices) < 20:
+                # Not enough data for meaningful calculations
+                return None, None, None
+
+            # Extract close prices and sort by date
+            price_data = sorted(
+                [(p.date, float(p.close_price)) for p in prices if p.close_price],
+                key=lambda x: x[0]
+            )
+
+            if len(price_data) < 20:
+                return None, None, None
+
+            closes = [p[1] for p in price_data]
+
+            # Calculate daily returns
+            returns = []
+            for i in range(1, len(closes)):
+                if closes[i-1] > 0:
+                    daily_return = (closes[i] - closes[i-1]) / closes[i-1]
+                    returns.append(daily_return)
+
+            if len(returns) < 10:
+                return None, None, None
+
+            # Annualized volatility (std dev of daily returns * sqrt(252 trading days))
+            daily_std = np.std(returns)
+            annualized_volatility = daily_std * np.sqrt(252) * 100  # Convert to percentage
+
+            # Annualized return (compound daily returns)
+            avg_daily_return = np.mean(returns)
+            annualized_return = ((1 + avg_daily_return) ** 252 - 1) * 100  # Convert to percentage
+
+            # 1-year price change
+            first_price = closes[0]
+            last_price = closes[-1]
+            price_change_1y = ((last_price - first_price) / first_price) * 100 if first_price > 0 else None
+
+            return annualized_volatility, annualized_return, price_change_1y
+
+        except Exception:
+            # If anything fails, return None values - don't break the main analysis
+            return None, None, None
 
 
 class SearchInstrumentTool(BaseTool):
@@ -1798,22 +2124,20 @@ class GetPortfolioMetricsTool(BaseTool):
             if not self.portfolio_manager.current_portfolio:
                 return "❌ No portfolio loaded."
 
-            # Get snapshots for the period
+            # Get portfolio history for the period
             end_date = date.today()
             start_date = end_date - timedelta(days=days)
 
             try:
-                snapshots = self.portfolio_manager.storage.load_snapshots(
-                    self.portfolio_manager.current_portfolio.id, start_date, end_date
-                )
+                history_df = self.portfolio_manager.get_portfolio_history(start_date, end_date)
             except Exception as e:
-                return f"❌ Error loading snapshots: {str(e)}"
+                return f"❌ Error loading portfolio history: {str(e)}"
 
-            if len(snapshots) < 2:
-                return "❌ Insufficient historical data for metrics calculation. Need at least 2 data points."
+            if history_df.empty or len(history_df) < 2:
+                return "❌ Insufficient historical data for metrics calculation. Need at least 2 data points. Update market data first."
 
-            metrics = self.metrics_calculator.calculate_portfolio_metrics(
-                snapshots, benchmark_symbol=benchmark
+            metrics = self.metrics_calculator.calculate_metrics_from_df(
+                history_df, benchmark_symbol=benchmark
             )
 
             if "error" in metrics:
@@ -1999,6 +2323,9 @@ class ModifyTransactionTool(BaseTool):
             # Save the portfolio
             self.portfolio_manager.storage.save_portfolio(portfolio)
 
+            # Invalidate portfolio history cache since transactions changed
+            self.portfolio_manager._invalidate_portfolio_history()
+
             return (
                 f"✅ Modified transaction {transaction_id[:8]}...\n"
                 f"Changes: {', '.join(modifications)}"
@@ -2072,6 +2399,9 @@ class DeleteTransactionTool(BaseTool):
             # Save the portfolio
             self.portfolio_manager.storage.save_portfolio(portfolio)
 
+            # Invalidate portfolio history cache since transactions changed
+            self.portfolio_manager._invalidate_portfolio_history()
+
             return (
                 f"✅ Deleted transaction:\n"
                 f"• ID: {transaction_id[:8]}...\n"
@@ -2114,7 +2444,7 @@ class SetMarketPriceTool(BaseTool):
     Use cases:
     - When price lookup fails and user wants to use purchase price as market price
     - When user wants to manually set a custom price for an instrument
-    - When correcting historical prices in snapshots
+    - When correcting historical prices in market data
 
     Parameters:
     - symbol: The instrument symbol (required)
@@ -2148,14 +2478,14 @@ class SetMarketPriceTool(BaseTool):
 
             symbol = symbol.upper().strip()
 
-            # Check if symbol exists in portfolio
-            if symbol not in self.portfolio_manager.current_portfolio.positions:
-                return f"❌ Symbol '{symbol}' not found in portfolio. Please add a transaction for this symbol first."
-
-            position = self.portfolio_manager.current_portfolio.positions[symbol]
+            # Check if symbol exists in current portfolio
+            position = self.portfolio_manager.current_portfolio.positions.get(symbol)
+            is_sold_instrument = position is None
 
             # Determine the price to use
             if use_purchase_price:
+                if is_sold_instrument:
+                    return f"❌ Cannot use purchase price for sold instrument '{symbol}'. Please provide an explicit price."
                 final_price = position.average_cost
                 price_source = "purchase price (average cost)"
             elif price is not None:
@@ -2174,24 +2504,44 @@ class SetMarketPriceTool(BaseTool):
             else:
                 target_date = None  # Will default to today in the manager
 
+            # For sold instruments, we can only update historical market data
+            if is_sold_instrument and target_date is None:
+                return (
+                    f"❌ Symbol '{symbol}' is a sold instrument (no current position). "
+                    f"Please specify a date to update historical market data."
+                )
+
             # Set the price
             success = self.portfolio_manager.set_position_price(
                 symbol=symbol,
                 price=final_price,
                 target_date=target_date,
-                update_current=True,
+                update_current=not is_sold_instrument,
             )
 
             if success:
                 target_date_str = (date if date else "today")
-                return (
-                    f"✅ Set market price for {symbol}:\n"
-                    f"• Price: {final_price:.2f} ({price_source})\n"
-                    f"• Date: {target_date_str}\n"
-                    f"• Position: {position.instrument.name}\n"
-                    f"• Quantity: {position.quantity}"
-                )
+                if is_sold_instrument:
+                    return (
+                        f"✅ Set historical price for sold instrument {symbol}:\n"
+                        f"• Price: {final_price:.2f} ({price_source})\n"
+                        f"• Date: {target_date_str}\n"
+                        f"• Note: Updated historical market data (instrument was sold)"
+                    )
+                else:
+                    return (
+                        f"✅ Set market price for {symbol}:\n"
+                        f"• Price: {final_price:.2f} ({price_source})\n"
+                        f"• Date: {target_date_str}\n"
+                        f"• Position: {position.instrument.name}\n"
+                        f"• Quantity: {position.quantity}"
+                    )
             else:
+                if is_sold_instrument:
+                    return (
+                        f"❌ Failed to set price for sold instrument {symbol}. "
+                        f"Make sure market data exists for {date or 'today'}."
+                    )
                 return f"❌ Failed to set price for {symbol}. Check logs for details."
 
         except Exception as e:
@@ -2217,10 +2567,10 @@ class FetchAndUpdatePricesInput(BaseModel):
 
 
 class FetchAndUpdatePricesTool(BaseTool):
-    """Tool for fetching prices from data provider and updating portfolio snapshots."""
+    """Tool for fetching prices from data provider and updating market data."""
 
     name: str = "fetch_and_update_prices"
-    description: str = """Fetch historical prices from the data provider and update portfolio snapshots.
+    description: str = """Fetch historical prices from the data provider and update market data.
 
     Use cases:
     - Update historical prices for an instrument from market data
@@ -2266,9 +2616,14 @@ class FetchAndUpdatePricesTool(BaseTool):
             portfolio_symbol = symbol.upper().strip()
             lookup_symbol = (provider_symbol or symbol).upper().strip()
 
-            # Check if symbol exists in portfolio
-            if portfolio_symbol not in self.portfolio_manager.current_portfolio.positions:
-                return f"❌ Symbol '{portfolio_symbol}' not found in portfolio. Please add a transaction for this symbol first."
+            # Check if symbol exists in current portfolio
+            position = self.portfolio_manager.current_portfolio.positions.get(portfolio_symbol)
+            is_sold_instrument = position is None
+
+            # For sold instruments, we can still update historical market data entries
+            # but we inform the user about limitations
+            if is_sold_instrument:
+                logging.info(f"Updating prices for sold instrument {portfolio_symbol}")
 
             # Parse dates
             try:
@@ -2335,14 +2690,30 @@ class FetchAndUpdatePricesTool(BaseTool):
                 else:
                     failed_dates.append(str(price_date))
 
+            # If a provider_symbol was used and prices were found, store it for future use
+            # (only if position still exists in current portfolio)
+            if provider_symbol and success_count > 0 and not is_sold_instrument:
+                # Store the data_provider_symbol so future updates use the correct symbol
+                position.instrument.data_provider_symbol = lookup_symbol
+                self.portfolio_manager.storage.save_portfolio(self.portfolio_manager.current_portfolio)
+                logging.info(f"Stored data_provider_symbol '{lookup_symbol}' for {portfolio_symbol}")
+
             # Build result message
-            position = self.portfolio_manager.current_portfolio.positions[portfolio_symbol]
-            result_lines = [
-                f"✅ Price update for {portfolio_symbol} ({position.instrument.name}):",
-                f"• Data source: {lookup_symbol}" + (" (provider symbol)" if provider_symbol else ""),
-                f"• Successfully updated: {success_count} prices",
-                f"• Date range: {start_date} to {end_date}",
-            ]
+            if is_sold_instrument:
+                result_lines = [
+                    f"✅ Price update for sold instrument {portfolio_symbol}:",
+                    f"• Data source: {lookup_symbol}",
+                    f"• Successfully updated: {success_count} historical market data entries",
+                    f"• Date range: {start_date} to {end_date}",
+                    f"• Note: This is a sold instrument - only historical market data entries were updated",
+                ]
+            else:
+                result_lines = [
+                    f"✅ Price update for {portfolio_symbol} ({position.instrument.name}):",
+                    f"• Data source: {lookup_symbol}" + (" (provider symbol - saved for future updates)" if provider_symbol else ""),
+                    f"• Successfully updated: {success_count} prices",
+                    f"• Date range: {start_date} to {end_date}",
+                ]
 
             if failed_dates:
                 result_lines.append(f"• Failed/skipped dates: {len(failed_dates)}")
@@ -2355,40 +2726,121 @@ class FetchAndUpdatePricesTool(BaseTool):
             return f"❌ Error fetching and updating prices: {str(e)}"
 
 
+class SetDataProviderSymbolInput(BaseModel):
+    """Input for setting the data provider symbol for a position."""
+
+    symbol: str = Field(
+        description="Portfolio symbol (the symbol used in your portfolio)"
+    )
+    data_provider_symbol: str = Field(
+        description="Symbol to use with the data provider (e.g., BTC-USD for Bitcoin on Yahoo Finance)"
+    )
+
+
+class SetDataProviderSymbolTool(BaseTool):
+    """Tool for setting the data provider symbol for a portfolio position."""
+
+    name: str = "set_data_provider_symbol"
+    description: str = """Set the data provider symbol for a portfolio position.
+
+    Use this when the portfolio symbol differs from the symbol used by the data provider.
+    Once set, all future price lookups (Quick Refresh, Update Market Data) will use the
+    data provider symbol automatically.
+
+    Examples:
+    - Bitcoin: set_data_provider_symbol(symbol="BTC", data_provider_symbol="BTC-USD")
+    - Ethereum: set_data_provider_symbol(symbol="ETH", data_provider_symbol="ETH-USD")
+    - Custom bond: set_data_provider_symbol(symbol="CORP_BOND", data_provider_symbol="LQD")
+
+    This is automatically done when using fetch_and_update_prices with a provider_symbol,
+    but you can use this tool to set it manually.
+    """
+    args_schema: type[BaseModel] = SetDataProviderSymbolInput
+    portfolio_manager: Optional[PortfolioManager] = None
+
+    def __init__(self, portfolio_manager: PortfolioManager):
+        super().__init__()
+        self.portfolio_manager = portfolio_manager
+
+    def _run(
+        self,
+        symbol: str,
+        data_provider_symbol: str,
+    ) -> str:
+        """Set the data provider symbol for a position."""
+        try:
+            if not self.portfolio_manager.current_portfolio:
+                return "❌ No portfolio loaded."
+
+            portfolio_symbol = symbol.upper().strip()
+            provider_symbol = data_provider_symbol.upper().strip()
+
+            if portfolio_symbol not in self.portfolio_manager.current_portfolio.positions:
+                return f"❌ Symbol '{portfolio_symbol}' not found in portfolio."
+
+            success = self.portfolio_manager.set_data_provider_symbol(
+                portfolio_symbol, provider_symbol
+            )
+
+            if success:
+                position = self.portfolio_manager.current_portfolio.positions[portfolio_symbol]
+                return (
+                    f"✅ Data provider symbol set for {portfolio_symbol}:\n"
+                    f"• Instrument: {position.instrument.name}\n"
+                    f"• Portfolio symbol: {portfolio_symbol}\n"
+                    f"• Data provider symbol: {provider_symbol}\n\n"
+                    f"Future price updates (Quick Refresh, Update Market Data) will now use '{provider_symbol}' to fetch prices."
+                )
+            else:
+                return f"❌ Failed to set data provider symbol for {portfolio_symbol}."
+
+        except Exception as e:
+            return f"❌ Error setting data provider symbol: {str(e)}"
+
+
 class BulkSetMarketPriceInput(BaseModel):
     """Input for bulk setting market prices."""
 
-    symbol: str = Field(description="Stock/instrument symbol (e.g., AAPL, TSLA)")
+    symbol: Optional[str] = Field(
+        default=None,
+        description="Stock/instrument symbol (e.g., AAPL, TSLA). Optional when using multi-symbol JSON format."
+    )
     prices: str = Field(
-        description="""Price data in one of two formats:
-        1. Simple: "YYYY-MM-DD:price,YYYY-MM-DD:price,..." (e.g., "2024-01-01:150.0,2024-01-02:152.5")
-        2. JSON array: '[{"date":"2024-01-01","price":150.0},{"date":"2024-01-02","price":152.5}]'"""
+        description="""Price data in one of three formats:
+        1. Simple (requires symbol): "YYYY-MM-DD:price,YYYY-MM-DD:price,..." (e.g., "2024-01-01:150.0,2024-01-02:152.5")
+        2. Single-symbol JSON (requires symbol): '[{"date":"2024-01-01","price":150.0},{"date":"2024-01-02","price":152.5}]'
+        3. Multi-symbol JSON (symbol not needed): '[{"symbol":"AAPL","date":"2024-01-01","price":150.0},{"symbol":"MSFT","date":"2024-01-01","price":350.0}]'"""
     )
 
 
 class BulkSetMarketPriceTool(BaseTool):
-    """Tool for bulk setting market prices for an instrument across multiple dates."""
+    """Tool for bulk setting market prices for one or more instruments across multiple dates."""
 
     name: str = "bulk_set_market_price"
-    description: str = """Set market prices for an instrument across multiple dates at once.
+    description: str = """Set market prices for one or more instruments across multiple dates at once.
 
     Use cases:
     - Entering historical price data manually when market data isn't available
     - Importing price history for instruments without data providers
-    - Correcting multiple historical prices in snapshots
+    - Correcting multiple historical prices in market data
+    - Bulk updating prices for multiple symbols in a single call
 
     Parameters:
-    - symbol: The instrument symbol (required)
-    - prices: Price data in one of two formats:
-        1. Simple format: "YYYY-MM-DD:price,YYYY-MM-DD:price,..."
-        2. JSON array: '[{"date":"2024-01-01","price":150.0},{"date":"2024-01-02","price":152.5}]'
+    - symbol: The instrument symbol (optional - only needed for single-symbol formats)
+    - prices: Price data in one of three formats:
+        1. Simple format (requires symbol): "YYYY-MM-DD:price,YYYY-MM-DD:price,..."
+        2. Single-symbol JSON (requires symbol): '[{"date":"2024-01-01","price":150.0},{"date":"2024-01-02","price":152.5}]'
+        3. Multi-symbol JSON (symbol not needed): '[{"symbol":"AAPL","date":"2024-01-01","price":150.0},{"symbol":"MSFT","date":"2024-01-01","price":350.0}]'
 
     Examples:
-    - Simple format:
+    - Simple format (single symbol):
       bulk_set_market_price(symbol="AAPL", prices="2024-01-01:150.0,2024-01-02:152.5,2024-01-03:148.0")
 
-    - JSON format:
+    - Single-symbol JSON:
       bulk_set_market_price(symbol="AAPL", prices='[{"date":"2024-01-01","price":150.0},{"date":"2024-01-02","price":152.5}]')
+
+    - Multi-symbol JSON (no symbol parameter needed):
+      bulk_set_market_price(prices='[{"symbol":"AAPL","date":"2024-01-01","price":150.0},{"symbol":"MSFT","date":"2024-01-01","price":350.0}]')
     """
     args_schema: type[BaseModel] = BulkSetMarketPriceInput
     portfolio_manager: Optional[PortfolioManager] = None
@@ -2397,11 +2849,14 @@ class BulkSetMarketPriceTool(BaseTool):
         super().__init__()
         self.portfolio_manager = portfolio_manager
 
-    def _parse_prices(self, prices: str) -> tuple[list, list]:
-        """Parse prices from either simple or JSON format.
+    def _parse_prices(self, prices: str) -> tuple[list, list, bool]:
+        """Parse prices from simple, single-symbol JSON, or multi-symbol JSON format.
 
         Returns:
-            Tuple of (price_entries, errors) where price_entries is list of (date, Decimal) tuples
+            Tuple of (price_entries, errors, is_multi_symbol) where:
+            - price_entries is list of (date, Decimal) tuples for single-symbol format
+            - price_entries is list of (symbol, date, Decimal) tuples for multi-symbol format
+            - is_multi_symbol indicates which format was detected
         """
         import json
         from datetime import datetime as dt
@@ -2414,6 +2869,12 @@ class BulkSetMarketPriceTool(BaseTool):
         if prices_stripped.startswith("["):
             try:
                 data = json.loads(prices_stripped)
+                if not data:
+                    return [], ["Empty JSON array"], False
+
+                # Detect if this is multi-symbol format (items have "symbol" key)
+                is_multi_symbol = isinstance(data[0], dict) and "symbol" in data[0]
+
                 for item in data:
                     if not isinstance(item, dict):
                         errors.append(f"Invalid item in JSON array: {item}")
@@ -2441,9 +2902,17 @@ class BulkSetMarketPriceTool(BaseTool):
                         errors.append(f"Invalid price '{price_val}' - must be a number")
                         continue
 
-                    price_entries.append((entry_date, entry_price))
+                    if is_multi_symbol:
+                        symbol_str = item.get("symbol")
+                        if not symbol_str:
+                            errors.append(f"Missing 'symbol' in multi-symbol format: {item}")
+                            continue
+                        symbol = symbol_str.upper().strip()
+                        price_entries.append((symbol, entry_date, entry_price))
+                    else:
+                        price_entries.append((entry_date, entry_price))
 
-                return price_entries, errors
+                return price_entries, errors, is_multi_symbol
             except json.JSONDecodeError:
                 # Not valid JSON, fall through to simple format
                 pass
@@ -2479,22 +2948,16 @@ class BulkSetMarketPriceTool(BaseTool):
 
             price_entries.append((entry_date, entry_price))
 
-        return price_entries, errors
+        return price_entries, errors, False
 
-    def _run(self, symbol: str, prices: str) -> str:
-        """Bulk set market prices for an instrument."""
+    def _run(self, symbol: Optional[str] = None, prices: str = "") -> str:
+        """Bulk set market prices for one or more instruments."""
         try:
             if not self.portfolio_manager.current_portfolio:
                 return "❌ No portfolio loaded."
 
-            symbol = symbol.upper().strip()
-
-            # Check if symbol exists in portfolio
-            if symbol not in self.portfolio_manager.current_portfolio.positions:
-                return f"❌ Symbol '{symbol}' not found in portfolio. Please add a transaction for this symbol first."
-
-            # Parse price data (supports both simple and JSON formats)
-            price_entries, errors = self._parse_prices(prices)
+            # Parse price data (supports simple, single-symbol JSON, and multi-symbol JSON formats)
+            price_entries, errors, is_multi_symbol = self._parse_prices(prices)
 
             if not price_entries:
                 error_msg = "No valid price entries found."
@@ -2502,46 +2965,217 @@ class BulkSetMarketPriceTool(BaseTool):
                     error_msg += f"\nErrors:\n" + "\n".join(f"• {e}" for e in errors)
                 return f"❌ {error_msg}"
 
-            # Sort by date
-            price_entries.sort(key=lambda x: x[0])
+            # Handle multi-symbol format
+            if is_multi_symbol:
+                return self._run_multi_symbol(price_entries, errors)
 
-            # Apply each price
-            success_count = 0
-            failed_dates = []
+            # Handle single-symbol format (requires symbol parameter)
+            if not symbol:
+                return "❌ Symbol parameter is required for single-symbol price format. Use multi-symbol JSON format if you want to set prices for multiple symbols."
 
-            for entry_date, entry_price in price_entries:
-                success = self.portfolio_manager.set_position_price(
-                    symbol=symbol,
-                    price=entry_price,
-                    target_date=entry_date,
-                    update_current=(entry_date == date.today()),
-                )
-                if success:
-                    success_count += 1
-                else:
-                    failed_dates.append(str(entry_date))
+            return self._run_single_symbol(symbol, price_entries, errors)
 
-            # Build result message
-            position = self.portfolio_manager.current_portfolio.positions[symbol]
+        except Exception as e:
+            return f"❌ Error in bulk price update: {str(e)}"
+
+    def _run_single_symbol(self, symbol: str, price_entries: list, errors: list) -> str:
+        """Handle single-symbol bulk price update."""
+        symbol = symbol.upper().strip()
+
+        # Check if symbol exists in current portfolio
+        position = self.portfolio_manager.current_portfolio.positions.get(symbol)
+        is_sold_instrument = position is None
+
+        # For sold instruments, we can still update historical market data entries
+        if is_sold_instrument:
+            logging.info(f"Bulk updating prices for sold instrument {symbol}")
+
+        # Sort by date
+        price_entries.sort(key=lambda x: x[0])
+
+        # Apply each price
+        success_count = 0
+        failed_dates = []
+
+        for entry_date, entry_price in price_entries:
+            success = self.portfolio_manager.set_position_price(
+                symbol=symbol,
+                price=entry_price,
+                target_date=entry_date,
+                update_current=(entry_date == date.today() and not is_sold_instrument),
+            )
+            if success:
+                success_count += 1
+            else:
+                failed_dates.append(str(entry_date))
+
+        # Build result message
+        if is_sold_instrument:
+            result_lines = [
+                f"✅ Bulk price update for sold instrument {symbol}:",
+                f"• Successfully updated: {success_count} historical market data entries",
+                f"• Date range: {price_entries[0][0]} to {price_entries[-1][0]}",
+                f"• Note: This is a sold instrument - only historical market data entries were updated",
+            ]
+        else:
             result_lines = [
                 f"✅ Bulk price update for {symbol} ({position.instrument.name}):",
                 f"• Successfully set: {success_count} prices",
                 f"• Date range: {price_entries[0][0]} to {price_entries[-1][0]}",
             ]
 
-            if failed_dates:
-                result_lines.append(f"• Failed dates: {', '.join(failed_dates)}")
+        if failed_dates:
+            result_lines.append(f"• Failed dates: {', '.join(failed_dates)}")
 
-            if errors:
-                result_lines.append(f"\n⚠️ Parsing warnings:")
-                result_lines.extend(f"• {e}" for e in errors[:5])
-                if len(errors) > 5:
-                    result_lines.append(f"  ... and {len(errors) - 5} more")
+        if errors:
+            result_lines.append(f"\n⚠️ Parsing warnings:")
+            result_lines.extend(f"• {e}" for e in errors[:5])
+            if len(errors) > 5:
+                result_lines.append(f"  ... and {len(errors) - 5} more")
 
-            return "\n".join(result_lines)
+        return "\n".join(result_lines)
 
-        except Exception as e:
-            return f"❌ Error in bulk price update: {str(e)}"
+    def _is_isin(self, symbol: str) -> bool:
+        """Check if a symbol looks like an ISIN.
+
+        ISIN format: 2-letter country code + 9 alphanumeric + 1 check digit = 12 chars
+        Common prefixes: US, XS, DE, CH, IE, LU, FR, GB, NL, etc.
+        """
+        import re
+        if len(symbol) != 12:
+            return False
+        # Must start with 2 letters and be alphanumeric
+        return bool(re.match(r'^[A-Z]{2}[A-Z0-9]{10}$', symbol))
+
+    def _resolve_isin_to_symbol(self, isin: str) -> tuple[str, bool]:
+        """Try to resolve an ISIN to a portfolio symbol.
+
+        Searches current portfolio positions and transaction history for
+        an instrument with the matching ISIN.
+
+        Args:
+            isin: The ISIN to resolve
+
+        Returns:
+            Tuple of (symbol, was_resolved) where was_resolved indicates if
+            a match was found. If not found, returns original ISIN.
+        """
+        if not self.portfolio_manager.current_portfolio:
+            return isin, False
+
+        isin_upper = isin.upper().strip()
+
+        # Search current positions
+        for symbol, position in self.portfolio_manager.current_portfolio.positions.items():
+            if position.instrument.isin and position.instrument.isin.upper() == isin_upper:
+                return symbol, True
+
+        # Search transaction history for historical instruments
+        for txn in self.portfolio_manager.current_portfolio.transactions:
+            if txn.instrument.isin and txn.instrument.isin.upper() == isin_upper:
+                return txn.instrument.symbol, True
+
+        return isin, False
+
+    def _resolve_symbols_in_entries(self, price_entries: list) -> tuple[list, dict, list]:
+        """Resolve ISINs to portfolio symbols in price entries.
+
+        Args:
+            price_entries: List of (symbol, date, price) tuples
+
+        Returns:
+            Tuple of (resolved_entries, isin_mappings, unresolved_isins) where:
+            - isin_mappings shows which ISINs were resolved to portfolio symbols
+            - unresolved_isins lists ISINs that couldn't be mapped to portfolio symbols
+        """
+        resolved_entries = []
+        isin_mappings = {}  # ISIN -> portfolio symbol
+        unresolved_isins = []  # ISINs that couldn't be resolved
+
+        for symbol, entry_date, entry_price in price_entries:
+            if self._is_isin(symbol):
+                resolved_symbol, was_resolved = self._resolve_isin_to_symbol(symbol)
+                if was_resolved:
+                    isin_mappings[symbol] = resolved_symbol
+                    resolved_entries.append((resolved_symbol, entry_date, entry_price))
+                else:
+                    # Store under ISIN but track as unresolved
+                    unresolved_isins.append(symbol)
+                    resolved_entries.append((symbol, entry_date, entry_price))
+            else:
+                resolved_entries.append((symbol, entry_date, entry_price))
+
+        return resolved_entries, isin_mappings, unresolved_isins
+
+    def _run_multi_symbol(self, price_entries: list, errors: list) -> str:
+        """Handle multi-symbol bulk price update.
+
+        Args:
+            price_entries: List of (symbol, date, price) tuples
+            errors: List of parsing errors
+        """
+        # Resolve ISINs to portfolio symbols
+        resolved_entries, isin_mappings, unresolved_isins = self._resolve_symbols_in_entries(price_entries)
+
+        # Group entries by symbol for reporting
+        from collections import defaultdict
+        entries_by_symbol: dict = defaultdict(list)
+        for symbol, entry_date, entry_price in resolved_entries:
+            entries_by_symbol[symbol].append((entry_date, entry_price))
+
+        # Use batch update for efficiency (use resolved entries!)
+        success_count = self.portfolio_manager.set_positions_prices_batch(resolved_entries)
+
+        # Build result message
+        total_entries = len(resolved_entries)
+        symbols_updated = list(entries_by_symbol.keys())
+
+        # Find date range across all entries
+        all_dates = [entry_date for _, entry_date, _ in resolved_entries]
+        min_date = min(all_dates)
+        max_date = max(all_dates)
+
+        result_lines = [
+            f"✅ Multi-symbol bulk price update completed:",
+            f"• Symbols updated: {', '.join(symbols_updated)}",
+            f"• Total prices set: {success_count}/{total_entries}",
+            f"• Date range: {min_date} to {max_date}",
+        ]
+
+        # Show ISIN resolutions if any
+        if isin_mappings:
+            result_lines.append(f"\n🔗 ISIN resolutions ({len(isin_mappings)}):")
+            for isin, portfolio_symbol in sorted(isin_mappings.items()):
+                result_lines.append(f"• {isin} → {portfolio_symbol}")
+
+        # Warn about unresolved ISINs (stored under ISIN, may not be found in lookups)
+        if unresolved_isins:
+            unique_unresolved = sorted(set(unresolved_isins))
+            result_lines.append(f"\n⚠️ Unresolved ISINs ({len(unique_unresolved)}) - stored under ISIN key:")
+            for isin in unique_unresolved[:10]:
+                result_lines.append(f"• {isin}")
+            if len(unique_unresolved) > 10:
+                result_lines.append(f"  ... and {len(unique_unresolved) - 10} more")
+            result_lines.append("  Note: These ISINs don't match any portfolio position. Prices stored but may not be used.")
+
+        # Add per-symbol breakdown if multiple symbols
+        if len(symbols_updated) > 1:
+            result_lines.append(f"\nPer-symbol breakdown:")
+            for symbol in sorted(symbols_updated):
+                count = len(entries_by_symbol[symbol])
+                position = self.portfolio_manager.current_portfolio.positions.get(symbol)
+                if position:
+                    result_lines.append(f"• {symbol} ({position.instrument.name}): {count} prices")
+                else:
+                    result_lines.append(f"• {symbol} (historical): {count} prices")
+
+        if errors:
+            result_lines.append(f"\n⚠️ Parsing warnings:")
+            result_lines.extend(f"• {e}" for e in errors[:5])
+            if len(errors) > 5:
+                result_lines.append(f"  ... and {len(errors) - 5} more")
+
+        return "\n".join(result_lines)
 
 
 def create_portfolio_tools(
@@ -3358,3 +3992,297 @@ class ScenarioOptimizationTool(BaseTool):
         lines.append("  • Use this to understand how to position based on your market view")
 
         return "\n".join(lines)
+
+
+class GetHistoricalInstrumentsInput(BaseModel):
+    """Input for getting historical instruments."""
+
+    start_date: str = Field(
+        description="Start date in YYYY-MM-DD format"
+    )
+    end_date: str = Field(
+        description="End date in YYYY-MM-DD format"
+    )
+
+
+class GetHistoricalInstrumentsTool(BaseTool):
+    """Tool for listing instruments that were held during a date range but are no longer in current positions."""
+
+    name: str = "get_historical_instruments"
+    description: str = """List instruments that were held in a date range but are no longer in current positions.
+
+    Use cases:
+    - Find sold instruments that need market data updates
+    - See complete instrument history for a period
+    - Identify gaps in market data coverage
+    - Verify which historical instruments have transactions in a date range
+
+    Parameters:
+    - start_date: Start date in YYYY-MM-DD format (required)
+    - end_date: End date in YYYY-MM-DD format (required)
+
+    Returns:
+    - List of symbols with their transaction history summary
+    - Flags indicating if market data exists for the date range
+    - Comparison with current positions
+    """
+    args_schema: type[BaseModel] = GetHistoricalInstrumentsInput
+    portfolio_manager: Optional[PortfolioManager] = None
+
+    def __init__(self, portfolio_manager: PortfolioManager):
+        super().__init__()
+        self.portfolio_manager = portfolio_manager
+
+    def _run(
+        self,
+        start_date: str,
+        end_date: str,
+    ) -> str:
+        """List historical instruments in a date range."""
+        try:
+            if not self.portfolio_manager.current_portfolio:
+                return "❌ No portfolio loaded."
+
+            # Parse dates
+            try:
+                from datetime import datetime as dt
+                start = dt.strptime(start_date, "%Y-%m-%d").date()
+                end = dt.strptime(end_date, "%Y-%m-%d").date()
+            except ValueError:
+                return "❌ Invalid date format. Use YYYY-MM-DD."
+
+            if start > end:
+                return "❌ Start date must be before or equal to end date."
+
+            # Get instruments from transactions in date range
+            historical_instruments = self.portfolio_manager.get_instruments_in_date_range(start, end)
+
+            if not historical_instruments:
+                return f"No instruments with transactions found between {start_date} and {end_date}."
+
+            # Get current positions for comparison
+            current_positions = set(self.portfolio_manager.current_portfolio.positions.keys())
+
+            # Categorize instruments
+            still_held = []
+            sold = []
+
+            for symbol, instrument in historical_instruments.items():
+                # Count transactions for this symbol in date range
+                txn_count = 0
+                buy_count = 0
+                sell_count = 0
+                for txn in self.portfolio_manager.current_portfolio.transactions:
+                    txn_date = txn.timestamp.date()
+                    if start <= txn_date <= end and txn.instrument.symbol == symbol:
+                        txn_count += 1
+                        if txn.transaction_type.value == "buy":
+                            buy_count += 1
+                        elif txn.transaction_type.value == "sell":
+                            sell_count += 1
+
+                # Check if market data exists
+                has_market_data = False
+                market_data_store = self.portfolio_manager.market_data_store
+                if market_data_store:
+                    price = market_data_store.get_price_with_fallback(symbol, end)
+                    has_market_data = price is not None
+
+                info = {
+                    "symbol": symbol,
+                    "name": instrument.name,
+                    "currency": instrument.currency.value,
+                    "txn_count": txn_count,
+                    "buy_count": buy_count,
+                    "sell_count": sell_count,
+                    "has_market_data": has_market_data,
+                    "data_provider_symbol": instrument.data_provider_symbol,
+                }
+
+                if symbol in current_positions:
+                    still_held.append(info)
+                else:
+                    sold.append(info)
+
+            # Format output
+            lines = [
+                f"📊 Instruments with activity from {start_date} to {end_date}:",
+                "",
+            ]
+
+            if sold:
+                lines.append(f"🔴 SOLD INSTRUMENTS (not in current positions): {len(sold)}")
+                lines.append("")
+                for info in sold:
+                    market_status = "✅ has market data" if info["has_market_data"] else "⚠️ NO market data"
+                    provider_info = f" (provider: {info['data_provider_symbol']})" if info["data_provider_symbol"] else ""
+                    lines.append(f"  • {info['symbol']}: {info['name']}")
+                    lines.append(f"    Currency: {info['currency']}{provider_info}")
+                    lines.append(f"    Transactions: {info['txn_count']} ({info['buy_count']} buys, {info['sell_count']} sells)")
+                    lines.append(f"    Market data: {market_status}")
+                    lines.append("")
+
+            if still_held:
+                lines.append(f"🟢 STILL HELD (in current positions): {len(still_held)}")
+                lines.append("")
+                for info in still_held:
+                    market_status = "✅" if info["has_market_data"] else "⚠️"
+                    lines.append(f"  • {info['symbol']}: {info['name']} - {info['txn_count']} transactions {market_status}")
+
+            # Add summary
+            lines.append("")
+            lines.append("📋 Summary:")
+            lines.append(f"  • Total instruments with activity: {len(historical_instruments)}")
+            lines.append(f"  • Still held: {len(still_held)}")
+            lines.append(f"  • Sold/closed: {len(sold)}")
+
+            needs_data = [s["symbol"] for s in sold if not s["has_market_data"]]
+            if needs_data:
+                lines.append("")
+                lines.append("💡 Tip: Use update_historical_market_data to fetch prices for all instruments")
+                lines.append(f"   (including sold ones): {', '.join(needs_data)}")
+
+            return "\n".join(lines)
+
+        except Exception as e:
+            return f"❌ Error getting historical instruments: {str(e)}"
+
+
+class UpdateHistoricalMarketDataInput(BaseModel):
+    """Input for updating historical market data."""
+
+    start_date: str = Field(
+        description="Start date in YYYY-MM-DD format"
+    )
+    end_date: str = Field(
+        description="End date in YYYY-MM-DD format"
+    )
+    include_historical: bool = Field(
+        default=True,
+        description="Whether to include sold instruments from transaction history"
+    )
+
+
+class UpdateHistoricalMarketDataTool(BaseTool):
+    """Tool for updating market data for all instruments (including sold ones) in a date range."""
+
+    name: str = "update_historical_market_data"
+    description: str = """Update market data for all instruments (including sold ones) in a date range.
+
+    Unlike the regular market data update, this tool includes:
+    - Current positions (instruments you still hold)
+    - Sold instruments from transaction history (no longer in positions)
+
+    Use cases:
+    - Update market data for historical portfolio value calculations
+    - Ensure complete price coverage for performance analysis
+    - Fill in missing prices for sold instruments
+
+    Parameters:
+    - start_date: Start date in YYYY-MM-DD format (required)
+    - end_date: End date in YYYY-MM-DD format (required)
+    - include_historical: Whether to include sold instruments (default True)
+
+    This tool fetches historical prices from data providers and stores them
+    in the market data store for all instruments that had activity in the date range.
+    """
+    args_schema: type[BaseModel] = UpdateHistoricalMarketDataInput
+    portfolio_manager: Optional[PortfolioManager] = None
+
+    def __init__(self, portfolio_manager: PortfolioManager):
+        super().__init__()
+        self.portfolio_manager = portfolio_manager
+
+    def _run(
+        self,
+        start_date: str,
+        end_date: str,
+        include_historical: bool = True,
+    ) -> str:
+        """Update market data for all instruments in date range."""
+        try:
+            if not self.portfolio_manager.current_portfolio:
+                return "❌ No portfolio loaded."
+
+            # Parse dates
+            try:
+                from datetime import datetime as dt
+                start = dt.strptime(start_date, "%Y-%m-%d").date()
+                end = dt.strptime(end_date, "%Y-%m-%d").date()
+            except ValueError:
+                return "❌ Invalid date format. Use YYYY-MM-DD."
+
+            if start > end:
+                return "❌ Start date must be before or equal to end date."
+
+            # Get current positions
+            current_positions = set(self.portfolio_manager.current_portfolio.positions.keys())
+
+            # Get historical instruments if requested
+            historical_instruments = {}
+            if include_historical:
+                historical_instruments = self.portfolio_manager.get_instruments_in_date_range(start, end)
+
+            # Count what we're updating
+            historical_only = set(historical_instruments.keys()) - current_positions
+
+            # Perform the update
+            results = self.portfolio_manager.update_market_data(
+                start_date=start,
+                end_date=end,
+                include_historical=include_historical,
+            )
+
+            if not results:
+                return f"No instruments to update for the period {start_date} to {end_date}."
+
+            # Categorize results
+            success_current = []
+            success_historical = []
+            failed = []
+
+            for symbol, success in results.items():
+                if success:
+                    if symbol in historical_only:
+                        success_historical.append(symbol)
+                    else:
+                        success_current.append(symbol)
+                else:
+                    failed.append(symbol)
+
+            # Format output
+            lines = [
+                f"📊 Market Data Update: {start_date} to {end_date}",
+                "",
+            ]
+
+            if success_current:
+                lines.append(f"✅ Current positions updated: {len(success_current)}")
+                lines.append(f"   {', '.join(sorted(success_current))}")
+                lines.append("")
+
+            if success_historical:
+                lines.append(f"✅ Historical/sold instruments updated: {len(success_historical)}")
+                lines.append(f"   {', '.join(sorted(success_historical))}")
+                lines.append("")
+
+            if failed:
+                lines.append(f"❌ Failed to update: {len(failed)}")
+                lines.append(f"   {', '.join(sorted(failed))}")
+                lines.append("")
+                lines.append("💡 Tip: Use fetch_and_update_prices with a provider_symbol for failed instruments,")
+                lines.append("   or use bulk_set_market_price to manually enter prices.")
+
+            # Summary
+            lines.append("")
+            lines.append("📋 Summary:")
+            lines.append(f"  • Total instruments processed: {len(results)}")
+            lines.append(f"  • Successfully updated: {len(success_current) + len(success_historical)}")
+            if include_historical:
+                lines.append(f"  • Including historical/sold: {len(historical_only)} instruments")
+            lines.append(f"  • Failed: {len(failed)}")
+
+            return "\n".join(lines)
+
+        except Exception as e:
+            return f"❌ Error updating historical market data: {str(e)}"
