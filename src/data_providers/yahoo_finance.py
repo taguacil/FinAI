@@ -25,11 +25,48 @@ from .base import (
 class YahooFinanceProvider(BaseDataProvider):
     """Yahoo Finance data provider for stocks, ETFs, and some other instruments."""
 
+    # Currencies that are in minor units (pence, cents) and need conversion
+    # GBX = British pence (1/100 of GBP)
+    # ILA = Israeli Agorot (1/100 of ILS)
+    # ZAc = South African cents (1/100 of ZAR)
+    MINOR_CURRENCY_DIVISORS = {
+        "GBp": 100,  # British pence -> pounds
+        "GBX": 100,  # British pence -> pounds (alternative code)
+        "ILA": 100,  # Israeli agorot -> shekels
+        "ZAc": 100,  # South African cents -> rand
+    }
+
     def __init__(self):
         """Initialize Yahoo Finance provider."""
         self.name = "Yahoo Finance"
         self.last_request_time = 0
         self.min_request_interval = 0.1  # Minimum time between requests (100ms)
+
+    def _convert_from_minor_currency(
+        self, price: Decimal, currency_str: str
+    ) -> tuple[Decimal, str]:
+        """Convert price from minor currency units (pence, cents) to major units.
+
+        Args:
+            price: The price value
+            currency_str: The currency code from the API
+
+        Returns:
+            Tuple of (converted_price, major_currency_code)
+        """
+        if currency_str in self.MINOR_CURRENCY_DIVISORS:
+            divisor = self.MINOR_CURRENCY_DIVISORS[currency_str]
+            converted_price = price / Decimal(str(divisor))
+            # Map minor currency to major currency
+            major_currency_map = {
+                "GBp": "GBP",
+                "GBX": "GBP",
+                "ILA": "ILS",
+                "ZAc": "ZAR",
+            }
+            major_currency = major_currency_map.get(currency_str, currency_str)
+            return converted_price, major_currency
+        return price, currency_str
 
     def _rate_limit(self):
         """Simple rate limiting to avoid overwhelming the API."""
@@ -63,7 +100,13 @@ class YahooFinanceProvider(BaseDataProvider):
             )
 
             if price is not None:
-                return Decimal(str(price))
+                price_decimal = Decimal(str(price))
+                # Convert from minor currency (pence, cents) if needed
+                currency_str = info.get("currency", "USD")
+                converted_price, _ = self._convert_from_minor_currency(
+                    price_decimal, currency_str
+                )
+                return converted_price
             return None
 
         except InvalidSymbolError:
@@ -87,6 +130,11 @@ class YahooFinanceProvider(BaseDataProvider):
         try:
             ticker = self._get_ticker(symbol)
 
+            # Get currency info to check for minor currency conversion
+            info = ticker.info
+            currency_str = info.get("currency", "USD") if info else "USD"
+            needs_conversion = currency_str in self.MINOR_CURRENCY_DIVISORS
+
             # Get historical data
             hist = ticker.history(start=start_date, end=end_date + timedelta(days=1))
 
@@ -96,30 +144,55 @@ class YahooFinanceProvider(BaseDataProvider):
             price_data = []
             for date_idx, row in hist.iterrows():
                 try:
+                    # Extract prices
+                    open_price = (
+                        Decimal(str(row["Open"]))
+                        if not pd.isna(row["Open"])
+                        else None
+                    )
+                    high_price = (
+                        Decimal(str(row["High"]))
+                        if not pd.isna(row["High"])
+                        else None
+                    )
+                    low_price = (
+                        Decimal(str(row["Low"]))
+                        if not pd.isna(row["Low"])
+                        else None
+                    )
+                    close_price = (
+                        Decimal(str(row["Close"]))
+                        if not pd.isna(row["Close"])
+                        else None
+                    )
+
+                    # Convert from minor currency (pence, cents) if needed
+                    if needs_conversion:
+                        if open_price is not None:
+                            open_price, _ = self._convert_from_minor_currency(
+                                open_price, currency_str
+                            )
+                        if high_price is not None:
+                            high_price, _ = self._convert_from_minor_currency(
+                                high_price, currency_str
+                            )
+                        if low_price is not None:
+                            low_price, _ = self._convert_from_minor_currency(
+                                low_price, currency_str
+                            )
+                        if close_price is not None:
+                            close_price, _ = self._convert_from_minor_currency(
+                                close_price, currency_str
+                            )
+
                     price_data.append(
                         PriceData(
                             symbol=symbol,
                             date=date_idx.date(),
-                            open_price=(
-                                Decimal(str(row["Open"]))
-                                if not pd.isna(row["Open"])
-                                else None
-                            ),
-                            high_price=(
-                                Decimal(str(row["High"]))
-                                if not pd.isna(row["High"])
-                                else None
-                            ),
-                            low_price=(
-                                Decimal(str(row["Low"]))
-                                if not pd.isna(row["Low"])
-                                else None
-                            ),
-                            close_price=(
-                                Decimal(str(row["Close"]))
-                                if not pd.isna(row["Close"])
-                                else None
-                            ),
+                            open_price=open_price,
+                            high_price=high_price,
+                            low_price=low_price,
+                            close_price=close_price,
                             volume=(
                                 int(row["Volume"])
                                 if not pd.isna(row["Volume"])
@@ -195,8 +268,17 @@ class YahooFinanceProvider(BaseDataProvider):
             else:
                 instrument_type = InstrumentType.STOCK  # Default fallback
 
-            # Get currency
+            # Get currency and convert from minor currency if needed
             currency_str = info.get("currency", "USD")
+            # Map minor currencies to major currencies
+            if currency_str in self.MINOR_CURRENCY_DIVISORS:
+                major_currency_map = {
+                    "GBp": "GBP",
+                    "GBX": "GBP",
+                    "ILA": "ILS",
+                    "ZAc": "ZAR",
+                }
+                currency_str = major_currency_map.get(currency_str, currency_str)
             try:
                 currency = Currency(currency_str)
             except ValueError:

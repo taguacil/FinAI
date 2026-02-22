@@ -937,6 +937,117 @@ class PortfolioManager:
 
         return result
 
+    def get_ytd_performance(self, as_of_date: Optional[date] = None) -> Dict:
+        """Get YTD (Year-to-Date) performance for each position and the portfolio overall.
+
+        Compares current prices to Dec 31 of the previous year.
+
+        Args:
+            as_of_date: Date to calculate YTD as of (defaults to today)
+
+        Returns:
+            Dict with 'positions' (list of per-instrument dicts) and 'portfolio' (overall YTD)
+        """
+        if not self.current_portfolio:
+            return {"error": "No portfolio loaded"}
+
+        as_of_date = as_of_date or date.today()
+        year_end = date(as_of_date.year - 1, 12, 31)
+
+        # Get current positions with prices at as_of_date
+        positions = self.get_positions_with_prices(as_of_date)
+
+        results = []
+        for pos in positions:
+            symbol = pos["symbol"]
+            current_price = pos.get("current_price")
+            quantity = pos.get("quantity", Decimal("0"))
+            currency = pos.get("currency", "USD")
+            name = pos.get("name", symbol)
+            instrument_type = pos.get("instrument_type", "stock")
+            avg_cost = pos.get("average_cost", Decimal("0"))
+            market_value = pos.get("market_value")
+
+            # Look up Dec 31 price using all identifiers (same fallback pattern)
+            year_end_price = None
+
+            # Get the position state to access data_provider_symbol and isin
+            history = self._get_portfolio_history()
+            if history:
+                pos_states = history.get_positions_at_date(as_of_date)
+                pos_state = pos_states.get(symbol)
+
+                if pos_state:
+                    # Try data_provider_symbol first
+                    if pos_state.data_provider_symbol:
+                        year_end_price = self._market_data_store.get_price_with_fallback(
+                            pos_state.data_provider_symbol, year_end
+                        )
+                    # Try portfolio symbol
+                    if year_end_price is None:
+                        year_end_price = self._market_data_store.get_price_with_fallback(
+                            symbol, year_end
+                        )
+                    # Try ISIN
+                    if year_end_price is None and pos_state.isin:
+                        year_end_price = self._market_data_store.get_price_with_fallback(
+                            pos_state.isin, year_end
+                        )
+
+            # Compute YTD return
+            since_inception = False
+            ytd_pct = None
+            ytd_value_change = None
+            ref_price = year_end_price
+
+            if year_end_price is not None and current_price is not None and year_end_price > 0:
+                ytd_pct = float((current_price - year_end_price) / year_end_price * 100)
+                ytd_value_change = float((current_price - year_end_price) * quantity)
+            elif current_price is not None and avg_cost and avg_cost > 0:
+                # No Dec 31 price — position bought after Jan 1, show since inception
+                since_inception = True
+                ref_price = avg_cost
+                ytd_pct = float((current_price - avg_cost) / avg_cost * 100)
+                ytd_value_change = float((current_price - avg_cost) * quantity)
+
+            results.append({
+                "symbol": symbol,
+                "name": name,
+                "currency": currency,
+                "quantity": float(quantity),
+                "year_end_price": float(ref_price) if ref_price is not None else None,
+                "current_price": float(current_price) if current_price is not None else None,
+                "ytd_pct": ytd_pct,
+                "ytd_value_change": ytd_value_change,
+                "market_value": float(market_value) if market_value is not None else None,
+                "instrument_type": instrument_type,
+                "since_inception": since_inception,
+            })
+
+        # Portfolio-level YTD
+        portfolio_ytd = {}
+        history = self._get_portfolio_history()
+        if history:
+            year_end_value = history.get_value_at_date(year_end)
+            current_value = history.get_value_at_date(as_of_date)
+            if year_end_value and year_end_value > 0:
+                pct = float((current_value - year_end_value) / year_end_value * 100)
+                portfolio_ytd = {
+                    "year_end_value": float(year_end_value),
+                    "current_value": float(current_value),
+                    "ytd_pct": pct,
+                    "ytd_value_change": float(current_value - year_end_value),
+                }
+
+        return {
+            "portfolio_name": self.current_portfolio.name,
+            "as_of_date": as_of_date.isoformat(),
+            "year_end_date": year_end.isoformat(),
+            "base_currency": self.current_portfolio.base_currency.value,
+            "positions": results,
+            "portfolio": portfolio_ytd,
+        }
+
     def get_position_summary(self) -> List[Dict]:
         """Get summary of current positions."""
         if not self.current_portfolio:

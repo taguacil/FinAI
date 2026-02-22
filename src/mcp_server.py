@@ -51,10 +51,12 @@ from src.agents.portfolio_tools import (
     GetPortfolioMetricsTool,
     GetPortfolioSnapshotTool,
     GetPortfolioSummaryTool,
+    GetYTDPerformanceTool,
     GetTransactionHistoryTool,
     GetTransactionsTool,
     HypotheticalPositionTool,
     IngestPdfTool,
+    InterpolatePricesTool,
     ModifyTransactionTool,
     OptimizePortfolioTool,
     ResolveInstrumentTool,
@@ -135,6 +137,8 @@ _get_data_freshness = GetDataFreshnessTool(market_data_service)
 _refresh_data = RefreshDataTool(market_data_service, portfolio_manager)
 _get_historical_instruments = GetHistoricalInstrumentsTool(portfolio_manager)
 _update_historical_market_data = UpdateHistoricalMarketDataTool(portfolio_manager)
+_get_ytd_performance = GetYTDPerformanceTool(portfolio_manager)
+_interpolate_prices = InterpolatePricesTool(portfolio_manager)
 
 # --- Create MCP server ---
 mcp = FastMCP("FinAI Portfolio")
@@ -484,6 +488,19 @@ def get_portfolio_snapshot(target_date: str) -> str:
 
 
 @mcp.tool()
+def get_ytd_performance(as_of_date: Optional[str] = None) -> str:
+    """Get Year-to-Date performance for all portfolio positions and the portfolio overall.
+
+    Compares current prices to Dec 31 of the prior year. Shows per-instrument
+    and portfolio-level YTD returns.
+
+    Args:
+        as_of_date: Date to calculate YTD as of in YYYY-MM-DD format (defaults to today)
+    """
+    return _get_ytd_performance._run(as_of_date=as_of_date)
+
+
+@mcp.tool()
 def get_transactions(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
@@ -770,6 +787,38 @@ def update_historical_market_data(
         start_date=start_date,
         end_date=end_date,
         include_historical=include_historical,
+    )
+
+
+@mcp.tool()
+def interpolate_prices(
+    start_date: str,
+    end_date: str,
+    symbols: Optional[str] = None,
+) -> str:
+    """Fill in missing market prices using linear interpolation between known values.
+
+    Use cases:
+    - Filling gaps in market data for bonds/structured products without live feeds
+    - Smoothing out missing data points between known prices
+    - Fixing portfolio valuation gaps caused by missing historical data
+
+    How it works:
+    - Finds the nearest available price before and after the date range
+    - Calculates daily price change using linear interpolation
+    - Fills in all missing dates between the boundary prices
+    - Skips dates that already have prices (won't overwrite existing data)
+
+    Args:
+        start_date: Start of date range to fill (YYYY-MM-DD)
+        end_date: End of date range to fill (YYYY-MM-DD)
+        symbols: Comma-separated list of symbols (e.g., "GLENCORE_2028,BAYER_2026").
+                 If not provided, interpolates all current portfolio positions.
+    """
+    return _interpolate_prices._run(
+        start_date=start_date,
+        end_date=end_date,
+        symbols=symbols,
     )
 
 

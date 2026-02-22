@@ -688,3 +688,129 @@ class MarketDataStore:
             return 0
         finally:
             conn.close()
+
+    def interpolate_prices(
+        self,
+        symbol: str,
+        start_date: date,
+        end_date: date,
+        currency: Optional[Currency] = None,
+    ) -> int:
+        """Interpolate missing prices between two dates using linear interpolation.
+
+        Finds the nearest available prices before start_date and after end_date,
+        then fills in missing dates with linearly interpolated values.
+
+        Args:
+            symbol: The trading symbol
+            start_date: Start of the date range to fill
+            end_date: End of the date range to fill
+            currency: Currency for the prices (auto-detected if not provided)
+
+        Returns:
+            Number of prices interpolated and stored
+        """
+        symbol = symbol.upper().strip()
+
+        conn = self._get_connection()
+        try:
+            cursor = conn.cursor()
+
+            # Find the nearest price on or before start_date
+            cursor.execute("""
+                SELECT date, price, currency FROM market_prices
+                WHERE symbol = ? AND date <= ?
+                ORDER BY date DESC LIMIT 1
+            """, (symbol, start_date.isoformat()))
+            start_row = cursor.fetchone()
+
+            # Find the nearest price on or after end_date
+            cursor.execute("""
+                SELECT date, price, currency FROM market_prices
+                WHERE symbol = ? AND date >= ?
+                ORDER BY date ASC LIMIT 1
+            """, (symbol, end_date.isoformat()))
+            end_row = cursor.fetchone()
+
+            if not start_row or not end_row:
+                logging.warning(
+                    f"Cannot interpolate {symbol}: missing boundary prices "
+                    f"(start: {start_row is not None}, end: {end_row is not None})"
+                )
+                return 0
+
+            # Extract boundary data
+            boundary_start_date = date.fromisoformat(start_row["date"])
+            boundary_end_date = date.fromisoformat(end_row["date"])
+            start_price = Decimal(start_row["price"])
+            end_price = Decimal(end_row["price"])
+            detected_currency = currency or Currency(start_row["currency"])
+
+            # Calculate total days and daily change
+            total_days = (boundary_end_date - boundary_start_date).days
+            if total_days <= 0:
+                logging.warning(f"Cannot interpolate {symbol}: invalid date range")
+                return 0
+
+            daily_change = (end_price - start_price) / Decimal(str(total_days))
+
+            # Generate interpolated prices for missing dates
+            entries: List[PriceEntry] = []
+            from datetime import timedelta
+
+            current = boundary_start_date + timedelta(days=1)
+            while current < boundary_end_date:
+                # Check if price already exists
+                existing = self.get_price(symbol, current)
+                if existing is None:
+                    days_from_start = (current - boundary_start_date).days
+                    interpolated_price = start_price + (daily_change * Decimal(str(days_from_start)))
+
+                    entries.append(PriceEntry(
+                        symbol=symbol,
+                        date=current,
+                        price=interpolated_price,
+                        currency=detected_currency,
+                        source="interpolated",
+                    ))
+
+                current += timedelta(days=1)
+
+            # Store interpolated prices
+            if entries:
+                count = self.set_prices_batch(entries)
+                logging.info(
+                    f"Interpolated {count} prices for {symbol} "
+                    f"from {boundary_start_date} to {boundary_end_date}"
+                )
+                return count
+
+            return 0
+
+        except Exception as e:
+            logging.error(f"Error interpolating prices for {symbol}: {e}")
+            return 0
+        finally:
+            conn.close()
+
+    def interpolate_prices_batch(
+        self,
+        symbols: List[str],
+        start_date: date,
+        end_date: date,
+    ) -> Dict[str, int]:
+        """Interpolate missing prices for multiple symbols.
+
+        Args:
+            symbols: List of trading symbols
+            start_date: Start of the date range to fill
+            end_date: End of the date range to fill
+
+        Returns:
+            Dict mapping symbol to number of prices interpolated
+        """
+        results: Dict[str, int] = {}
+        for symbol in symbols:
+            count = self.interpolate_prices(symbol, start_date, end_date)
+            results[symbol] = count
+        return results

@@ -4286,3 +4286,248 @@ class UpdateHistoricalMarketDataTool(BaseTool):
 
         except Exception as e:
             return f"❌ Error updating historical market data: {str(e)}"
+
+
+class GetYTDPerformanceInput(BaseModel):
+    """Input for getting YTD performance."""
+
+    as_of_date: Optional[str] = Field(
+        default=None,
+        description="Date to calculate YTD performance as of, in YYYY-MM-DD format (defaults to today)",
+    )
+
+
+class GetYTDPerformanceTool(BaseTool):
+    """Tool for getting Year-to-Date performance of all portfolio positions."""
+
+    name: str = "get_ytd_performance"
+    description: str = (
+        "Get Year-to-Date (YTD) performance for all portfolio positions and the portfolio overall. "
+        "Compares current prices to Dec 31 of the prior year."
+    )
+    args_schema: type[BaseModel] = GetYTDPerformanceInput
+    portfolio_manager: Optional[PortfolioManager] = None
+
+    def __init__(self, portfolio_manager: PortfolioManager):
+        super().__init__()
+        self.portfolio_manager = portfolio_manager
+
+    def _run(self, as_of_date: Optional[str] = None) -> str:
+        """Get YTD performance for all positions."""
+        try:
+            if not self.portfolio_manager.current_portfolio:
+                return "❌ No portfolio loaded."
+
+            # Parse date
+            target_date = None
+            if as_of_date:
+                try:
+                    target_date = datetime.strptime(as_of_date, "%Y-%m-%d").date()
+                except ValueError:
+                    return f"❌ Invalid date format: {as_of_date}. Use YYYY-MM-DD."
+
+            data = self.portfolio_manager.get_ytd_performance(target_date)
+
+            if "error" in data:
+                return f"❌ {data['error']}"
+
+            portfolio_name = data["portfolio_name"]
+            as_of = data["as_of_date"]
+            year_end = data["year_end_date"]
+            base_ccy = data["base_currency"]
+            positions = data["positions"]
+            portfolio = data.get("portfolio", {})
+
+            lines = [
+                f"📊 YTD Performance — Portfolio: {portfolio_name}",
+                f"📅 As of: {as_of} | Reference: {year_end}",
+            ]
+
+            # Portfolio-level YTD
+            if portfolio:
+                sign = "+" if portfolio["ytd_pct"] >= 0 else ""
+                val_sign = "+" if portfolio["ytd_value_change"] >= 0 else ""
+                lines.append(
+                    f"💰 Portfolio YTD: {sign}{portfolio['ytd_pct']:.2f}% "
+                    f"({val_sign}{portfolio['ytd_value_change']:,.2f} {base_ccy})"
+                )
+            else:
+                lines.append("💰 Portfolio YTD: N/A (insufficient data)")
+
+            lines.append("")
+
+            if not positions:
+                lines.append("No positions found.")
+                return "\n".join(lines)
+
+            # Table header
+            lines.append(
+                f"{'Instrument':<20}| {'Ccy':^5}| {'Price (Dec 31)':>14} | {'Price (Now)':>11} | {'YTD %':>8} | {'YTD Chg':>12}"
+            )
+            lines.append("-" * 20 + "|" + "-" * 5 + "|" + "-" * 16 + "|" + "-" * 13 + "|" + "-" * 10 + "|" + "-" * 13)
+
+            for pos in sorted(positions, key=lambda p: abs(p.get("ytd_pct") or 0), reverse=True):
+                symbol = pos["symbol"]
+                ccy = pos["currency"]
+                ye_price = pos["year_end_price"]
+                cur_price = pos["current_price"]
+                ytd_pct = pos["ytd_pct"]
+                ytd_chg = pos["ytd_value_change"]
+                since = pos.get("since_inception", False)
+
+                ye_str = f"{ye_price:>14,.2f}" if ye_price is not None else f"{'N/A':>14}"
+                cur_str = f"{cur_price:>11,.2f}" if cur_price is not None else f"{'N/A':>11}"
+
+                if ytd_pct is not None:
+                    sign = "+" if ytd_pct >= 0 else ""
+                    pct_str = f"{sign}{ytd_pct:.1f}%"
+                    if since:
+                        pct_str += "*"
+                    pct_str = f"{pct_str:>8}"
+                else:
+                    pct_str = f"{'N/A':>8}"
+
+                if ytd_chg is not None:
+                    chg_sign = "+" if ytd_chg >= 0 else ""
+                    chg_str = f"{chg_sign}{ytd_chg:>11,.2f}"
+                else:
+                    chg_str = f"{'N/A':>12}"
+
+                # Truncate symbol to 19 chars
+                sym_display = symbol[:19]
+                lines.append(
+                    f"{sym_display:<20}| {ccy:^5}|{ye_str} | {cur_str} |{pct_str} |{chg_str}"
+                )
+
+            # Footnote for since-inception entries
+            if any(p.get("since_inception") for p in positions):
+                lines.append("")
+                lines.append("* Position bought after Jan 1 — return is since inception (vs avg cost), not YTD.")
+
+            return "\n".join(lines)
+
+        except Exception as e:
+            return f"❌ Error getting YTD performance: {str(e)}"
+
+
+class InterpolatePricesInput(BaseModel):
+    """Input for interpolating missing market prices."""
+
+    symbols: Optional[str] = Field(
+        default=None,
+        description="Comma-separated list of symbols to interpolate (e.g., 'AAPL,MSFT'). If not provided, interpolates all portfolio positions."
+    )
+    start_date: str = Field(
+        description="Start date of the range to fill in YYYY-MM-DD format"
+    )
+    end_date: str = Field(
+        description="End date of the range to fill in YYYY-MM-DD format"
+    )
+
+
+class InterpolatePricesTool(BaseTool):
+    """Tool for interpolating missing market prices using linear interpolation."""
+
+    name: str = "interpolate_prices"
+    description: str = """Fill in missing market prices using linear interpolation between known values.
+
+    Use cases:
+    - Filling gaps in market data for bonds/structured products without live feeds
+    - Smoothing out missing data points between known prices
+    - Fixing portfolio valuation gaps caused by missing historical data
+
+    How it works:
+    - Finds the nearest available price before and after the date range
+    - Calculates daily price change using linear interpolation
+    - Fills in all missing dates between the boundary prices
+    - Skips dates that already have prices (won't overwrite existing data)
+
+    Parameters:
+    - symbols: Comma-separated list of symbols (e.g., "GLENCORE_2028,BAYER_2026")
+              If not provided, interpolates all current portfolio positions
+    - start_date: Start of date range to fill (YYYY-MM-DD)
+    - end_date: End of date range to fill (YYYY-MM-DD)
+
+    Example:
+        interpolate_prices(symbols="GLENCORE_2028,BAYER_2026", start_date="2026-02-01", end_date="2026-02-20")
+    """
+    args_schema: type[BaseModel] = InterpolatePricesInput
+    portfolio_manager: Optional[PortfolioManager] = None
+
+    def __init__(self, portfolio_manager: PortfolioManager):
+        super().__init__()
+        self.portfolio_manager = portfolio_manager
+
+    def _run(
+        self,
+        start_date: str,
+        end_date: str,
+        symbols: Optional[str] = None,
+    ) -> str:
+        """Execute price interpolation."""
+        from datetime import datetime as dt
+
+        try:
+            # Parse dates
+            try:
+                start = dt.strptime(start_date, "%Y-%m-%d").date()
+                end = dt.strptime(end_date, "%Y-%m-%d").date()
+            except ValueError as e:
+                return f"❌ Invalid date format: {e}. Use YYYY-MM-DD."
+
+            if start >= end:
+                return "❌ Start date must be before end date."
+
+            # Get symbols to process
+            if symbols:
+                symbol_list = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+            else:
+                # Use all current portfolio positions
+                if not self.portfolio_manager.current_portfolio:
+                    return "❌ No portfolio loaded. Please load a portfolio first."
+                positions = self.portfolio_manager.get_positions()
+                symbol_list = [p.get("symbol", "").upper() for p in positions if p.get("symbol")]
+
+            if not symbol_list:
+                return "❌ No symbols to interpolate."
+
+            # Get market data store
+            market_data_store = self.portfolio_manager._market_data_store
+
+            # Interpolate each symbol
+            results = []
+            total_interpolated = 0
+            errors = []
+
+            for symbol in symbol_list:
+                try:
+                    count = market_data_store.interpolate_prices(symbol, start, end)
+                    if count > 0:
+                        results.append(f"  • {symbol}: {count} prices interpolated")
+                        total_interpolated += count
+                    else:
+                        results.append(f"  • {symbol}: no gaps found or missing boundary prices")
+                except Exception as e:
+                    errors.append(f"  • {symbol}: {str(e)}")
+
+            # Build response
+            lines = [
+                "📊 **Price Interpolation Results**",
+                f"📅 Date range: {start_date} to {end_date}",
+                f"🔢 Total interpolated: {total_interpolated} prices",
+                "",
+            ]
+
+            if results:
+                lines.append("**Results:**")
+                lines.extend(results)
+
+            if errors:
+                lines.append("")
+                lines.append("**Errors:**")
+                lines.extend(errors)
+
+            return "\n".join(lines)
+
+        except Exception as e:
+            return f"❌ Error interpolating prices: {str(e)}"
