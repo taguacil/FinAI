@@ -389,6 +389,138 @@ class RefreshDataTool(BaseTool):
             return f"❌ Error refreshing data: {str(e)}"
 
 
+class GetMovingAverageSignalInput(BaseModel):
+    """Input for moving average signal calculation."""
+
+    symbol: str = Field(description="Stock/instrument symbol (e.g., AAPL, TSLA)")
+    short_period: int = Field(
+        default=50,
+        description="Short-term moving average period in days (default 50)"
+    )
+    long_period: int = Field(
+        default=200,
+        description="Long-term moving average period in days (default 200)"
+    )
+
+
+class GetMovingAverageSignalTool(BaseTool):
+    """Tool for calculating moving average crossover signals."""
+
+    name: str = "get_moving_average_signal"
+    description: str = """Calculate moving average signal for a symbol.
+
+    Computes short-term MA (default 50-day) and long-term MA (default 200-day),
+    then returns the difference (short MA - long MA).
+
+    Signal interpretation:
+    - Positive value = BUY signal (Golden Cross territory)
+    - Negative value = SELL signal (Death Cross territory)
+
+    Example: Get MA signal for AAPL with 50-day and 200-day MAs
+    """
+    args_schema: type[BaseModel] = GetMovingAverageSignalInput
+    market_data_service: Optional[MarketDataService] = None
+
+    def __init__(self, market_data_service: MarketDataService):
+        super().__init__()
+        self.market_data_service = market_data_service
+
+    def _run(
+        self,
+        symbol: str,
+        short_period: int = 50,
+        long_period: int = 200,
+    ) -> str:
+        """Calculate moving average signal."""
+        from datetime import timedelta
+
+        try:
+            # Need enough data for the long MA plus some buffer
+            end = date.today()
+            start = end - timedelta(days=int(long_period * 1.5))
+
+            df = self.market_data_service.get_price_history(
+                symbol.upper(), start, end
+            )
+
+            if df.empty:
+                return f"❌ No price history found for {symbol.upper()}"
+
+            if len(df) < long_period:
+                return (
+                    f"❌ Insufficient data for {symbol.upper()}: "
+                    f"need {long_period} days, got {len(df)}"
+                )
+
+            # Calculate moving averages
+            closes = df["close"]
+            short_ma = closes.tail(short_period).mean()
+            long_ma = closes.tail(long_period).mean()
+            current_price = closes.iloc[-1]
+
+            # Calculate signal
+            ma_diff = short_ma - long_ma
+            ma_diff_pct = (ma_diff / long_ma) * 100
+
+            # Determine signal
+            if ma_diff > 0:
+                signal = "🟢 BUY"
+                signal_desc = "Golden Cross territory"
+            else:
+                signal = "🔴 SELL"
+                signal_desc = "Death Cross territory"
+
+            # Price position relative to MAs
+            price_vs_short = ((current_price - short_ma) / short_ma) * 100
+            price_vs_long = ((current_price - long_ma) / long_ma) * 100
+
+            # Price position indicators
+            price_above_short = current_price > short_ma
+            price_above_long = current_price > long_ma
+
+            short_position = "ABOVE" if price_above_short else "BELOW"
+            long_position = "ABOVE" if price_above_long else "BELOW"
+
+            short_icon = "🟢" if price_above_short else "🔴"
+            long_icon = "🟢" if price_above_long else "🔴"
+
+            # Trend strength assessment
+            if price_above_short and price_above_long and ma_diff > 0:
+                trend = "🟢 Strong Uptrend"
+            elif price_above_long and ma_diff > 0:
+                trend = "🟡 Uptrend (pullback)"
+            elif not price_above_short and not price_above_long and ma_diff < 0:
+                trend = "🔴 Strong Downtrend"
+            elif not price_above_long and ma_diff < 0:
+                trend = "🟡 Downtrend (bounce)"
+            elif ma_diff > 0:
+                trend = "🟡 Bullish but weakening"
+            else:
+                trend = "🟡 Bearish but stabilizing"
+
+            lines = [
+                f"📊 **Moving Average Signal: {symbol.upper()}**",
+                "",
+                f"**MA Crossover Signal: {signal}** ({signal_desc})",
+                f"**Trend Assessment: {trend}**",
+                "",
+                "**Moving Averages:**",
+                f"• {short_period}-day MA: {short_ma:.2f}",
+                f"• {long_period}-day MA: {long_ma:.2f}",
+                f"• Difference (Short - Long): {ma_diff:+.2f} ({ma_diff_pct:+.2f}%)",
+                "",
+                "**Price Position:**",
+                f"• Current Price: {current_price:.2f}",
+                f"• {short_icon} {short_position} {short_period}-MA by {abs(price_vs_short):.2f}%",
+                f"• {long_icon} {long_position} {long_period}-MA by {abs(price_vs_long):.2f}%",
+            ]
+
+            return "\n".join(lines)
+
+        except Exception as e:
+            return f"❌ Error calculating MA signal: {str(e)}"
+
+
 def create_market_data_tools(
     market_data_service: MarketDataService,
     portfolio_manager: PortfolioManager,
@@ -400,4 +532,5 @@ def create_market_data_tools(
         GetBatchPricesTool(market_data_service),
         GetDataFreshnessTool(market_data_service),
         RefreshDataTool(market_data_service, portfolio_manager),
+        GetMovingAverageSignalTool(market_data_service),
     ]

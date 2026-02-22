@@ -72,6 +72,7 @@ from src.agents.tools.market_data_tools import (
     GetBatchPricesTool,
     GetDataFreshnessTool,
     GetFXRateTool,
+    GetMovingAverageSignalTool,
     GetPriceHistoryTool,
     RefreshDataTool,
 )
@@ -139,6 +140,7 @@ _get_historical_instruments = GetHistoricalInstrumentsTool(portfolio_manager)
 _update_historical_market_data = UpdateHistoricalMarketDataTool(portfolio_manager)
 _get_ytd_performance = GetYTDPerformanceTool(portfolio_manager)
 _interpolate_prices = InterpolatePricesTool(portfolio_manager)
+_get_ma_signal = GetMovingAverageSignalTool(market_data_service)
 
 # --- Create MCP server ---
 mcp = FastMCP("FinAI Portfolio")
@@ -707,6 +709,32 @@ def get_price_history(symbol: str, start_date: str, end_date: str) -> str:
     """
     return _get_price_history._run(
         symbol=symbol, start_date=start_date, end_date=end_date
+    )
+
+
+@mcp.tool()
+def get_moving_average_signal(
+    symbol: str,
+    short_period: int = 50,
+    long_period: int = 200,
+) -> str:
+    """Calculate moving average crossover signal for a symbol.
+
+    Computes short-term MA (default 50-day) minus long-term MA (default 200-day).
+
+    Signal interpretation:
+    - Positive difference = BUY signal (Golden Cross territory)
+    - Negative difference = SELL signal (Death Cross territory)
+
+    Args:
+        symbol: Stock/instrument symbol (e.g., AAPL, MSFT)
+        short_period: Short-term MA period in days (default 50)
+        long_period: Long-term MA period in days (default 200)
+    """
+    return _get_ma_signal._run(
+        symbol=symbol,
+        short_period=short_period,
+        long_period=long_period,
     )
 
 
