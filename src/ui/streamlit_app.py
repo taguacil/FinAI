@@ -1766,19 +1766,46 @@ class PortfolioTrackerUI:
                 has_positive_values = (history_df["total_value"] > 0).sum() >= 2
                 if not has_positive_values:
                     st.warning("⚠️ Cannot calculate returns: Portfolio needs at least 2 days with positive values.")
-                    st.info("💡 This typically happens when:")
-                    st.info("   • Portfolio is just starting")
-                    st.info("   • Not enough market data has been fetched")
-                    st.info("   • Portfolio values are zero or negative")
 
-                    # Show values for context
-                    st.write("**Portfolio values:**")
-                    for idx in history_df.index[:5]:
-                        val = history_df.loc[idx, "total_value"]
-                        date_str = idx.strftime('%Y-%m-%d') if hasattr(idx, 'strftime') else str(idx)
-                        st.write(f"  {date_str}: ${float(val):,.2f}")
-                    if len(history_df) > 5:
-                        st.write(f"  ... and {len(history_df) - 5} more days")
+                    # Provide context based on view mode
+                    if selected_view_mode != "all":
+                        st.info("💡 **Filtered View Note:** In category-specific views, 'total_value' represents pure trading performance:")
+                        st.info("   • Total Value = Position Value + Attributed Cash")
+                        st.info("   • Attributed Cash = Sale proceeds − Purchase costs (starts at 0)")
+                        st.info("   • If positions haven't gained/lost value, total may be near zero")
+
+                        # Show breakdown for filtered views
+                        if "positions_value" in history_df.columns and "attributed_cash" in history_df.columns:
+                            st.write("**Value breakdown (first 5 days):**")
+                            for idx in history_df.index[:5]:
+                                pos_val = history_df.loc[idx, "positions_value"]
+                                attr_cash = history_df.loc[idx, "attributed_cash"]
+                                total = history_df.loc[idx, "total_value"]
+                                date_str = idx.strftime('%Y-%m-%d') if hasattr(idx, 'strftime') else str(idx)
+                                st.write(f"  {date_str}: Positions=${float(pos_val):,.2f}, Attributed Cash=${float(attr_cash):,.2f}, Total=${float(total):,.2f}")
+                            if len(history_df) > 5:
+                                st.write(f"  ... and {len(history_df) - 5} more days")
+
+                            # Check if this is a "no positions" vs "no gains" situation
+                            avg_positions = history_df["positions_value"].mean()
+                            if avg_positions < 1:
+                                st.warning(f"⚠️ No {selected_view_label.lower()} positions found in this period.")
+                            else:
+                                st.info(f"📊 Average position value: ${avg_positions:,.2f}. The near-zero total indicates positions haven't gained/lost significantly.")
+                    else:
+                        st.info("💡 This typically happens when:")
+                        st.info("   • Portfolio is just starting")
+                        st.info("   • Not enough market data has been fetched")
+                        st.info("   • Portfolio values are zero or negative")
+
+                        # Show values for context
+                        st.write("**Portfolio values:**")
+                        for idx in history_df.index[:5]:
+                            val = history_df.loc[idx, "total_value"]
+                            date_str = idx.strftime('%Y-%m-%d') if hasattr(idx, 'strftime') else str(idx)
+                            st.write(f"  {date_str}: ${float(val):,.2f}")
+                        if len(history_df) > 5:
+                            st.write(f"  ... and {len(history_df) - 5} more days")
                 else:
                     st.error("Could not calculate time-weighted returns.")
 
