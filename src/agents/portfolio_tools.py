@@ -583,11 +583,8 @@ class GetPortfolioSummaryTool(BaseTool):
 
             portfolio = self.portfolio_manager.current_portfolio
 
-            # Note: Prices are not automatically updated - use existing data only
-            # Users should manually update prices via the UI if needed
-
-            # Get positions summary
-            positions = self.portfolio_manager.get_position_summary()
+            # Get positions with prices from MarketDataStore (includes FX-adjusted P&L)
+            positions = self.portfolio_manager.get_positions_with_prices()
             total_value = self.portfolio_manager.get_portfolio_value()
 
             # Note: Use 'USD' instead of '$' to avoid Streamlit LaTeX interpretation
@@ -621,8 +618,11 @@ class GetPortfolioSummaryTool(BaseTool):
                     else:
                         unit_label = "shares"
 
+                    # Get currency for display (use base currency from position data)
+                    display_currency = pos.get('currency', 'USD')
+
                     # Format price (avoid $ to prevent Streamlit LaTeX issues)
-                    price_str = f"{pos['current_price']:,.2f} USD" if pos['current_price'] else "N/A"
+                    price_str = f"{pos['current_price']:,.2f} {display_currency}" if pos['current_price'] else "N/A"
 
                     # Format P&L (avoid $ to prevent Streamlit LaTeX issues)
                     pnl_str = ""
@@ -630,7 +630,7 @@ class GetPortfolioSummaryTool(BaseTool):
                         pnl = float(pos["unrealized_pnl"])
                         pnl_pct = float(pos["unrealized_pnl_percent"] or 0)
                         sign = "+" if pnl >= 0 else ""
-                        pnl_str = f" ({sign}{pnl:,.2f} USD, {sign}{pnl_pct:.1f}%)"
+                        pnl_str = f" ({sign}{pnl:,.2f} {display_currency}, {sign}{pnl_pct:.1f}%)"
 
                     summary.append(
                         f"- {pos['symbol']} ({pos['name']}): "
@@ -2276,6 +2276,10 @@ class ModifyTransactionInput(BaseModel):
         default=None, description="New date in YYYY-MM-DD format (optional)"
     )
     notes: Optional[str] = Field(default=None, description="New notes (optional)")
+    instrument_type: Optional[str] = Field(
+        default=None,
+        description="New instrument type: stock, etf, bond, crypto, cash, mutual_fund, option, future (optional)"
+    )
 
 
 class ModifyTransactionTool(BaseTool):
@@ -2289,6 +2293,7 @@ class ModifyTransactionTool(BaseTool):
     - price: New price per share/unit
     - date: New transaction date (YYYY-MM-DD)
     - notes: New notes for the transaction
+    - instrument_type: Type of instrument (stock, etf, bond, crypto, cash, mutual_fund, option, future)
 
     Use get_transactions or get_transaction_history to find transaction IDs first.
     """
@@ -2306,6 +2311,7 @@ class ModifyTransactionTool(BaseTool):
         price: Optional[float] = None,
         date: Optional[str] = None,
         notes: Optional[str] = None,
+        instrument_type: Optional[str] = None,
     ) -> str:
         """Modify a transaction."""
         try:
@@ -2349,6 +2355,17 @@ class ModifyTransactionTool(BaseTool):
                 old_notes = transaction.notes or "(none)"
                 transaction.notes = notes
                 modifications.append(f"notes: {old_notes} → {notes}")
+
+            if instrument_type is not None:
+                from ..portfolio.models import InstrumentType
+                try:
+                    new_type = InstrumentType(instrument_type.lower())
+                    old_type = transaction.instrument.instrument_type.value
+                    transaction.instrument.instrument_type = new_type
+                    modifications.append(f"instrument_type: {old_type} → {instrument_type}")
+                except ValueError:
+                    valid_types = [t.value for t in InstrumentType]
+                    return f"❌ Invalid instrument_type. Valid options: {', '.join(valid_types)}"
 
             if not modifications:
                 return "❌ No modifications specified. Provide at least one field to modify."

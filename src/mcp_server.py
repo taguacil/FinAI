@@ -391,6 +391,7 @@ def modify_transaction(
     price: Optional[float] = None,
     date: Optional[str] = None,
     notes: Optional[str] = None,
+    instrument_type: Optional[str] = None,
 ) -> str:
     """Modify an existing transaction's details.
 
@@ -404,6 +405,7 @@ def modify_transaction(
         price: New price (leave None to keep current)
         date: New date in YYYY-MM-DD format (leave None to keep current)
         notes: New notes (leave None to keep current)
+        instrument_type: New instrument type: stock, etf, bond, crypto, cash, mutual_fund, option, future (leave None to keep current)
     """
     return _modify_transaction._run(
         transaction_id=transaction_id,
@@ -411,6 +413,7 @@ def modify_transaction(
         price=price,
         date=date,
         notes=notes,
+        instrument_type=instrument_type,
     )
 
 

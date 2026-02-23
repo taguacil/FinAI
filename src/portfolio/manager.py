@@ -632,7 +632,13 @@ class PortfolioManager:
         if from_currency == to_currency:
             return Decimal("1")
 
-        # Try MarketDataService first (it supports historical rates)
+        # Try DataProviderManager first (it has get_historical_fx_rate_on)
+        if self.data_manager:
+            rate = self.data_manager.get_historical_fx_rate_on(as_of, from_currency, to_currency)
+            if rate is not None:
+                return rate
+
+        # Try MarketDataService as fallback
         mds = self.market_data_service
         if mds:
             result = mds.get_fx_rate(from_currency, to_currency, as_of=as_of)
@@ -905,6 +911,9 @@ class PortfolioManager:
         positions = history.get_positions_at_date(target_date)
         base = self.current_portfolio.base_currency
 
+        # Get historical cost basis in base currency for proper FX gain calculation
+        historical_cost_basis_base = self._calculate_historical_cost_basis_in_base()
+
         result = []
         for symbol, pos_state in positions.items():
             if pos_state.quantity <= 0:
@@ -924,23 +933,43 @@ class PortfolioManager:
             if price is None and pos_state.isin:
                 price = self._market_data_store.get_price_with_fallback(pos_state.isin, target_date)
 
-            # Calculate values
-            market_value = pos_state.quantity * price if price else None
-            cost_basis = pos_state.cost_basis
+            # Get current FX rate for market value conversion
+            position_currency = pos_state.currency
+            current_fx_rate = Decimal("1")
+            if position_currency != base:
+                rate = self._get_exchange_rate(position_currency, base)
+                if rate:
+                    current_fx_rate = rate
+
+            # Calculate market value in local currency first, then convert to base at CURRENT rate
+            market_value_local = pos_state.quantity * price if price else None
+            market_value = market_value_local * current_fx_rate if market_value_local else None
+
+            # Get historical cost basis (uses historical FX rates for proper FX gain accounting)
+            if symbol in historical_cost_basis_base:
+                cost_basis = historical_cost_basis_base[symbol]
+            else:
+                # Fallback: convert at current rate
+                cost_basis = pos_state.cost_basis * current_fx_rate
+
             unrealized_pnl = market_value - cost_basis if market_value else None
             unrealized_pnl_percent = (
                 (unrealized_pnl / cost_basis * 100) if unrealized_pnl and cost_basis > 0 else None
             )
 
+            avg_cost_base = cost_basis / pos_state.quantity if pos_state.quantity > 0 else Decimal("0")
+
             result.append({
                 "symbol": symbol,
                 "name": pos_state.instrument_name,
                 "instrument_type": pos_state.instrument_type,
-                "currency": pos_state.currency.value,
+                "currency": base.value,
+                "original_currency": position_currency.value,
+                "fx_rate": current_fx_rate,
                 "quantity": pos_state.quantity,
-                "average_cost": pos_state.average_cost,
+                "average_cost": avg_cost_base,
                 "cost_basis": cost_basis,
-                "current_price": price,
+                "current_price": price * current_fx_rate if price else None,
                 "market_value": market_value,
                 "unrealized_pnl": unrealized_pnl,
                 "unrealized_pnl_percent": unrealized_pnl_percent,
@@ -1061,9 +1090,18 @@ class PortfolioManager:
         }
 
     def get_position_summary(self) -> List[Dict]:
-        """Get summary of current positions."""
+        """Get summary of current positions with values converted to base currency.
+
+        Uses historical FX rates for cost basis to properly capture FX gains/losses.
+        """
         if not self.current_portfolio:
             return []
+
+        base_currency = self.current_portfolio.base_currency
+
+        # Build a map of historical cost basis in base currency for each position
+        # by looking at buy transactions and their FX rates at purchase time
+        historical_cost_basis_base = self._calculate_historical_cost_basis_in_base()
 
         summary = []
         for symbol, position in self.current_portfolio.positions.items():
@@ -1071,36 +1109,131 @@ class PortfolioManager:
                 continue
 
             current_price = position.current_price
-            market_value = (
+            position_currency = position.instrument.currency
+
+            # Get current FX rate for market value conversion
+            current_fx_rate = Decimal("1")
+            if position_currency != base_currency:
+                rate = self._get_exchange_rate(position_currency, base_currency)
+                if rate:
+                    current_fx_rate = rate
+
+            # Calculate market value in local currency first
+            market_value_local = (
                 position.quantity * current_price if current_price else Decimal("0")
             )
 
-            # Calculate unrealized P&L
+            # Convert market value to base currency at CURRENT FX rate
+            market_value = market_value_local * current_fx_rate
+
+            # Calculate unrealized P&L using historical cost basis
             unrealized_pnl = Decimal("0")
             unrealized_pnl_percent = Decimal("0")
+            cost_basis_base = Decimal("0")
 
             if current_price and position.average_cost > 0:
-                cost_basis = position.quantity * position.average_cost
-                unrealized_pnl = market_value - cost_basis
-                unrealized_pnl_percent = (unrealized_pnl / cost_basis) * 100
+                # Use historical cost basis if available, otherwise fall back to current FX rate
+                if symbol in historical_cost_basis_base:
+                    cost_basis_base = historical_cost_basis_base[symbol]
+                else:
+                    # Fallback: convert at current rate
+                    cost_basis_base = position.quantity * position.average_cost * current_fx_rate
+
+                unrealized_pnl = market_value - cost_basis_base
+                if cost_basis_base > 0:
+                    unrealized_pnl_percent = (unrealized_pnl / cost_basis_base) * 100
+
+            # Convert price to base currency for display
+            current_price_base = current_price * current_fx_rate if current_price else None
+            avg_cost_base = cost_basis_base / position.quantity if position.quantity > 0 else Decimal("0")
 
             summary.append(
                 {
                     "symbol": symbol,
                     "name": position.instrument.name,
                     "quantity": position.quantity,
-                    "average_cost": position.average_cost,
-                    "current_price": current_price,
+                    "average_cost": avg_cost_base,
+                    "current_price": current_price_base,
                     "market_value": market_value,
                     "unrealized_pnl": unrealized_pnl,
                     "unrealized_pnl_percent": unrealized_pnl_percent,
-                    "currency": position.instrument.currency.value,
+                    "currency": base_currency.value,
+                    "original_currency": position_currency.value,
+                    "fx_rate": current_fx_rate,
                     "last_updated": position.last_updated,
                     "has_current_price": current_price is not None,
                 }
             )
 
         return summary
+
+    def _calculate_historical_cost_basis_in_base(self) -> Dict[str, Decimal]:
+        """Calculate cost basis in base currency using historical FX rates at purchase time.
+
+        Processes transactions in chronological order to correctly handle
+        cases where positions are fully sold and then repurchased.
+
+        Returns:
+            Dict mapping symbol to total cost basis in base currency
+        """
+        if not self.current_portfolio:
+            return {}
+
+        base_currency = self.current_portfolio.base_currency
+        cost_basis_map: Dict[str, Decimal] = {}
+        quantity_map: Dict[str, Decimal] = {}
+
+        # Sort transactions by timestamp to process chronologically
+        sorted_transactions = sorted(
+            self.current_portfolio.transactions,
+            key=lambda t: t.timestamp
+        )
+
+        # Process transactions in chronological order
+        for txn in sorted_transactions:
+            symbol = txn.instrument.symbol
+            txn_type = txn.transaction_type.value
+
+            # Initialize maps for new symbols
+            if symbol not in cost_basis_map:
+                cost_basis_map[symbol] = Decimal("0")
+                quantity_map[symbol] = Decimal("0")
+
+            if txn_type == "buy":
+                txn_currency = txn.instrument.currency
+                txn_date = txn.timestamp.date()
+
+                # Get historical FX rate at transaction date
+                if txn_currency == base_currency:
+                    fx_rate = Decimal("1")
+                else:
+                    fx_rate = self._get_exchange_rate_at_date(txn_currency, base_currency, txn_date)
+                    if fx_rate is None:
+                        fx_rate = self._get_exchange_rate(txn_currency, base_currency) or Decimal("1")
+
+                # Calculate cost in base currency and accumulate
+                txn_cost_base = txn.quantity * txn.price * fx_rate
+                cost_basis_map[symbol] += txn_cost_base
+                quantity_map[symbol] += txn.quantity
+
+            elif txn_type == "sell":
+                if quantity_map[symbol] <= 0:
+                    continue
+
+                # Calculate average cost per share and reduce proportionally
+                avg_cost_per_share = cost_basis_map[symbol] / quantity_map[symbol]
+                cost_reduction = txn.quantity * avg_cost_per_share
+
+                cost_basis_map[symbol] -= cost_reduction
+                quantity_map[symbol] -= txn.quantity
+
+                # Ensure we don't go negative
+                if cost_basis_map[symbol] < 0:
+                    cost_basis_map[symbol] = Decimal("0")
+                if quantity_map[symbol] < 0:
+                    quantity_map[symbol] = Decimal("0")
+
+        return cost_basis_map
 
     def create_current_snapshot(self) -> PortfolioSnapshot:
         """Create a PortfolioSnapshot object representing current portfolio state.
