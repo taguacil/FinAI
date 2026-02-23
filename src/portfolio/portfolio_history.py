@@ -384,13 +384,21 @@ class PortfolioHistory:
         return total
 
     def get_value_history(
-        self, start_date: date, end_date: date
+        self, start_date: date, end_date: date,
+        instrument_types: Optional[List[str]] = None,
+        include_cash: bool = True,
+        target_currency: Optional[Currency] = None,
     ) -> pd.DataFrame:
         """Get portfolio value history as a DataFrame.
 
         Args:
             start_date: Start date
             end_date: End date
+            instrument_types: Optional list of instrument types to include (e.g., ['stock', 'etf']).
+                            If None, includes all instrument types.
+            include_cash: Whether to include cash in the total value (default True).
+                         Set to False when filtering to show only positions value.
+            target_currency: Currency to express values in. Defaults to portfolio base currency.
 
         Returns:
             DataFrame with columns: date, total_value, cash_value, positions_value
@@ -400,16 +408,21 @@ class PortfolioHistory:
 
         while current <= end_date:
             state = self._replay_transactions_to_date(current)
-            base = self.portfolio.base_currency
+            base = target_currency or self.portfolio.base_currency
 
             # Create date-aware FX rate function for this date
             def fx_rate_for_current(from_curr: Currency, to_curr: Currency, dt: date = current) -> Optional[Decimal]:
                 return self._get_fx_rate(from_curr, to_curr, as_of=dt)
 
-            cash_value = state.cash.total_in_currency(base, fx_rate_for_current)
+            cash_value = state.cash.total_in_currency(base, fx_rate_for_current) if include_cash else Decimal("0")
             positions_value = Decimal("0")
 
             for symbol, pos in state.positions.items():
+                # Filter by instrument type if specified
+                if instrument_types is not None:
+                    if pos.instrument_type not in instrument_types:
+                        continue
+
                 price = self._get_price_for_position(pos, current)
 
                 if price is not None and pos.quantity > 0:

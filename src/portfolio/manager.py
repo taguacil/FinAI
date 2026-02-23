@@ -667,7 +667,10 @@ class PortfolioManager:
         return self.analyzer._calculate_portfolio_value(self.current_portfolio)
 
     def get_portfolio_history(
-        self, start_date: date, end_date: date
+        self, start_date: date, end_date: date,
+        instrument_types: Optional[List[str]] = None,
+        include_cash: bool = True,
+        target_currency: Optional[Currency] = None,
     ) -> pd.DataFrame:
         """Get portfolio value history as a DataFrame.
 
@@ -676,6 +679,10 @@ class PortfolioManager:
         Args:
             start_date: Start date
             end_date: End date
+            instrument_types: Optional list of instrument types to include (e.g., ['stock', 'etf']).
+                            If None, includes all instrument types.
+            include_cash: Whether to include cash in the total value (default True).
+            target_currency: Currency to express values in. Defaults to portfolio base currency.
 
         Returns:
             DataFrame with columns: total_value, cash_value, positions_value
@@ -685,7 +692,12 @@ class PortfolioManager:
 
         history = self._get_portfolio_history()
         if history:
-            return history.get_value_history(start_date, end_date)
+            return history.get_value_history(
+                start_date, end_date,
+                instrument_types=instrument_types,
+                include_cash=include_cash,
+                target_currency=target_currency,
+            )
 
         return pd.DataFrame()
 
