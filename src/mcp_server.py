@@ -1082,7 +1082,7 @@ def _run_sse():
 
     host = os.environ.get("HOST", "localhost")
     port = int(os.environ.get("PORT", "8000"))
-    api_key = os.environ.get("FINAI_API_KEY", "")
+    api_key = os.environ.get("FINAI_API_KEY", "finai-api-key")
 
     if not api_key:
         logger.error("FINAI_API_KEY environment variable is required")
