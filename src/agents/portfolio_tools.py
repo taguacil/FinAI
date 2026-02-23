@@ -1238,7 +1238,14 @@ class AdvancedWhatIfTool(BaseTool):
     def _create_scenario_config(self, scenario_type, projection_years, monte_carlo_runs,
                               market_return, market_volatility, recurring_deposits, stress_test):
         """Create a scenario configuration based on parameters."""
-        from src.portfolio.scenarios import ScenarioConfiguration, ScenarioType, MarketAssumptions, AssetClassAssumptions
+        from decimal import Decimal
+        from src.portfolio.scenarios import (
+            ScenarioConfiguration,
+            ScenarioType,
+            MarketAssumptions,
+            AssetClassAssumptions,
+            PortfolioScenarioEngine,
+        )
         from src.portfolio.models import InstrumentType
 
         # Map scenario type
@@ -1251,6 +1258,35 @@ class AdvancedWhatIfTool(BaseTool):
         }
 
         mapped_scenario_type = scenario_type_map.get(scenario_type.lower(), ScenarioType.CUSTOM)
+
+        # If user didn't override market assumptions, use predefined scenario settings
+        use_predefined = (
+            mapped_scenario_type in {
+                ScenarioType.OPTIMISTIC,
+                ScenarioType.LIKELY,
+                ScenarioType.PESSIMISTIC,
+                ScenarioType.STRESS,
+            }
+            and not stress_test
+            and market_return == 0.08
+            and market_volatility == 0.20
+        )
+
+        if use_predefined:
+            predefined = PortfolioScenarioEngine().create_predefined_scenarios(
+                Decimal("0")
+            ).get(mapped_scenario_type.value)
+            if predefined:
+                return ScenarioConfiguration(
+                    scenario_type=mapped_scenario_type,
+                    name=predefined.name,
+                    description=predefined.description,
+                    projection_years=projection_years,
+                    monte_carlo_runs=monte_carlo_runs,
+                    market_assumptions=predefined.market_assumptions,
+                    asset_class_assumptions=predefined.asset_class_assumptions,
+                    recurring_deposits=recurring_deposits,
+                )
 
         # Adjust parameters for stress test
         if stress_test or mapped_scenario_type == ScenarioType.STRESS:
