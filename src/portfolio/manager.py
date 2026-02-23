@@ -707,6 +707,71 @@ class PortfolioManager:
 
         return pd.DataFrame()
 
+    def get_portfolio_history_filtered(
+        self,
+        start_date: date,
+        end_date: date,
+        view_mode: str = "all",
+        target_currency: Optional[Currency] = None,
+    ) -> pd.DataFrame:
+        """Get portfolio value history with optional category filtering.
+
+        Supports different view modes:
+        - "all": All assets (default behavior, includes all cash)
+        - "equities_only": Stocks + ETFs only, with attributed cash from equity transactions
+        - "fixed_income_only": Bonds only, with attributed cash from bond transactions
+
+        For filtered views, attributed cash tracks realized gains/losses from sales
+        and dividends within that category, excluding unrelated transactions.
+
+        Args:
+            start_date: Start date
+            end_date: End date
+            view_mode: View mode ("all", "equities_only", "fixed_income_only")
+            target_currency: Currency to express values in. Defaults to portfolio base currency.
+
+        Returns:
+            DataFrame with columns: total_value, positions_value, cash_value/attributed_cash
+        """
+        if not self.current_portfolio:
+            return pd.DataFrame()
+
+        history = self._get_portfolio_history()
+        if not history:
+            return pd.DataFrame()
+
+        if view_mode == "all":
+            # Standard behavior - all assets with all cash
+            return history.get_value_history(
+                start_date, end_date,
+                instrument_types=None,
+                include_cash=True,
+                target_currency=target_currency,
+            )
+        elif view_mode == "equities_only":
+            # Equities with attributed cash (realized gains from equity transactions)
+            return history.get_value_history_with_attribution(
+                start_date, end_date,
+                category="equity",
+                target_currency=target_currency,
+            )
+        elif view_mode == "fixed_income_only":
+            # Fixed income with attributed cash
+            return history.get_value_history_with_attribution(
+                start_date, end_date,
+                category="fixed_income",
+                target_currency=target_currency,
+            )
+        else:
+            # Unknown mode, fall back to all
+            logging.warning(f"Unknown view_mode '{view_mode}', falling back to 'all'")
+            return history.get_value_history(
+                start_date, end_date,
+                instrument_types=None,
+                include_cash=True,
+                target_currency=target_currency,
+            )
+
     def update_market_data(
         self,
         start_date: Optional[date] = None,

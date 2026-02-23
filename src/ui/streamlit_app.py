@@ -1666,7 +1666,7 @@ class PortfolioTrackerUI:
         # Analysis Configuration Panel
         with st.container():
             st.markdown("#### ⚙️ Analysis Configuration")
-            config_col1, config_col2, config_col3, config_col4 = st.columns([2, 1, 1, 1])
+            config_col1, config_col2, config_col3, config_col4, config_col5 = st.columns([2, 1, 1, 1, 1])
 
             with config_col1:
                 default_range = (date.today() - timedelta(days=365), date.today())
@@ -1699,6 +1699,20 @@ class PortfolioTrackerUI:
                     # This is just for display; the actual date_range input is used
                     pass
 
+            with config_col5:
+                view_mode_options = {
+                    "All Assets": "all",
+                    "Equities Only": "equities_only",
+                    "Fixed Income Only": "fixed_income_only",
+                }
+                selected_view_label = st.selectbox(
+                    "📁 View Mode",
+                    list(view_mode_options.keys()),
+                    index=0,
+                    help="Filter analytics by asset category. Equities/Fixed Income views include realized gains from sold positions."
+                )
+                selected_view_mode = view_mode_options[selected_view_label]
+
         # Normalize date range
         if isinstance(date_range, tuple) and len(date_range) == 2:
             start_date, end_date = date_range
@@ -1709,8 +1723,14 @@ class PortfolioTrackerUI:
             st.error("Start date must be on or before end date.")
             return
 
-        # Get data from PortfolioHistory (new approach)
-        history_df = portfolio_manager.get_portfolio_history(start_date, end_date)
+        # Get data from PortfolioHistory (supports filtered views)
+        history_df = portfolio_manager.get_portfolio_history_filtered(
+            start_date, end_date, view_mode=selected_view_mode
+        )
+
+        # Show indicator if filtered view is active
+        if selected_view_mode != "all":
+            st.info(f"📊 Viewing **{selected_view_label}** - includes realized gains from sold positions in this category")
 
         if history_df.empty or len(history_df) < 2:
             st.warning(

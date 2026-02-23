@@ -10,12 +10,50 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from functools import lru_cache
+from collections import defaultdict
 from typing import Callable, Dict, List, Optional, Tuple
 
 import pandas as pd
 
 from .market_data_store import MarketDataStore
 from .models import Currency, Portfolio, Position, Transaction, TransactionType
+
+
+@dataclass
+class AttributedCashState:
+    """Cash balances attributed by instrument category.
+
+    Tracks cash separately for different instrument categories to enable
+    category-specific analytics (e.g., equities-only view with realized gains).
+
+    Attributed cash starts at zero for each category, isolating pure trading performance:
+    - Deposits/withdrawals are external flows (not attributed to any category)
+    - Buying equities creates negative equity cash (capital invested)
+    - Selling equities creates positive equity cash (realized gains/losses)
+    - Dividends from equities increase equity cash
+    """
+
+    equity: Dict[Currency, Decimal] = field(default_factory=lambda: defaultdict(Decimal))
+    fixed_income: Dict[Currency, Decimal] = field(default_factory=lambda: defaultdict(Decimal))
+    other: Dict[Currency, Decimal] = field(default_factory=lambda: defaultdict(Decimal))
+
+    def get_category_total(
+        self,
+        category: str,
+        target_currency: Currency,
+        fx_rate_func: Callable[[Currency, Currency], Optional[Decimal]],
+    ) -> Decimal:
+        """Get total cash for a category in target currency."""
+        balances = getattr(self, category, {})
+        total = Decimal("0")
+        for currency, amount in balances.items():
+            if currency == target_currency:
+                total += amount
+            else:
+                rate = fx_rate_func(currency, target_currency)
+                if rate:
+                    total += amount * rate
+        return total
 
 
 @dataclass
@@ -86,6 +124,10 @@ class PortfolioHistory:
     Uses memoization for position state at transaction dates (sparse) to avoid
     replaying all transactions for each query.
     """
+
+    # Instrument type categories for filtering
+    EQUITY_TYPES = {"stock", "etf"}
+    FIXED_INCOME_TYPES = {"bond"}
 
     def __init__(
         self,
@@ -621,3 +663,157 @@ class PortfolioHistory:
         dates_to_remove = [d for d in self._state_cache.keys() if d >= from_date]
         for d in dates_to_remove:
             del self._state_cache[d]
+
+    def _get_instrument_category(self, instrument_type: str) -> str:
+        """Map instrument type to category."""
+        if instrument_type in self.EQUITY_TYPES:
+            return "equity"
+        elif instrument_type in self.FIXED_INCOME_TYPES:
+            return "fixed_income"
+        return "other"
+
+    def get_value_history_with_attribution(
+        self,
+        start_date: date,
+        end_date: date,
+        category: str = "equity",
+        target_currency: Optional[Currency] = None,
+    ) -> pd.DataFrame:
+        """Get portfolio value history with attributed cash for a specific category.
+
+        This method tracks cash flows by instrument category, enabling category-specific
+        analytics that properly reflect realized gains from sold positions.
+
+        For example, with category="equity":
+        - Shows only stock + ETF positions
+        - Includes realized gains from sold equities (attributed as positive equity cash)
+        - Excludes cash from bond transactions
+        - Deposits/withdrawals remain as external flows (for TWR adjustment)
+
+        Attributed cash starts at zero, isolating pure trading performance:
+        - Negative attributed cash = capital invested (bought but not yet sold)
+        - Positive attributed cash = realized gains/losses from sales + dividends
+
+        Args:
+            start_date: Start date
+            end_date: End date
+            category: Category to filter ("equity", "fixed_income", "other")
+            target_currency: Currency to express values in. Defaults to portfolio base currency.
+
+        Returns:
+            DataFrame with columns: date, total_value, positions_value, attributed_cash
+        """
+        data: List[Dict] = []
+        base = target_currency or self.portfolio.base_currency
+
+        # Initialize attributed cash state (starts at zero for pure trading performance)
+        attributed_cash = AttributedCashState()
+
+        # Sort transactions chronologically
+        sorted_txns = sorted(self.portfolio.transactions, key=lambda t: t.timestamp)
+
+        # Build a map of transaction dates to transactions for efficient lookup
+        txn_by_date: Dict[date, List[Transaction]] = defaultdict(list)
+        for txn in sorted_txns:
+            txn_by_date[txn.timestamp.date()].append(txn)
+
+        # Get all transaction dates in order
+        all_txn_dates = sorted(txn_by_date.keys())
+
+        # Process all transactions BEFORE start_date to initialize attributed cash
+        for txn_date in all_txn_dates:
+            if txn_date >= start_date:
+                break
+            for txn in txn_by_date[txn_date]:
+                self._apply_transaction_to_attributed_cash(txn, attributed_cash)
+
+        current = start_date
+
+        while current <= end_date:
+            # Process transactions for this date
+            for txn in txn_by_date.get(current, []):
+                self._apply_transaction_to_attributed_cash(txn, attributed_cash)
+
+            # Get position state at this date
+            state = self._replay_transactions_to_date(current)
+
+            # Create date-aware FX rate function
+            def fx_rate_for_current(from_curr: Currency, to_curr: Currency, dt: date = current) -> Optional[Decimal]:
+                return self._get_fx_rate(from_curr, to_curr, as_of=dt)
+
+            # Calculate positions value for the category
+            positions_value = Decimal("0")
+            for symbol, pos in state.positions.items():
+                # Filter by instrument category
+                pos_category = self._get_instrument_category(pos.instrument_type)
+                if pos_category != category:
+                    continue
+
+                price = self._get_price_for_position(pos, current)
+
+                if price is not None and pos.quantity > 0:
+                    pv = pos.quantity * price
+                    if pos.currency == base:
+                        positions_value += pv
+                    else:
+                        rate = self._get_fx_rate(pos.currency, base, as_of=current)
+                        if rate:
+                            positions_value += pv * rate
+
+            # Get attributed cash for this category
+            cash_value = attributed_cash.get_category_total(category, base, fx_rate_for_current)
+
+            total_value = positions_value + cash_value
+
+            data.append({
+                "date": current,
+                "total_value": float(total_value),
+                "positions_value": float(positions_value),
+                "attributed_cash": float(cash_value),
+            })
+
+            current += timedelta(days=1)
+
+        df = pd.DataFrame(data)
+        if not df.empty:
+            df["date"] = pd.to_datetime(df["date"])
+            df = df.set_index("date")
+
+        return df
+
+    def _apply_transaction_to_attributed_cash(
+        self, txn: Transaction, attributed_cash: AttributedCashState
+    ) -> None:
+        """Apply a transaction's cash effect to the attributed cash state.
+
+        Cash Attribution Rules:
+        - BUY: Decreases category cash (capital invested)
+        - SELL: Increases category cash (realized gain/loss)
+        - DIVIDEND/INTEREST: Increases category cash (if from that category's instrument)
+        - DEPOSIT/WITHDRAWAL: Not attributed (external flows)
+        - FEES: Attributed to "other" category
+        """
+        currency = txn.currency
+        instrument_type = txn.instrument.instrument_type.value if hasattr(txn.instrument.instrument_type, 'value') else str(txn.instrument.instrument_type)
+        category = self._get_instrument_category(instrument_type)
+
+        if txn.transaction_type == TransactionType.BUY:
+            # Buying decreases category cash (capital invested)
+            balances = getattr(attributed_cash, category)
+            balances[currency] -= txn.total_value
+
+        elif txn.transaction_type == TransactionType.SELL:
+            # Selling increases category cash (realized gain/loss)
+            balances = getattr(attributed_cash, category)
+            balances[currency] += txn.total_value
+
+        elif txn.transaction_type in [TransactionType.DIVIDEND, TransactionType.INTEREST]:
+            # Income is attributed to the instrument's category
+            balances = getattr(attributed_cash, category)
+            balances[currency] += txn.total_value
+
+        elif txn.transaction_type == TransactionType.FEES:
+            # Fees attributed to "other" category
+            attributed_cash.other[currency] -= txn.total_value
+
+        # DEPOSIT/WITHDRAWAL are NOT attributed - they are external flows
