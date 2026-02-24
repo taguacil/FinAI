@@ -6,12 +6,14 @@ batch pricing, and data freshness monitoring.
 """
 
 from datetime import date
-from typing import List, Optional
+from typing import Dict, List, Optional
 
+import pandas as pd
 from langchain.tools import BaseTool
 from pydantic import BaseModel, Field
 
 from ...portfolio.manager import PortfolioManager
+from ...portfolio.market_data_store import MarketDataStore
 from ...portfolio.models import Currency
 from ...services.market_data_service import MarketDataService
 
@@ -25,76 +27,68 @@ class GetPriceHistoryInput(BaseModel):
 
 
 class GetPriceHistoryTool(BaseTool):
-    """Tool for getting historical price data."""
+    """Tool for getting historical price data from stored database."""
 
     name: str = "get_price_history"
     description: str = """Get historical price data for a symbol over a date range.
 
-    Returns daily OHLCV (Open, High, Low, Close, Volume) data.
+    Returns daily close prices from the stored database.
     Useful for analyzing price trends, calculating returns, and technical analysis.
 
     Example: Get AAPL prices from 2024-01-01 to 2024-06-30
     """
     args_schema: type[BaseModel] = GetPriceHistoryInput
-    market_data_service: Optional[MarketDataService] = None
+    market_data_store: Optional[MarketDataStore] = None
 
-    def __init__(self, market_data_service: MarketDataService):
+    def __init__(self, market_data_store: MarketDataStore):
         super().__init__()
-        self.market_data_service = market_data_service
+        self.market_data_store = market_data_store
 
     def _run(self, symbol: str, start_date: str, end_date: str) -> str:
-        """Get historical prices."""
+        """Get historical prices from stored database."""
         try:
             start = date.fromisoformat(start_date)
             end = date.fromisoformat(end_date)
+            symbol = symbol.upper().strip()
 
-            df = self.market_data_service.get_price_history(
-                symbol.upper(), start, end
-            )
+            # Get prices from MarketDataStore (stored database)
+            raw_prices = self.market_data_store.get_prices(symbol, start, end)
 
-            if df.empty:
-                return f"❌ No price history found for {symbol.upper()} between {start_date} and {end_date}"
+            if not raw_prices:
+                return f"❌ No price history found for {symbol} between {start_date} and {end_date}. Run fetch_and_update_prices first."
+
+            # Convert to sorted list
+            sorted_dates = sorted(raw_prices.keys())
+            prices_list = [(d, float(raw_prices[d])) for d in sorted_dates]
 
             # Format as readable table
             result = [
-                f"📈 **Price History for {symbol.upper()}**",
+                f"📈 **Price History for {symbol}**",
                 f"Period: {start_date} to {end_date}",
-                f"Data points: {len(df)}",
+                f"Data points: {len(prices_list)}",
                 "",
-                "| Date | Open | High | Low | Close | Volume |",
-                "|------|------|------|-----|-------|--------|",
+                "| Date | Close |",
+                "|------|-------|",
             ]
 
             # Show first 10 and last 5 rows if more than 20 rows
-            if len(df) > 20:
-                for idx in df.head(10).itertuples():
-                    result.append(
-                        f"| {idx.Index.strftime('%Y-%m-%d')} | "
-                        f"{idx.open:.2f} | {idx.high:.2f} | {idx.low:.2f} | "
-                        f"{idx.close:.2f} | {idx.volume:,.0f} |"
-                    )
-                result.append("| ... | ... | ... | ... | ... | ... |")
-                for idx in df.tail(5).itertuples():
-                    result.append(
-                        f"| {idx.Index.strftime('%Y-%m-%d')} | "
-                        f"{idx.open:.2f} | {idx.high:.2f} | {idx.low:.2f} | "
-                        f"{idx.close:.2f} | {idx.volume:,.0f} |"
-                    )
+            if len(prices_list) > 20:
+                for d, price in prices_list[:10]:
+                    result.append(f"| {d.strftime('%Y-%m-%d')} | {price:.2f} |")
+                result.append("| ... | ... |")
+                for d, price in prices_list[-5:]:
+                    result.append(f"| {d.strftime('%Y-%m-%d')} | {price:.2f} |")
             else:
-                for idx in df.itertuples():
-                    result.append(
-                        f"| {idx.Index.strftime('%Y-%m-%d')} | "
-                        f"{idx.open:.2f} | {idx.high:.2f} | {idx.low:.2f} | "
-                        f"{idx.close:.2f} | {idx.volume:,.0f} |"
-                    )
+                for d, price in prices_list:
+                    result.append(f"| {d.strftime('%Y-%m-%d')} | {price:.2f} |")
 
             # Add summary statistics
-            if "close" in df.columns and len(df) > 1:
-                first_close = df["close"].iloc[0]
-                last_close = df["close"].iloc[-1]
+            if len(prices_list) > 1:
+                first_close = prices_list[0][1]
+                last_close = prices_list[-1][1]
                 pct_change = ((last_close - first_close) / first_close) * 100
-                high = df["high"].max()
-                low = df["low"].min()
+                high = max(p[1] for p in prices_list)
+                low = min(p[1] for p in prices_list)
 
                 result.extend([
                     "",
@@ -419,11 +413,11 @@ class GetMovingAverageSignalTool(BaseTool):
     Example: Get MA signal for AAPL with 50-day and 200-day MAs
     """
     args_schema: type[BaseModel] = GetMovingAverageSignalInput
-    market_data_service: Optional[MarketDataService] = None
+    market_data_store: Optional[MarketDataStore] = None
 
-    def __init__(self, market_data_service: MarketDataService):
+    def __init__(self, market_data_store: MarketDataStore):
         super().__init__()
-        self.market_data_service = market_data_service
+        self.market_data_store = market_data_store
 
     def _run(
         self,
@@ -431,29 +425,39 @@ class GetMovingAverageSignalTool(BaseTool):
         short_period: int = 50,
         long_period: int = 200,
     ) -> str:
-        """Calculate moving average signal."""
+        """Calculate moving average signal using stored price data."""
         from datetime import timedelta
 
         try:
-            # Need enough data for the long MA plus some buffer
+            symbol = symbol.upper().strip()
+
+            # Need enough data for the long MA plus buffer
             end = date.today()
-            start = end - timedelta(days=int(long_period * 1.5))
+            start = end - timedelta(days=int(long_period * 2))
 
-            df = self.market_data_service.get_price_history(
-                symbol.upper(), start, end
-            )
+            # Get prices from MarketDataStore (stored database)
+            prices_dict: Dict[date, float] = {}
+            raw_prices = self.market_data_store.get_prices(symbol, start, end)
 
-            if df.empty:
-                return f"❌ No price history found for {symbol.upper()}"
+            if not raw_prices:
+                return f"❌ No price history found for {symbol} in database. Run fetch_and_update_prices first."
 
-            if len(df) < long_period:
+            # Convert to sorted list of (date, price)
+            for d, price in raw_prices.items():
+                prices_dict[d] = float(price)
+
+            # Sort by date and create series
+            sorted_dates = sorted(prices_dict.keys())
+            closes = pd.Series([prices_dict[d] for d in sorted_dates], index=sorted_dates)
+
+            if len(closes) < long_period:
                 return (
-                    f"❌ Insufficient data for {symbol.upper()}: "
-                    f"need {long_period} days, got {len(df)}"
+                    f"❌ Insufficient data for {symbol}: "
+                    f"need {long_period} days, got {len(closes)}. "
+                    f"Run fetch_and_update_prices to load more historical data."
                 )
 
             # Calculate moving averages
-            closes = df["close"]
             short_ma = closes.tail(short_period).mean()
             long_ma = closes.tail(long_period).mean()
             current_price = closes.iloc[-1]
@@ -499,7 +503,7 @@ class GetMovingAverageSignalTool(BaseTool):
                 trend = "🟡 Bearish but stabilizing"
 
             lines = [
-                f"📊 **Moving Average Signal: {symbol.upper()}**",
+                f"📊 **Moving Average Signal: {symbol}**",
                 "",
                 f"**MA Crossover Signal: {signal}** ({signal_desc})",
                 f"**Trend Assessment: {trend}**",
@@ -526,11 +530,12 @@ def create_market_data_tools(
     portfolio_manager: PortfolioManager,
 ) -> List[BaseTool]:
     """Create all MarketDataService tools for the Analytics Agent."""
+    market_data_store = portfolio_manager.market_data_store
     return [
-        GetPriceHistoryTool(market_data_service),
+        GetPriceHistoryTool(market_data_store),
         GetFXRateTool(market_data_service),
         GetBatchPricesTool(market_data_service),
         GetDataFreshnessTool(market_data_service),
         RefreshDataTool(market_data_service, portfolio_manager),
-        GetMovingAverageSignalTool(market_data_service),
+        GetMovingAverageSignalTool(market_data_store),
     ]
