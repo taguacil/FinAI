@@ -1,49 +1,53 @@
-# 🤖 AI Portfolio Tracker
+# FinAI - AI Portfolio Tracker
 
-A comprehensive portfolio management system with AI-powered investment advice, built with Python, LangChain, and Streamlit.
+An AI-powered portfolio management system built with Python, LangChain, and MCP (Model Context Protocol). Features multi-agent architecture, portfolio optimization, and natural language interaction.
 
-## ✨ Features
+## Features
 
-### 📊 Portfolio Management
+### Portfolio Management
 - **Multi-currency support** - Track investments in USD, EUR, GBP, JPY, CHF, CAD, AUD, BTC, ETH
-- **Manual price updates** - Fetch latest prices only when explicitly requested
-- **Transaction tracking** - Buy, sell, dividend, deposit, withdrawal transactions
+- **Transaction tracking** - Buy, sell, dividend, deposit, withdrawal, fees, splits, mergers
 - **Position management** - Automatic cost basis calculation and P&L tracking
 - **Historical snapshots** - Daily portfolio value tracking for performance analysis
+- **Manual price control** - Fetch prices only when explicitly requested
 
-### 🤖 AI Financial Advisor
-- **Natural language interface** - Chat with your AI financial advisor
-- **Portfolio analysis** - Get insights on your holdings and performance
-- **Investment advice** - AI-powered recommendations based on market conditions
-- **Transaction parsing** - Add transactions using natural language
-- **Market research** - Access to current market news and data
+### Multi-Agent AI System
+- **Orchestrator Agent** - Routes queries to specialized agents
+- **Transaction Agent** - Handles buy/sell/transaction parsing from natural language
+- **Analytics Agent** - Portfolio analysis and insights
+- **Natural language interface** - "I bought 50 shares of AAPL at $150"
 
-### 📈 Advanced Analytics
-- **Performance metrics** - Sharpe ratio, volatility, max drawdown, alpha, beta
-- **Risk analysis** - Value at Risk (VaR), Conditional VaR, Sortino ratio
-- **Benchmark comparison** - Compare against S&P 500, Dow Jones, and custom indices
-- **Interactive charts** - Portfolio performance, allocation, and returns visualization
-- **Sector analysis** - Portfolio breakdown by sector and currency
+### Advanced Analytics
+- **Performance metrics** - Sharpe ratio, volatility, max drawdown, alpha, beta, CAGR
+- **Risk analysis** - Value at Risk (VaR), Conditional VaR, Sortino ratio, downside deviation
+- **Portfolio optimization** - Hierarchical Risk Parity (HRP) and Mean-Variance (Markowitz)
+- **What-if scenarios** - Monte Carlo simulations and stress testing
+- **Technical analysis** - Moving average crossover signals (50/200 day)
+- **Benchmark comparison** - Compare against S&P 500 and custom indices
 
-### 🎨 Modern Web Interface
-- **Streamlit-powered UI** - Clean, responsive web interface
-- **Real-time chat** - Interactive AI conversation
-- **Visual analytics** - Charts and graphs powered by Plotly
-- **Portfolio dashboard** - Comprehensive overview of your investments
-- **Transaction management** - Easy-to-use forms for adding transactions
+### MCP Server Integration
+- **Model Context Protocol** - Exposes 30+ tools for external AI systems
+- **Multiple transports** - SSE (HTTP) for Cursor, stdio for Claude Desktop
+- **Full portfolio operations** - Transactions, analytics, market data, optimization
 
-## 🚀 Quick Start
+### Web Interface
+- **Streamlit UI** - Clean, responsive web interface
+- **Interactive charts** - Plotly-powered visualizations
+- **Real-time chat** - AI conversation for portfolio management
+- **Market data management** - Control price updates and snapshots
+
+## Quick Start
 
 ### Prerequisites
 - Python 3.11 or higher
-- uv package manager (automatically installed during setup)
+- uv package manager
 
 ### Installation
 
 1. **Clone the repository**
    ```bash
-   git clone <repository-url>
-   cd portfolio-tracker
+   git clone https://github.com/taguacil/FinAI.git
+   cd FinAI
    ```
 
 2. **Install dependencies**
@@ -55,7 +59,7 @@ A comprehensive portfolio management system with AI-powered investment advice, b
    uv sync
    ```
 
-3. **Set up environment variables** (optional)
+3. **Set up environment variables**
    ```bash
    cp .env.example .env
    # Edit .env to add your API keys
@@ -66,12 +70,9 @@ A comprehensive portfolio management system with AI-powered investment advice, b
    python main.py
    ```
 
-The application will automatically:
-- Initialize the system
-- Create a sample portfolio if none exists
-- Start the web interface at `http://localhost:8501`
+The application will start the web interface at `http://localhost:8501`
 
-## 📖 Usage
+## Usage
 
 ### Command Line Interface
 
@@ -92,331 +93,238 @@ python main.py --mode status
 python main.py --data-dir /path/to/data
 ```
 
+### MCP Server
+
+Run as an MCP server for integration with Claude Desktop or other AI tools:
+
+```bash
+# SSE transport (for Cursor)
+uv run python -m src.mcp_server
+
+# stdio transport (for Claude Desktop)
+uv run python -m src.mcp_server --stdio
+```
+
+#### Claude Desktop Configuration
+
+Add to your Claude Desktop config:
+
+```json
+{
+  "mcpServers": {
+    "finai": {
+      "command": "uv",
+      "args": ["run", "python", "-m", "src.mcp_server", "--stdio"],
+      "cwd": "/path/to/FinAI"
+    }
+  }
+}
+```
+
 ### Web Interface
 
-1. **Portfolio Management**
-   - Create new portfolios or load existing ones
-   - Add transactions through forms or AI chat
-   - View real-time positions and P&L
-
-2. **Data Management**
-   - **Manual Price Updates**: Click "Update Current Prices" in the sidebar to fetch latest market data
-   - **Snapshot Creation**: Use "Create Snapshots Since Last" to generate historical snapshots
-   - **Data Freshness**: The UI shows when prices were last updated and warns about stale data
-   - **API Control**: This approach helps control API usage and ensures you only get fresh data when needed
-
-3. **AI Chat**
-   - Natural language portfolio management
-   - Investment advice and market insights
-   - Transaction parsing: "I bought 50 shares of AAPL at $150"
-
-4. **Analytics Dashboard**
-   - Performance metrics and risk analysis
-   - Interactive charts and visualizations
-   - Benchmark comparisons
+1. **Portfolio Management** - Create portfolios, add transactions, view positions
+2. **AI Chat** - Natural language portfolio management
+3. **Analytics Dashboard** - Performance metrics and visualizations
+4. **Market Data** - Update prices and create historical snapshots
 
 ### Example Interactions
 
-**Adding transactions via chat:**
 ```
 User: "I bought 100 shares of Microsoft at $300 yesterday"
 AI: "I'll add that transaction for you..."
 
 User: "What's my portfolio performance this year?"
-AI: "Based on your portfolio data, here's your performance analysis..."
+AI: "Based on your portfolio data, here's your YTD performance..."
 
-User: "Should I invest in Tesla?"
-AI: "Let me analyze Tesla and your current portfolio allocation..."
+User: "Optimize my portfolio for maximum Sharpe ratio"
+AI: "Running HRP optimization..."
 ```
 
-## 🏗️ Architecture
+## Architecture
 
 ```
-portfolio-tracker/
+FinAI/
 ├── src/
-│   ├── portfolio/          # Portfolio models and management
-│   ├── data_providers/     # Financial data APIs
-│   ├── agents/            # AI agent and tools
-│   ├── ui/                # Streamlit web interface
-│   └── utils/             # Utilities and metrics
-├── data/                  # Portfolio data storage
-├── config/               # Configuration files
-└── main.py              # Application entry point
+│   ├── portfolio/           # Core portfolio logic
+│   │   ├── models.py        # Pydantic data models
+│   │   ├── manager.py       # Portfolio operations
+│   │   ├── storage.py       # File-based persistence
+│   │   ├── analyzer.py      # Portfolio analysis
+│   │   ├── optimizer.py     # HRP and Markowitz optimization
+│   │   ├── scenarios.py     # What-if and Monte Carlo
+│   │   ├── portfolio_history.py  # Historical tracking
+│   │   └── market_data_store.py  # Price data management
+│   │
+│   ├── agents/              # Multi-agent AI system
+│   │   ├── orchestrator_agent.py  # Query routing
+│   │   ├── transaction_agent.py   # Transaction handling
+│   │   ├── analytics_agent.py     # Analysis queries
+│   │   ├── portfolio_tools.py     # LangChain tools
+│   │   ├── llm_config.py          # LLM provider config
+│   │   └── tools/                 # Market data tools
+│   │
+│   ├── data_providers/      # Financial data sources
+│   │   ├── yahoo_finance.py # Yahoo Finance API
+│   │   ├── manager.py       # Provider coordination
+│   │   └── fx_cache.py      # FX rate caching
+│   │
+│   ├── services/
+│   │   └── market_data_service.py  # Market data operations
+│   │
+│   ├── ui/
+│   │   ├── streamlit_app.py    # Main web interface
+│   │   └── market_data_page.py # Market data UI
+│   │
+│   ├── utils/
+│   │   ├── metrics.py       # Financial calculations
+│   │   ├── initializer.py   # System setup
+│   │   ├── health_check.py  # System monitoring
+│   │   └── logging_config.py
+│   │
+│   └── mcp_server.py        # MCP server (30+ tools)
+│
+├── data/                    # Portfolio data (gitignored)
+├── config/                  # Configuration files
+└── main.py                  # Application entry point
 ```
 
-### Core Components
-
-- **Portfolio Manager** - Handles transactions and position tracking
-- **Data Providers** - Yahoo Finance and Alpha Vantage integration
-- **AI Agent** - LangChain-powered financial advisor
-- **Metrics Calculator** - Advanced financial analysis
-- **Storage System** - JSON-based file storage
-- **Web UI** - Streamlit interface with Plotly charts
-
-## 🔑 API Keys
-
-The system works without API keys but with limited functionality:
-
-### Required for AI Features
-- **OpenAI API Key** - Enables AI chat functionality
-  - Get from: https://platform.openai.com/api-keys
-  - Set as: `OPENAI_API_KEY=your_key_here`
-
-
-
-## 📊 Supported Assets
-
-### Instrument Types
-- **Stocks** - Individual company shares
-- **ETFs** - Exchange-traded funds
-- **Mutual Funds** - Mutual fund investments
-- **Cryptocurrencies** - Bitcoin, Ethereum, etc.
-- **Cash** - Multi-currency cash positions
-- **Bonds** - Government and corporate bonds (limited support)
-
-### Data Sources
-- **Yahoo Finance** - Free real-time and historical data
-- **Extensible** - Easy to add new data providers
-
-## 🧮 Financial Metrics
-
-### Returns & Performance
-- Total Return
-- Annualized Return
-- Compound Annual Growth Rate (CAGR)
-- Time-weighted returns
-
-### Risk Metrics
-- Volatility (standard deviation)
-- Maximum Drawdown
-- Value at Risk (VaR)
-- Conditional Value at Risk (CVaR)
-- Downside deviation
-
-### Risk-Adjusted Returns
-- Sharpe Ratio
-- Sortino Ratio
-- Calmar Ratio
-- Information Ratio
-
-### Benchmark Analysis
-- Alpha (excess return)
-- Beta (market sensitivity)
-- Correlation with indices
-- Tracking error
-
-## 🎯 Examples
-
-### Sample Portfolio Creation
-```python
-from src.utils.initializer import PortfolioInitializer
-
-# Initialize system
-initializer = PortfolioInitializer()
-
-# Create sample portfolio with demo data
-portfolio_id = initializer.create_sample_portfolio("My Portfolio")
-```
-
-### Adding Transactions
-```python
-from src.portfolio.manager import PortfolioManager
-from decimal import Decimal
-
-manager = PortfolioManager()
-manager.load_portfolio(portfolio_id)
-
-# Buy stocks
-manager.buy_shares("AAPL", Decimal("50"), Decimal("150.00"))
-
-# Add dividend
-manager.add_dividend("AAPL", Decimal("25.00"))
-
-# Deposit cash
-manager.deposit_cash(Decimal("5000.00"))
-```
-
-### Performance Analysis
-```python
-from src.utils.metrics import FinancialMetricsCalculator
-
-calculator = FinancialMetricsCalculator()
-snapshots = storage.load_snapshots(portfolio_id)
-
-# Calculate comprehensive metrics
-metrics = calculator.calculate_portfolio_metrics(
-    snapshots,
-    benchmark_symbol="SPY"
-)
-
-print(f"Sharpe Ratio: {metrics['sharpe_ratio']:.3f}")
-print(f"Max Drawdown: {metrics['max_drawdown']*100:.2f}%")
-print(f"Alpha: {metrics['alpha']*100:.2f}%")
-```
-
-## 🔧 Configuration
+## Configuration
 
 ### Environment Variables
+
 ```bash
-# AI Providers (choose one or configure multiple and switch in the UI)
+# LLM Providers (choose one or configure multiple)
 
 # Azure OpenAI
-AZURE_OPENAI_ENDPOINT=https://kallamai.openai.azure.com/
+AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com/
 AZURE_OPENAI_API_KEY=your_azure_openai_key
-# Optional: override API version (defaults to 2025-01-01-preview in code)
-# AZURE_OPENAI_API_VERSION=2025-01-01-preview
 
-# Anthropic
+# Anthropic Claude
 ANTHROPIC_API_KEY=your_anthropic_key
 
 # Google Vertex AI
-GOOGLE_VERTEX_PROJECT=mystic-fountain-415918
+GOOGLE_VERTEX_PROJECT=your-project-id
 GOOGLE_VERTEX_LOCATION=us-central1
-# Service account JSON file for ADC
-GOOGLE_APPLICATION_CREDENTIALS=/absolute/path/to/service_account.json
+GOOGLE_APPLICATION_CREDENTIALS=/path/to/service_account.json
 
-# OpenAI (fallback only)
+# OpenAI (fallback)
 OPENAI_API_KEY=your_openai_key
-
-# Financial data providers
-# Add additional providers as needed
 
 # App config
 DATA_DIR=custom/data/path
 LOG_LEVEL=INFO
 ```
 
-### Streamlit Configuration
-Edit `config/streamlit_config.toml` to customize the web interface:
-- Port and server settings
-- Theme colors and styling
-- Browser behavior
+## Supported Assets
 
-## 📁 Data Storage
+| Type | Description |
+|------|-------------|
+| Stocks | Individual company shares |
+| ETFs | Exchange-traded funds |
+| Mutual Funds | Mutual fund investments |
+| Crypto | Bitcoin, Ethereum, etc. |
+| Bonds | Government and corporate (with ISIN support) |
+| Cash | Multi-currency positions |
+| Options/Futures | Derivatives (limited support) |
 
-The system uses a file-based storage system:
+## Financial Metrics
+
+### Returns & Performance
+- Total Return, Annualized Return, CAGR
+- Time-weighted returns, YTD performance
+
+### Risk Metrics
+- Volatility, Maximum Drawdown
+- Value at Risk (VaR), Conditional VaR
+- Downside deviation
+
+### Risk-Adjusted Returns
+- Sharpe Ratio, Sortino Ratio
+- Calmar Ratio, Information Ratio
+
+### Benchmark Analysis
+- Alpha, Beta, Correlation
+- Tracking error
+
+## MCP Tools
+
+The MCP server exposes 30+ tools:
+
+- **Portfolio**: `get_portfolio_summary`, `get_portfolio_snapshot`, `get_ytd_performance`
+- **Transactions**: `add_transaction`, `bulk_add_transactions`, `modify_transaction`, `delete_transaction`
+- **Market Data**: `get_current_price`, `get_price_history`, `refresh_data`, `set_market_price`
+- **Analytics**: `get_portfolio_metrics`, `optimize_portfolio`, `advanced_what_if`
+- **Instruments**: `search_instrument`, `resolve_instrument`, `check_market_data_availability`
+
+## Development
+
+### Running Tests
+
+```bash
+uv run pytest
+```
+
+### Code Quality
+
+```bash
+# Format code
+uv run black src/
+
+# Sort imports
+uv run isort src/
+
+# Lint
+uv run flake8 src/
+
+# Type checking
+uv run mypy src/
+```
+
+## Data Storage
 
 ```
 data/
-├── portfolios/           # Portfolio data files
-├── snapshots/           # Daily portfolio snapshots
-├── backups/            # Automatic backups
-├── exports/            # Data exports
-└── logs/              # Application logs
+├── portfolios/      # Portfolio JSON files
+├── snapshots/       # Daily portfolio snapshots
+├── market_data/     # Cached price data
+├── backups/         # Automatic backups
+└── logs/            # Application logs
 ```
 
-### Data Format
-- **JSON-based** - Human-readable portfolio data
-- **Decimal precision** - Accurate financial calculations
-- **Automatic backups** - Data safety and recovery
-- **Export options** - CSV and JSON export formats
+Data is stored in human-readable JSON format with Decimal precision for financial accuracy.
 
-## 🧪 Development
-
-### Project Structure
-```
-src/
-├── portfolio/
-│   ├── models.py          # Data models
-│   ├── manager.py         # Portfolio operations
-│   └── storage.py         # File storage system
-├── data_providers/
-│   ├── base.py           # Provider interface
-│   ├── yahoo_finance.py  # Yahoo Finance API
-│   └── manager.py        # Provider coordination
-├── agents/
-│   ├── tools.py          # LangChain tools
-│   └── portfolio_agent.py # AI agent
-├── ui/
-│   └── streamlit_app.py  # Web interface
-└── utils/
-    ├── metrics.py        # Financial calculations
-    └── initializer.py    # System initialization
-```
-
-### Adding New Features
-
-1. **New Data Provider**
-   ```python
-   # Inherit from BaseDataProvider
-   class NewProvider(BaseDataProvider):
-       def get_current_price(self, symbol):
-           # Implementation
-   ```
-
-2. **New Financial Metric**
-   ```python
-   # Add to FinancialMetricsCalculator
-   def calculate_new_metric(self, returns):
-       # Implementation
-   ```
-
-3. **New AI Tool**
-   ```python
-   # Create LangChain tool
-   class NewTool(BaseTool):
-       name = "new_tool"
-       description = "Description"
-       # Implementation
-   ```
-
-## 🐛 Troubleshooting
-
-### Common Issues
+## Troubleshooting
 
 **Import Errors**
 ```bash
-# Ensure you're in the project directory
-cd portfolio-tracker
-# Reinstall dependencies
+cd FinAI
 uv sync
 ```
 
 **UI Not Starting**
 ```bash
+python main.py --mode status
 # Check if port 8501 is available
-python main.py --mode status
-# Try different port in streamlit_config.toml
-```
-
-**Data Provider Issues**
-```bash
-# Check provider status
-python main.py --mode status
-# Verify API keys in .env file
 ```
 
 **Missing Prices**
 ```bash
-# Update prices manually
-python -c "
-from src.utils.initializer import PortfolioInitializer
-init = PortfolioInitializer()
-init._update_all_portfolio_prices()
-"
+# Use the MCP tool or UI to refresh market data
 ```
 
-## 📝 License
+## License
 
 This project is open source and available under the MIT License.
 
-## 🤝 Contributing
+## Contributing
 
-Contributions are welcome! Please feel free to submit pull requests or open issues for bugs and feature requests.
-
-### Development Setup
+Contributions are welcome! Please:
 1. Fork the repository
 2. Create a feature branch
 3. Make your changes
 4. Add tests if applicable
 5. Submit a pull request
-
-## 📞 Support
-
-For questions and support:
-- Open an issue on GitHub
-- Check the troubleshooting section
-- Review the logs in `data/logs/`
 
 ---
 
