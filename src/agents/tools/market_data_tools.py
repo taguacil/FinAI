@@ -426,8 +426,9 @@ class RefreshDataTool(BaseTool):
                 except Exception as e:
                     errors.append(f"{portfolio_symbol}: {str(e)}")
 
-            # Refresh FX rates
+            # Refresh FX rates - backfill from last stored date to today
             fx_updated = 0
+            fx_rates_stored = 0
             currencies = set()
             currencies.add(portfolio.base_currency)
             for currency in portfolio.cash_balances.keys():
@@ -435,13 +436,35 @@ class RefreshDataTool(BaseTool):
             for pos in portfolio.positions.values():
                 currencies.add(pos.instrument.currency)
 
+            fx_cache = data_manager.fx_cache
             for currency in currencies:
                 if currency != portfolio.base_currency:
-                    fx_result = self.market_data_service.get_fx_rate(
-                        currency, portfolio.base_currency, force_refresh=True
-                    )
-                    if fx_result.rate is not None:
-                        fx_updated += 1
+                    # Find last stored FX rate date
+                    last_fx_date = None
+                    for days_back in range(30):
+                        check_date = today - timedelta(days=days_back)
+                        cached_rate = fx_cache.get_rate(currency, portfolio.base_currency, check_date)
+                        if cached_rate is not None:
+                            last_fx_date = check_date
+                            break
+
+                    # Determine start date for fetching
+                    if last_fx_date and last_fx_date < today:
+                        start_date = last_fx_date + timedelta(days=1)
+                    else:
+                        start_date = today
+
+                    # Fetch and store FX rates for each day from start to today
+                    current_date = start_date
+                    while current_date <= today:
+                        rate = data_manager.get_historical_fx_rate_on(
+                            current_date, currency, portfolio.base_currency
+                        )
+                        if rate is not None:
+                            fx_rates_stored += 1
+                        current_date += timedelta(days=1)
+
+                    fx_updated += 1
 
             success = len(errors) == 0
             status = "✅ Refresh completed successfully" if success else "⚠️ Refresh completed with errors"
@@ -453,7 +476,7 @@ class RefreshDataTool(BaseTool):
                 "",
                 "**Updated:**",
                 f"• Symbols: {symbols_updated} (prices stored: {prices_persisted})",
-                f"• FX Rates: {fx_updated} pairs",
+                f"• FX Rates: {fx_updated} pairs (rates stored: {fx_rates_stored})",
             ]
 
             if errors:
