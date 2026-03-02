@@ -402,10 +402,11 @@ class RefreshDataTool(BaseTool):
                         symbols_updated += 1
                         # Store each price in the MarketDataStore
                         if store:
+                            currency = position.instrument.currency
                             for p in price_data:
                                 price_value = p.close_price or p.open_price or p.high_price or p.low_price
                                 if price_value is not None:
-                                    store.set_price(portfolio_symbol, p.date, price_value)
+                                    store.set_price(portfolio_symbol, p.date, price_value, currency)
                                     prices_persisted += 1
 
                         # Also update the in-memory cache with today's price
