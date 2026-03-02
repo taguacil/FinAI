@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 from ...portfolio.manager import PortfolioManager
 from ...portfolio.market_data_store import MarketDataStore
 from ...portfolio.models import Currency
-from ...services.market_data_service import MarketDataService
+from ...services.market_data_service import MarketDataService, PriceResult
 
 
 class GetPriceHistoryInput(BaseModel):
@@ -348,34 +348,119 @@ class RefreshDataTool(BaseTool):
 
     def _run(self) -> str:
         """Refresh market data."""
+        from datetime import timedelta
+
         try:
             if not self.portfolio_manager.current_portfolio:
                 return "❌ No portfolio loaded."
 
             portfolio = self.portfolio_manager.current_portfolio
-            result = self.market_data_service.refresh_all(portfolio)
+            store = self.portfolio_manager.market_data_store
+            data_manager = self.market_data_service.data_manager
+            today = date.today()
 
-            if result.success:
-                status = "✅ Refresh completed successfully"
-            else:
-                status = "⚠️ Refresh completed with errors"
+            symbols_updated = 0
+            prices_persisted = 0
+            errors: List[str] = []
+
+            # For each position, fetch historical prices from last stored date to today
+            for portfolio_symbol, position in portfolio.positions.items():
+                # Determine the lookup symbol (use data_provider_symbol if set)
+                provider_symbol = position.instrument.data_provider_symbol
+                lookup_symbol = provider_symbol if provider_symbol else portfolio_symbol
+
+                # Find the last stored price date for this symbol
+                last_price_date = None
+                if store:
+                    # Check recent dates to find the last stored price
+                    for days_back in range(30):
+                        check_date = today - timedelta(days=days_back)
+                        prices = store.get_prices(portfolio_symbol, check_date, check_date)
+                        if prices:
+                            last_price_date = check_date
+                            break
+
+                # Determine start date for fetching
+                if last_price_date and last_price_date < today:
+                    # Fetch from day after last price to today
+                    start_date = last_price_date + timedelta(days=1)
+                else:
+                    # No recent prices or already up to date - just fetch today
+                    start_date = today
+
+                # Skip if already up to date
+                if start_date > today:
+                    continue
+
+                # Fetch historical prices from data provider
+                try:
+                    price_data = data_manager.get_historical_prices(
+                        lookup_symbol, start_date, today
+                    )
+
+                    if price_data:
+                        symbols_updated += 1
+                        # Store each price in the MarketDataStore
+                        if store:
+                            for p in price_data:
+                                price_value = p.close_price or p.open_price or p.high_price or p.low_price
+                                if price_value is not None:
+                                    store.set_price(portfolio_symbol, p.date, price_value)
+                                    prices_persisted += 1
+
+                        # Also update the in-memory cache with today's price
+                        latest = price_data[-1] if price_data else None
+                        if latest:
+                            latest_price = latest.close_price or latest.open_price
+                            if latest_price is not None:
+                                from datetime import datetime
+                                self.market_data_service._price_cache[portfolio_symbol] = PriceResult(
+                                    symbol=portfolio_symbol,
+                                    price=latest_price,
+                                    timestamp=datetime.now(),
+                                    is_stale=False,
+                                )
+                    else:
+                        errors.append(f"{portfolio_symbol}: No price available")
+
+                except Exception as e:
+                    errors.append(f"{portfolio_symbol}: {str(e)}")
+
+            # Refresh FX rates
+            fx_updated = 0
+            currencies = set()
+            currencies.add(portfolio.base_currency)
+            for currency in portfolio.cash_balances.keys():
+                currencies.add(currency)
+            for pos in portfolio.positions.values():
+                currencies.add(pos.instrument.currency)
+
+            for currency in currencies:
+                if currency != portfolio.base_currency:
+                    fx_result = self.market_data_service.get_fx_rate(
+                        currency, portfolio.base_currency, force_refresh=True
+                    )
+                    if fx_result.rate is not None:
+                        fx_updated += 1
+
+            success = len(errors) == 0
+            status = "✅ Refresh completed successfully" if success else "⚠️ Refresh completed with errors"
 
             lines = [
                 f"🔄 **Data Refresh Results**",
                 "",
                 f"**Status:** {status}",
-                f"**Duration:** {result.duration_seconds:.2f} seconds",
                 "",
                 "**Updated:**",
-                f"• Prices: {result.symbols_updated} symbols",
-                f"• FX Rates: {result.fx_pairs_updated} pairs",
+                f"• Symbols: {symbols_updated} (prices stored: {prices_persisted})",
+                f"• FX Rates: {fx_updated} pairs",
             ]
 
-            if result.errors:
+            if errors:
                 lines.extend([
                     "",
                     "**Errors:**",
-                ] + [f"• {err}" for err in result.errors])
+                ] + [f"• {err}" for err in errors])
 
             return "\n".join(lines)
 

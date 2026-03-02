@@ -2111,24 +2111,40 @@ class GetCurrentPriceTool(BaseTool):
     )
     args_schema: type[BaseModel] = GetPriceInput
     data_manager: Optional[DataProviderManager] = None
+    portfolio_manager: Optional[PortfolioManager] = None
 
-    def __init__(self, data_manager: DataProviderManager):
+    def __init__(
+        self,
+        data_manager: DataProviderManager,
+        portfolio_manager: Optional[PortfolioManager] = None,
+    ):
         super().__init__()
         self.data_manager = data_manager
+        self.portfolio_manager = portfolio_manager
 
     def _run(self, symbol: str) -> str:
         """Get current price."""
         try:
-            price = self.data_manager.get_current_price(symbol.upper())
+            portfolio_symbol = symbol.upper().strip()
+
+            # Check if we have a data_provider_symbol mapping for this symbol
+            lookup_symbol = portfolio_symbol
+            if self.portfolio_manager and self.portfolio_manager.current_portfolio:
+                position = self.portfolio_manager.current_portfolio.positions.get(portfolio_symbol)
+                if position and position.instrument.data_provider_symbol:
+                    lookup_symbol = position.instrument.data_provider_symbol.upper().strip()
+                    logging.info(f"Using stored data_provider_symbol '{lookup_symbol}' for {portfolio_symbol}")
+
+            price = self.data_manager.get_current_price(lookup_symbol)
 
             if price is None:
-                return f"❌ Could not get current price for {symbol.upper()}"
+                return f"❌ Could not get current price for {portfolio_symbol}"
 
             # Also get instrument info for context
-            info = self.data_manager.get_instrument_info(symbol.upper())
-            name = info.name if info else symbol.upper()
+            info = self.data_manager.get_instrument_info(lookup_symbol)
+            name = info.name if info else portfolio_symbol
 
-            return f"💰 **{symbol.upper()}** ({name}): {price:.2f} USD"
+            return f"💰 **{portfolio_symbol}** ({name}): {price:.2f} USD"
 
         except Exception as e:
             return f"❌ Error getting price for {symbol}: {str(e)}"
@@ -2667,11 +2683,22 @@ class FetchAndUpdatePricesTool(BaseTool):
                 return "❌ No portfolio loaded."
 
             portfolio_symbol = symbol.upper().strip()
-            lookup_symbol = (provider_symbol or symbol).upper().strip()
 
             # Check if symbol exists in current portfolio
             position = self.portfolio_manager.current_portfolio.positions.get(portfolio_symbol)
             is_sold_instrument = position is None
+
+            # Determine the lookup symbol:
+            # 1. Use explicitly provided provider_symbol if given
+            # 2. Otherwise, check if position has a stored data_provider_symbol
+            # 3. Fall back to the portfolio symbol
+            if provider_symbol:
+                lookup_symbol = provider_symbol.upper().strip()
+            elif position and position.instrument.data_provider_symbol:
+                lookup_symbol = position.instrument.data_provider_symbol.upper().strip()
+                logging.info(f"Using stored data_provider_symbol '{lookup_symbol}' for {portfolio_symbol}")
+            else:
+                lookup_symbol = portfolio_symbol
 
             # For sold instruments, we can still update historical market data entries
             # but we inform the user about limitations

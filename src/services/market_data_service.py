@@ -496,15 +496,44 @@ class MarketDataService:
         start_time = time.time()
         errors: List[str] = []
 
-        # Determine which symbols to refresh
+        # Determine which symbols to refresh and handle data_provider_symbol mappings
+        symbols_updated = 0
         if portfolio:
-            symbols = list(portfolio.positions.keys())
-        else:
-            symbols = list(self._tracked_symbols)
+            # Refresh each position, using data_provider_symbol when available
+            for portfolio_symbol, position in portfolio.positions.items():
+                # Check if position has a data_provider_symbol set
+                provider_symbol = position.instrument.data_provider_symbol
+                lookup_symbol = provider_symbol if provider_symbol else portfolio_symbol
 
-        # Refresh prices
-        price_result = self.refresh_prices(symbols)
-        errors.extend(price_result.errors)
+                if provider_symbol:
+                    logging.debug(
+                        f"Using data_provider_symbol '{provider_symbol}' for '{portfolio_symbol}'"
+                    )
+
+                # Fetch using the lookup symbol
+                result = self.get_current_price(lookup_symbol, force_refresh=True)
+
+                if result.price is not None:
+                    symbols_updated += 1
+                    # If we used a provider symbol, also cache under the portfolio symbol
+                    if provider_symbol and provider_symbol != portfolio_symbol:
+                        portfolio_result = PriceResult(
+                            symbol=portfolio_symbol,
+                            price=result.price,
+                            timestamp=result.timestamp,
+                            is_stale=result.is_stale,
+                            error=result.error,
+                        )
+                        self._price_cache[portfolio_symbol] = portfolio_result
+                        self._tracked_symbols.add(portfolio_symbol)
+                elif result.error:
+                    errors.append(f"{portfolio_symbol}: {result.error}")
+        else:
+            # No portfolio - just refresh tracked symbols
+            symbols = list(self._tracked_symbols)
+            price_result = self.refresh_prices(symbols)
+            symbols_updated = price_result.symbols_updated
+            errors.extend(price_result.errors)
 
         # Refresh FX rates for portfolio currencies if provided
         fx_updated = 0
@@ -532,13 +561,13 @@ class MarketDataService:
         # Update freshness
         self._freshness.last_price_refresh = datetime.now()
         self._freshness.last_fx_refresh = datetime.now()
-        self._freshness.symbols_updated = price_result.symbols_updated
+        self._freshness.symbols_updated = symbols_updated
         self._freshness.fx_pairs_updated = fx_updated
         self._freshness.errors = errors
 
         return RefreshResult(
             success=len(errors) == 0,
-            symbols_updated=price_result.symbols_updated,
+            symbols_updated=symbols_updated,
             fx_pairs_updated=fx_updated,
             errors=errors,
             duration_seconds=duration,
