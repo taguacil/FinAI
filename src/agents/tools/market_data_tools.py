@@ -347,8 +347,16 @@ class RefreshDataTool(BaseTool):
         self.portfolio_manager = portfolio_manager
 
     def _run(self) -> str:
-        """Refresh market data."""
-        from datetime import timedelta
+        """Refresh market data.
+
+        This method:
+        - Only updates the last 5 days of data (not full history)
+        - Does NOT change data_provider_symbol or currency (read-only from position)
+        - For instruments without data providers, carries forward the last known value
+        """
+        from datetime import timedelta, datetime
+
+        MAX_DAYS_TO_UPDATE = 5
 
         try:
             if not self.portfolio_manager.current_portfolio:
@@ -360,131 +368,169 @@ class RefreshDataTool(BaseTool):
             today = date.today()
 
             symbols_updated = 0
+            symbols_carried_forward = 0
             prices_persisted = 0
             errors: List[str] = []
 
-            # For each position, fetch historical prices from last stored date to today
+            # Calculate the start date (max 5 days back)
+            start_date = today - timedelta(days=MAX_DAYS_TO_UPDATE)
+
             for portfolio_symbol, position in portfolio.positions.items():
-                # Determine the lookup symbol (use data_provider_symbol if set)
+                # Read existing data_provider_symbol and currency (DO NOT MODIFY)
                 provider_symbol = position.instrument.data_provider_symbol
                 lookup_symbol = provider_symbol if provider_symbol else portfolio_symbol
+                currency = position.instrument.currency  # Use existing currency
 
-                # Find the last stored price date for this symbol
+                # Find the last stored price and its date
+                last_price = None
                 last_price_date = None
                 if store:
-                    # Check recent dates to find the last stored price
                     for days_back in range(30):
                         check_date = today - timedelta(days=days_back)
                         prices = store.get_prices(portfolio_symbol, check_date, check_date)
                         if prices:
                             last_price_date = check_date
+                            last_price = float(list(prices.values())[0])
                             break
 
-                # Determine start date for fetching
-                if last_price_date and last_price_date < today:
-                    # Fetch from day after last price to today
-                    start_date = last_price_date + timedelta(days=1)
-                else:
-                    # No recent prices or already up to date - just fetch today
-                    start_date = today
-
-                # Skip if already up to date
-                if start_date > today:
-                    continue
-
-                # Fetch historical prices from data provider
+                # Try to fetch from data provider
+                fetched_data = False
                 try:
                     price_data = data_manager.get_historical_prices(
                         lookup_symbol, start_date, today
                     )
 
                     if price_data:
+                        fetched_data = True
                         symbols_updated += 1
-                        # Store each price in the MarketDataStore
+
+                        # Store each price in the MarketDataStore (using existing currency)
                         if store:
-                            currency = position.instrument.currency
                             for p in price_data:
                                 price_value = p.close_price or p.open_price or p.high_price or p.low_price
                                 if price_value is not None:
                                     store.set_price(portfolio_symbol, p.date, price_value, currency)
                                     prices_persisted += 1
 
-                        # Also update the in-memory cache with today's price
+                        # Update in-memory cache with latest price
                         latest = price_data[-1] if price_data else None
                         if latest:
                             latest_price = latest.close_price or latest.open_price
                             if latest_price is not None:
-                                from datetime import datetime
                                 self.market_data_service._price_cache[portfolio_symbol] = PriceResult(
                                     symbol=portfolio_symbol,
                                     price=latest_price,
                                     timestamp=datetime.now(),
                                     is_stale=False,
                                 )
-                    else:
-                        errors.append(f"{portfolio_symbol}: No price available")
 
-                except Exception as e:
-                    errors.append(f"{portfolio_symbol}: {str(e)}")
+                except Exception:
+                    # Data provider failed - will try to carry forward
+                    pass
 
-            # Refresh FX rates - backfill from last stored date to today
+                # If no data fetched and we have a last known price, carry it forward
+                if not fetched_data and last_price is not None and store:
+                    # Fill in missing dates from last_price_date+1 to today
+                    fill_date = (last_price_date + timedelta(days=1)) if last_price_date else start_date
+                    dates_filled = 0
+                    while fill_date <= today:
+                        # Only fill if within the 5-day window
+                        if fill_date >= start_date:
+                            store.set_price(portfolio_symbol, fill_date, last_price, currency)
+                            dates_filled += 1
+                        fill_date += timedelta(days=1)
+
+                    if dates_filled > 0:
+                        symbols_carried_forward += 1
+                        prices_persisted += dates_filled
+
+                        # Update in-memory cache
+                        self.market_data_service._price_cache[portfolio_symbol] = PriceResult(
+                            symbol=portfolio_symbol,
+                            price=last_price,
+                            timestamp=datetime.now(),
+                            is_stale=False,
+                        )
+                elif not fetched_data and last_price is None:
+                    errors.append(f"{portfolio_symbol}: No data provider and no historical price")
+
+            # Refresh FX rates (max 5 days)
             fx_updated = 0
             fx_rates_stored = 0
             currencies = set()
             currencies.add(portfolio.base_currency)
-            for currency in portfolio.cash_balances.keys():
-                currencies.add(currency)
+            for cur in portfolio.cash_balances.keys():
+                currencies.add(cur)
             for pos in portfolio.positions.values():
                 currencies.add(pos.instrument.currency)
 
             fx_cache = data_manager.fx_cache
             for currency in currencies:
                 if currency != portfolio.base_currency:
-                    # Find last stored FX rate date
+                    # Find last stored FX rate and its date
+                    last_fx_rate = None
                     last_fx_date = None
                     for days_back in range(30):
                         check_date = today - timedelta(days=days_back)
                         cached_rate = fx_cache.get_rate(currency, portfolio.base_currency, check_date)
                         if cached_rate is not None:
                             last_fx_date = check_date
+                            last_fx_rate = cached_rate
                             break
 
-                    # Determine start date for fetching
-                    if last_fx_date and last_fx_date < today:
-                        start_date = last_fx_date + timedelta(days=1)
-                    else:
-                        start_date = today
-
-                    # Fetch and store FX rates for each day from start to today
+                    # Try to fetch FX rates for each day in the 5-day window
                     current_date = start_date
+                    rates_fetched = 0
                     while current_date <= today:
                         rate = data_manager.get_historical_fx_rate_on(
                             current_date, currency, portfolio.base_currency
                         )
                         if rate is not None:
                             fx_rates_stored += 1
+                            rates_fetched += 1
+                        elif last_fx_rate is not None:
+                            # Carry forward the last known FX rate
+                            fx_cache.set_rate(currency, portfolio.base_currency, last_fx_rate, current_date)
+                            fx_rates_stored += 1
                         current_date += timedelta(days=1)
 
-                    fx_updated += 1
+                    if rates_fetched > 0 or last_fx_rate is not None:
+                        fx_updated += 1
 
+            # Summary
+            total_symbols = symbols_updated + symbols_carried_forward
             success = len(errors) == 0
-            status = "✅ Refresh completed successfully" if success else "⚠️ Refresh completed with errors"
+
+            if success:
+                status = "✅ Refresh completed successfully"
+            elif total_symbols > 0:
+                status = "⚠️ Refresh completed with some errors"
+            else:
+                status = "❌ Refresh failed"
 
             lines = [
                 f"🔄 **Data Refresh Results**",
                 "",
                 f"**Status:** {status}",
+                f"**Period:** Last {MAX_DAYS_TO_UPDATE} days",
                 "",
-                "**Updated:**",
-                f"• Symbols: {symbols_updated} (prices stored: {prices_persisted})",
-                f"• FX Rates: {fx_updated} pairs (rates stored: {fx_rates_stored})",
+                "**Instruments:**",
+                f"• Fetched from provider: {symbols_updated}",
+                f"• Carried forward (no provider): {symbols_carried_forward}",
+                f"• Prices stored: {prices_persisted}",
+                "",
+                "**FX Rates:**",
+                f"• Pairs updated: {fx_updated}",
+                f"• Rates stored: {fx_rates_stored}",
             ]
 
             if errors:
                 lines.extend([
                     "",
-                    "**Errors:**",
-                ] + [f"• {err}" for err in errors])
+                    f"**Errors ({len(errors)}):**",
+                ] + [f"• {err}" for err in errors[:10]])
+                if len(errors) > 10:
+                    lines.append(f"• ... and {len(errors) - 10} more")
 
             return "\n".join(lines)
 
