@@ -571,12 +571,20 @@ def get_current_price(symbol: str) -> str:
 def set_market_price(
     symbol: str,
     price: Optional[float] = None,
+    currency: Optional[str] = None,
     date: Optional[str] = None,
     use_purchase_price: bool = False,
 ) -> str:
     """Set or update the market price for an instrument.
 
     Use when price lookup fails or to manually set a custom price.
+
+    IMPORTANT - Currency:
+    Always specify the currency of the price you're entering. If the currency differs
+    from the instrument's native currency, it will be automatically converted.
+    Example: For a CHF-denominated fund, you can enter either:
+    - price=176.12, currency="CHF" (native currency, no conversion)
+    - price=225.92, currency="USD" (will be converted to CHF for storage)
 
     IMPORTANT - Bond Pricing:
     For bonds, prices are typically quoted as percentage of par (e.g., 96.32% of face value).
@@ -589,22 +597,33 @@ def set_market_price(
         price: The price to set (required unless use_purchase_price is True).
                For bonds: use decimal (0.9632 for 96.32% of par).
                For stocks/ETFs: use absolute price per share.
+        currency: Currency of the price (e.g., USD, CHF, EUR, GBP). If different from
+                  the instrument's native currency, it will be converted automatically.
+                  Defaults to the instrument's native currency if not specified.
         date: Date for the price in YYYY-MM-DD format (defaults to today)
         use_purchase_price: If True, uses the position's average_cost as the market price
     """
     return _set_market_price._run(
         symbol=symbol,
         price=price,
+        currency=currency,
         date=date,
         use_purchase_price=use_purchase_price,
     )
 
 
 @mcp.tool()
-def bulk_set_market_price(prices: str, symbol: Optional[str] = None) -> str:
+def bulk_set_market_price(prices: str, symbol: Optional[str] = None, currency: Optional[str] = None) -> str:
     """Set market prices for an instrument across multiple dates at once.
 
     Use for entering historical price data manually when market data isn't available.
+
+    IMPORTANT - Currency:
+    Always specify the currency of the prices you're entering:
+    - For simple/single-symbol formats, use the currency parameter
+    - For multi-symbol JSON, include "currency" in each entry
+    Example: bulk_set_market_price(symbol="VTEQ_SWISS", prices="2024-01-01:176.12", currency="CHF")
+    Example: '[{"symbol":"VTEQ_SWISS","date":"2024-01-01","price":176.12,"currency":"CHF"}]'
 
     IMPORTANT - Bond Pricing:
     For bonds, prices are typically quoted as percentage of par (e.g., 96.32% of face value).
@@ -613,17 +632,18 @@ def bulk_set_market_price(prices: str, symbol: Optional[str] = None) -> str:
     Example: 50,000 face value bond at 96.32% → price=0.9632 → value = 48,160
 
     Args:
-        symbol: The instrument symbol (e.g., AAPL, CORP_BOND)
+        symbol: The instrument symbol (e.g., AAPL, CORP_BOND). Optional for multi-symbol JSON.
         prices: Price data in one of these formats:
                 1. Simple: "2024-01-01:150.0,2024-01-02:152.5,2024-01-03:148.0"
                 2. JSON: '[{"date":"2024-01-01","price":150.0},{"date":"2024-01-02","price":152.5}]'
-                3. Multi-symbol JSON: '[{"symbol":"AAPL","date":"2024-01-01","price":150},{"symbol":"MSFT","date":"2024-01-01","price":350}]'
-                For bonds, use decimal prices (0.9632 for 96.32% of par).
+                3. Multi-symbol JSON: '[{"symbol":"AAPL","date":"2024-01-01","price":150,"currency":"USD"}]'
+        currency: Currency of the prices (e.g., USD, CHF, EUR). For simple/single-symbol formats.
+                  For multi-symbol JSON, specify currency per entry instead.
 
     Note: In multi-symbol mode, ISINs are automatically resolved to portfolio symbols
     if the instrument has a matching ISIN stored (e.g., XS2472298335 -> GLENCORE_2028).
     """
-    return _bulk_set_market_price._run(symbol=symbol, prices=prices)
+    return _bulk_set_market_price._run(symbol=symbol, prices=prices, currency=currency)
 
 
 @mcp.tool()

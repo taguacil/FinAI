@@ -2494,6 +2494,10 @@ class SetMarketPriceInput(BaseModel):
         default=None,
         description="Price to set. Required unless use_purchase_price is True.",
     )
+    currency: Optional[str] = Field(
+        default=None,
+        description="Currency of the price (e.g., USD, CHF, EUR). If different from the instrument's native currency, it will be converted. Defaults to the instrument's native currency.",
+    )
     date: Optional[str] = Field(
         default=None,
         description="Date for the price in YYYY-MM-DD format. Defaults to today.",
@@ -2518,13 +2522,17 @@ class SetMarketPriceTool(BaseTool):
     Parameters:
     - symbol: The instrument symbol (required)
     - price: The price to set (required unless use_purchase_price is True)
+    - currency: Currency of the price (e.g., USD, CHF, EUR). If different from the
+                instrument's native currency, it will be automatically converted.
+                Defaults to the instrument's native currency if not specified.
     - date: Date for the price in YYYY-MM-DD format (optional, defaults to today)
     - use_purchase_price: If True, uses the position's average_cost as the market price
 
     Examples:
-    - "Set AAPL price to $150" → set_market_price(symbol="AAPL", price=150)
+    - "Set AAPL price to $150" → set_market_price(symbol="AAPL", price=150, currency="USD")
+    - "Set VTEQ_SWISS to CHF 176.12" → set_market_price(symbol="VTEQ_SWISS", price=176.12, currency="CHF")
+    - "Set VTEQ_SWISS to $225 USD" → set_market_price(symbol="VTEQ_SWISS", price=225, currency="USD")
     - "Use purchase price for XYZ" → set_market_price(symbol="XYZ", use_purchase_price=True)
-    - "Set TSLA price to $200 for 2024-01-15" → set_market_price(symbol="TSLA", price=200, date="2024-01-15")
     """
     args_schema: type[BaseModel] = SetMarketPriceInput
     portfolio_manager: Optional[PortfolioManager] = None
@@ -2537,11 +2545,14 @@ class SetMarketPriceTool(BaseTool):
         self,
         symbol: str,
         price: Optional[float] = None,
+        currency: Optional[str] = None,
         date: Optional[str] = None,
         use_purchase_price: bool = False,
     ) -> str:
         """Set market price for an instrument."""
         try:
+            from ..portfolio.models import Currency as CurrencyEnum
+
             if not self.portfolio_manager.current_portfolio:
                 return "❌ No portfolio loaded."
 
@@ -2551,15 +2562,28 @@ class SetMarketPriceTool(BaseTool):
             position = self.portfolio_manager.current_portfolio.positions.get(symbol)
             is_sold_instrument = position is None
 
+            # Parse currency if provided
+            price_currency = None
+            if currency:
+                try:
+                    price_currency = CurrencyEnum(currency.upper())
+                except ValueError:
+                    valid_currencies = [c.value for c in CurrencyEnum]
+                    return f"❌ Invalid currency '{currency}'. Valid options: {', '.join(valid_currencies)}"
+
             # Determine the price to use
             if use_purchase_price:
                 if is_sold_instrument:
                     return f"❌ Cannot use purchase price for sold instrument '{symbol}'. Please provide an explicit price."
                 final_price = position.average_cost
                 price_source = "purchase price (average cost)"
+                # When using purchase price, currency is the instrument's native currency
+                price_currency = position.instrument.currency
             elif price is not None:
                 final_price = Decimal(str(price))
-                price_source = "custom price"
+                price_source = f"custom price"
+                if price_currency:
+                    price_source += f" in {price_currency.value}"
             else:
                 return "❌ Please provide either a price or set use_purchase_price=True."
 
@@ -2580,16 +2604,23 @@ class SetMarketPriceTool(BaseTool):
                     f"Please specify a date to update historical market data."
                 )
 
-            # Set the price
+            # Set the price with currency
             success = self.portfolio_manager.set_position_price(
                 symbol=symbol,
                 price=final_price,
                 target_date=target_date,
                 update_current=not is_sold_instrument,
+                currency=price_currency,
             )
 
             if success:
                 target_date_str = (date if date else "today")
+                # Get native currency for display
+                native_currency = position.instrument.currency.value if position else "N/A"
+                currency_note = ""
+                if price_currency and position and price_currency != position.instrument.currency:
+                    currency_note = f"\n• Note: Converted from {price_currency.value} to {native_currency}"
+
                 if is_sold_instrument:
                     return (
                         f"✅ Set historical price for sold instrument {symbol}:\n"
@@ -2601,9 +2632,10 @@ class SetMarketPriceTool(BaseTool):
                     return (
                         f"✅ Set market price for {symbol}:\n"
                         f"• Price: {final_price:.2f} ({price_source})\n"
+                        f"• Native currency: {native_currency}\n"
                         f"• Date: {target_date_str}\n"
                         f"• Position: {position.instrument.name}\n"
-                        f"• Quantity: {position.quantity}"
+                        f"• Quantity: {position.quantity}{currency_note}"
                     )
             else:
                 if is_sold_instrument:
@@ -2889,7 +2921,11 @@ class BulkSetMarketPriceInput(BaseModel):
         description="""Price data in one of three formats:
         1. Simple (requires symbol): "YYYY-MM-DD:price,YYYY-MM-DD:price,..." (e.g., "2024-01-01:150.0,2024-01-02:152.5")
         2. Single-symbol JSON (requires symbol): '[{"date":"2024-01-01","price":150.0},{"date":"2024-01-02","price":152.5}]'
-        3. Multi-symbol JSON (symbol not needed): '[{"symbol":"AAPL","date":"2024-01-01","price":150.0},{"symbol":"MSFT","date":"2024-01-01","price":350.0}]'"""
+        3. Multi-symbol JSON (symbol not needed): '[{"symbol":"AAPL","date":"2024-01-01","price":150.0,"currency":"USD"},{"symbol":"VTEQ_SWISS","date":"2024-01-01","price":176.12,"currency":"CHF"}]'"""
+    )
+    currency: Optional[str] = Field(
+        default=None,
+        description="Currency for all prices in simple/single-symbol format (e.g., USD, CHF, EUR). For multi-symbol JSON, specify currency per entry. Defaults to each instrument's native currency."
     )
 
 
@@ -2910,17 +2946,18 @@ class BulkSetMarketPriceTool(BaseTool):
     - prices: Price data in one of three formats:
         1. Simple format (requires symbol): "YYYY-MM-DD:price,YYYY-MM-DD:price,..."
         2. Single-symbol JSON (requires symbol): '[{"date":"2024-01-01","price":150.0},{"date":"2024-01-02","price":152.5}]'
-        3. Multi-symbol JSON (symbol not needed): '[{"symbol":"AAPL","date":"2024-01-01","price":150.0},{"symbol":"MSFT","date":"2024-01-01","price":350.0}]'
+        3. Multi-symbol JSON (symbol not needed): '[{"symbol":"AAPL","date":"2024-01-01","price":150.0,"currency":"USD"}]'
+    - currency: Currency for all prices (for simple/single-symbol formats). Defaults to instrument's native currency.
 
     Examples:
-    - Simple format (single symbol):
-      bulk_set_market_price(symbol="AAPL", prices="2024-01-01:150.0,2024-01-02:152.5,2024-01-03:148.0")
+    - Simple format with currency:
+      bulk_set_market_price(symbol="VTEQ_SWISS", prices="2024-01-01:176.12,2024-01-02:178.50", currency="CHF")
 
     - Single-symbol JSON:
-      bulk_set_market_price(symbol="AAPL", prices='[{"date":"2024-01-01","price":150.0},{"date":"2024-01-02","price":152.5}]')
+      bulk_set_market_price(symbol="AAPL", prices='[{"date":"2024-01-01","price":150.0}]', currency="USD")
 
-    - Multi-symbol JSON (no symbol parameter needed):
-      bulk_set_market_price(prices='[{"symbol":"AAPL","date":"2024-01-01","price":150.0},{"symbol":"MSFT","date":"2024-01-01","price":350.0}]')
+    - Multi-symbol JSON with per-entry currency:
+      bulk_set_market_price(prices='[{"symbol":"AAPL","date":"2024-01-01","price":150.0,"currency":"USD"},{"symbol":"VTEQ_SWISS","date":"2024-01-01","price":176.12,"currency":"CHF"}]')
     """
     args_schema: type[BaseModel] = BulkSetMarketPriceInput
     portfolio_manager: Optional[PortfolioManager] = None
@@ -2929,20 +2966,23 @@ class BulkSetMarketPriceTool(BaseTool):
         super().__init__()
         self.portfolio_manager = portfolio_manager
 
-    def _parse_prices(self, prices: str) -> tuple[list, list, bool]:
+    def _parse_prices(self, prices: str) -> tuple[list, list, bool, dict]:
         """Parse prices from simple, single-symbol JSON, or multi-symbol JSON format.
 
         Returns:
-            Tuple of (price_entries, errors, is_multi_symbol) where:
+            Tuple of (price_entries, errors, is_multi_symbol, entry_currencies) where:
             - price_entries is list of (date, Decimal) tuples for single-symbol format
             - price_entries is list of (symbol, date, Decimal) tuples for multi-symbol format
             - is_multi_symbol indicates which format was detected
+            - entry_currencies is dict mapping (symbol, date) -> currency for multi-symbol format
         """
         import json
         from datetime import datetime as dt
+        from ..portfolio.models import Currency as CurrencyEnum
 
         price_entries = []
         errors = []
+        entry_currencies = {}  # (symbol, date) -> Currency for multi-symbol format
 
         # Try JSON format first
         prices_stripped = prices.strip()
@@ -2950,7 +2990,7 @@ class BulkSetMarketPriceTool(BaseTool):
             try:
                 data = json.loads(prices_stripped)
                 if not data:
-                    return [], ["Empty JSON array"], False
+                    return [], ["Empty JSON array"], False, {}
 
                 # Detect if this is multi-symbol format (items have "symbol" key)
                 is_multi_symbol = isinstance(data[0], dict) and "symbol" in data[0]
@@ -2982,6 +3022,15 @@ class BulkSetMarketPriceTool(BaseTool):
                         errors.append(f"Invalid price '{price_val}' - must be a number")
                         continue
 
+                    # Parse currency if provided in JSON entry
+                    entry_currency = None
+                    if "currency" in item:
+                        try:
+                            entry_currency = CurrencyEnum(item["currency"].upper())
+                        except ValueError:
+                            errors.append(f"Invalid currency '{item['currency']}' in: {item}")
+                            continue
+
                     if is_multi_symbol:
                         symbol_str = item.get("symbol")
                         if not symbol_str:
@@ -2989,10 +3038,12 @@ class BulkSetMarketPriceTool(BaseTool):
                             continue
                         symbol = symbol_str.upper().strip()
                         price_entries.append((symbol, entry_date, entry_price))
+                        if entry_currency:
+                            entry_currencies[(symbol, entry_date)] = entry_currency
                     else:
                         price_entries.append((entry_date, entry_price))
 
-                return price_entries, errors, is_multi_symbol
+                return price_entries, errors, is_multi_symbol, entry_currencies
             except json.JSONDecodeError:
                 # Not valid JSON, fall through to simple format
                 pass
@@ -3028,16 +3079,27 @@ class BulkSetMarketPriceTool(BaseTool):
 
             price_entries.append((entry_date, entry_price))
 
-        return price_entries, errors, False
+        return price_entries, errors, False, {}
 
-    def _run(self, symbol: Optional[str] = None, prices: str = "") -> str:
+    def _run(self, symbol: Optional[str] = None, prices: str = "", currency: Optional[str] = None) -> str:
         """Bulk set market prices for one or more instruments."""
         try:
+            from ..portfolio.models import Currency as CurrencyEnum
+
             if not self.portfolio_manager.current_portfolio:
                 return "❌ No portfolio loaded."
 
+            # Parse currency if provided
+            price_currency = None
+            if currency:
+                try:
+                    price_currency = CurrencyEnum(currency.upper())
+                except ValueError:
+                    valid_currencies = [c.value for c in CurrencyEnum]
+                    return f"❌ Invalid currency '{currency}'. Valid options: {', '.join(valid_currencies)}"
+
             # Parse price data (supports simple, single-symbol JSON, and multi-symbol JSON formats)
-            price_entries, errors, is_multi_symbol = self._parse_prices(prices)
+            price_entries, errors, is_multi_symbol, entry_currencies = self._parse_prices(prices)
 
             if not price_entries:
                 error_msg = "No valid price entries found."
@@ -3045,21 +3107,28 @@ class BulkSetMarketPriceTool(BaseTool):
                     error_msg += f"\nErrors:\n" + "\n".join(f"• {e}" for e in errors)
                 return f"❌ {error_msg}"
 
-            # Handle multi-symbol format
+            # Handle multi-symbol format (may have per-entry currencies)
             if is_multi_symbol:
-                return self._run_multi_symbol(price_entries, errors)
+                return self._run_multi_symbol(price_entries, errors, entry_currencies)
 
             # Handle single-symbol format (requires symbol parameter)
             if not symbol:
                 return "❌ Symbol parameter is required for single-symbol price format. Use multi-symbol JSON format if you want to set prices for multiple symbols."
 
-            return self._run_single_symbol(symbol, price_entries, errors)
+            return self._run_single_symbol(symbol, price_entries, errors, price_currency)
 
         except Exception as e:
             return f"❌ Error in bulk price update: {str(e)}"
 
-    def _run_single_symbol(self, symbol: str, price_entries: list, errors: list) -> str:
-        """Handle single-symbol bulk price update."""
+    def _run_single_symbol(self, symbol: str, price_entries: list, errors: list, currency=None) -> str:
+        """Handle single-symbol bulk price update.
+
+        Args:
+            symbol: The instrument symbol
+            price_entries: List of (date, price) tuples
+            errors: List of parsing errors
+            currency: Optional Currency enum for all prices
+        """
         symbol = symbol.upper().strip()
 
         # Check if symbol exists in current portfolio
@@ -3073,7 +3142,7 @@ class BulkSetMarketPriceTool(BaseTool):
         # Sort by date
         price_entries.sort(key=lambda x: x[0])
 
-        # Apply each price
+        # Apply each price with currency
         success_count = 0
         failed_dates = []
 
@@ -3083,6 +3152,7 @@ class BulkSetMarketPriceTool(BaseTool):
                 price=entry_price,
                 target_date=entry_date,
                 update_current=(entry_date == date.today() and not is_sold_instrument),
+                currency=currency,
             )
             if success:
                 success_count += 1
@@ -3090,19 +3160,24 @@ class BulkSetMarketPriceTool(BaseTool):
                 failed_dates.append(str(entry_date))
 
         # Build result message
+        currency_note = f" (currency: {currency.value})" if currency else ""
         if is_sold_instrument:
             result_lines = [
-                f"✅ Bulk price update for sold instrument {symbol}:",
+                f"✅ Bulk price update for sold instrument {symbol}{currency_note}:",
                 f"• Successfully updated: {success_count} historical market data entries",
                 f"• Date range: {price_entries[0][0]} to {price_entries[-1][0]}",
                 f"• Note: This is a sold instrument - only historical market data entries were updated",
             ]
         else:
+            native_currency = position.instrument.currency.value
             result_lines = [
                 f"✅ Bulk price update for {symbol} ({position.instrument.name}):",
-                f"• Successfully set: {success_count} prices",
+                f"• Successfully set: {success_count} prices{currency_note}",
+                f"• Native currency: {native_currency}",
                 f"• Date range: {price_entries[0][0]} to {price_entries[-1][0]}",
             ]
+            if currency and currency.value != native_currency:
+                result_lines.append(f"• Note: Prices converted from {currency.value} to {native_currency}")
 
         if failed_dates:
             result_lines.append(f"• Failed dates: {', '.join(failed_dates)}")
@@ -3187,15 +3262,24 @@ class BulkSetMarketPriceTool(BaseTool):
 
         return resolved_entries, isin_mappings, unresolved_isins
 
-    def _run_multi_symbol(self, price_entries: list, errors: list) -> str:
+    def _run_multi_symbol(self, price_entries: list, errors: list, entry_currencies: dict = None) -> str:
         """Handle multi-symbol bulk price update.
 
         Args:
             price_entries: List of (symbol, date, price) tuples
             errors: List of parsing errors
+            entry_currencies: Dict mapping (symbol, date) -> Currency for per-entry currencies
         """
+        entry_currencies = entry_currencies or {}
+
         # Resolve ISINs to portfolio symbols
         resolved_entries, isin_mappings, unresolved_isins = self._resolve_symbols_in_entries(price_entries)
+
+        # Update entry_currencies keys with resolved symbols
+        resolved_currencies = {}
+        for (symbol, entry_date), currency in entry_currencies.items():
+            resolved_symbol = isin_mappings.get(symbol, symbol)
+            resolved_currencies[(resolved_symbol, entry_date)] = currency
 
         # Group entries by symbol for reporting
         from collections import defaultdict
@@ -3203,8 +3287,23 @@ class BulkSetMarketPriceTool(BaseTool):
         for symbol, entry_date, entry_price in resolved_entries:
             entries_by_symbol[symbol].append((entry_date, entry_price))
 
-        # Use batch update for efficiency (use resolved entries!)
-        success_count = self.portfolio_manager.set_positions_prices_batch(resolved_entries)
+        # For multi-symbol with per-entry currencies, we need to call set_position_price individually
+        if resolved_currencies:
+            success_count = 0
+            for symbol, entry_date, entry_price in resolved_entries:
+                currency = resolved_currencies.get((symbol, entry_date))
+                success = self.portfolio_manager.set_position_price(
+                    symbol=symbol,
+                    price=entry_price,
+                    target_date=entry_date,
+                    update_current=(entry_date == date.today()),
+                    currency=currency,
+                )
+                if success:
+                    success_count += 1
+        else:
+            # Use batch update for efficiency when no per-entry currencies
+            success_count = self.portfolio_manager.set_positions_prices_batch(resolved_entries)
 
         # Build result message
         total_entries = len(resolved_entries)

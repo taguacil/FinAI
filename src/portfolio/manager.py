@@ -435,6 +435,7 @@ class PortfolioManager:
         price: Decimal,
         target_date: Optional[date] = None,
         update_current: bool = True,
+        currency: Optional[Currency] = None,
     ) -> bool:
         """Set a custom/manual price for a position on a specific date.
 
@@ -449,6 +450,9 @@ class PortfolioManager:
             target_date: The date to set the price for (defaults to today)
             update_current: If True and target_date is today, also update current_price
                            in the portfolio's position
+            currency: The currency of the price being set. If different from the
+                     instrument's native currency, the price will be converted.
+                     Defaults to the instrument's currency if not specified.
 
         Returns:
             True if successful, False otherwise
@@ -469,19 +473,38 @@ class PortfolioManager:
             return False
 
         try:
-            # Determine the currency for the price
+            # Determine the instrument's native currency
             if symbol_in_current:
-                currency = self.current_portfolio.positions[symbol].instrument.currency
+                instrument_currency = self.current_portfolio.positions[symbol].instrument.currency
             else:
-                # Default to portfolio base currency for historical prices
-                currency = self.current_portfolio.base_currency
+                # Default to portfolio base currency for historical/sold instruments
+                instrument_currency = self.current_portfolio.base_currency
 
-            # Store price in MarketDataStore
+            # Determine input price currency (default to instrument currency if not specified)
+            input_currency = currency if currency else instrument_currency
+
+            # Convert price to instrument's native currency if needed
+            final_price = price
+            if input_currency != instrument_currency:
+                # Convert from input currency to instrument currency
+                fx_rate = self._get_exchange_rate_at_date(input_currency, instrument_currency, target_date)
+                if fx_rate is None:
+                    fx_rate = self._get_exchange_rate(input_currency, instrument_currency)
+                if fx_rate is None:
+                    logging.error(f"Cannot get FX rate from {input_currency.value} to {instrument_currency.value}")
+                    return False
+                final_price = price * fx_rate
+                logging.info(
+                    f"Converted price {price} {input_currency.value} -> {final_price} {instrument_currency.value} "
+                    f"(rate: {fx_rate})"
+                )
+
+            # Store price in MarketDataStore (always in instrument's native currency)
             success = self._market_data_store.set_price(
                 symbol=symbol,
                 price_date=target_date,
-                price=price,
-                currency=currency,
+                price=final_price,
+                currency=instrument_currency,
                 source="manual",
             )
 
