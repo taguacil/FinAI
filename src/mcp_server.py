@@ -69,6 +69,7 @@ from src.agents.portfolio_tools import (
     UpdateHistoricalMarketDataTool,
 )
 from src.agents.tools.market_data_tools import (
+    FetchHistoricalFXRatesTool,
     GetBatchPricesTool,
     GetDataFreshnessTool,
     GetFXRateTool,
@@ -134,6 +135,7 @@ _scenario_optimization = ScenarioOptimizationTool(portfolio_manager, data_manage
 _get_price_history = GetPriceHistoryTool(portfolio_manager.market_data_store)
 _get_fx_rate = GetFXRateTool(market_data_service)
 _get_batch_prices = GetBatchPricesTool(market_data_service)
+_fetch_historical_fx_rates = FetchHistoricalFXRatesTool(data_manager)
 _get_data_freshness = GetDataFreshnessTool(market_data_service)
 _refresh_data = RefreshDataTool(market_data_service, portfolio_manager)
 _get_historical_instruments = GetHistoricalInstrumentsTool(portfolio_manager)
@@ -776,6 +778,29 @@ def get_fx_rate(
     """
     return _get_fx_rate._run(
         from_currency=from_currency, to_currency=to_currency, as_of=as_of
+    )
+
+
+@mcp.tool()
+def fetch_historical_fx_rates(
+    from_currency: str,
+    to_currency: str,
+    start_date: str,
+    end_date: str,
+) -> str:
+    """Fetch and store historical FX rates for a currency pair over a date range.
+
+    Args:
+        from_currency: Source currency code (e.g., EUR, GBP)
+        to_currency: Target currency code (e.g., USD, CHF)
+        start_date: Start date in YYYY-MM-DD format
+        end_date: End date in YYYY-MM-DD format
+    """
+    return _fetch_historical_fx_rates._run(
+        from_currency=from_currency,
+        to_currency=to_currency,
+        start_date=start_date,
+        end_date=end_date,
     )
 
 

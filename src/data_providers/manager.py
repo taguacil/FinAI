@@ -395,6 +395,74 @@ class DataProviderManager:
 
         return None
 
+    def get_historical_fx_rates_range(
+        self,
+        from_currency: Currency,
+        to_currency: Currency,
+        start_date: date,
+        end_date: date,
+    ) -> Dict[date, Decimal]:
+        """Fetch and store historical FX rates for a full date range in one call.
+
+        Uses Yahoo Finance to pull the entire range at once, stores each day
+        in the persistent FX cache, and returns the resulting dict.
+
+        Args:
+            from_currency: Currency to convert from
+            to_currency: Currency to convert to
+            start_date: Start date (inclusive)
+            end_date: End date (inclusive)
+
+        Returns:
+            Dict mapping date to rate for all days where data was available.
+        """
+        if from_currency == to_currency:
+            return {d: Decimal("1") for d in (
+                start_date + timedelta(days=i)
+                for i in range((end_date - start_date).days + 1)
+            )}
+
+        yahoo_provider: Optional[BaseDataProvider] = None
+        for p in self.providers:
+            if p.name == "Yahoo Finance":
+                yahoo_provider = p
+                break
+
+        if not yahoo_provider:
+            logging.warning("No Yahoo Finance provider available for bulk FX fetch")
+            return {}
+
+        results: Dict[date, Decimal] = {}
+
+        def _try_fetch(symbol: str, invert: bool) -> None:
+            try:
+                series = yahoo_provider.get_historical_prices(symbol, start_date, end_date)
+                if not series:
+                    return
+                for pd in series:
+                    rate_raw = pd.close_price or pd.open_price or pd.high_price or pd.low_price
+                    if rate_raw is None:
+                        continue
+                    rate = (Decimal("1") / rate_raw) if invert else rate_raw
+                    if not self.fx_cache.validate_rate(rate, from_currency, to_currency):
+                        continue
+                    # Only store if not already populated for this date
+                    if pd.date not in results:
+                        self.fx_cache.store_rate(from_currency, to_currency, pd.date, rate)
+                        results[pd.date] = rate
+            except Exception as e:
+                logging.warning(f"Error fetching FX range {symbol}: {e}")
+
+        pair = f"{from_currency.value}{to_currency.value}=X"
+        _try_fetch(pair, invert=False)
+
+        # Fill gaps via inverse pair
+        if len(results) < (end_date - start_date).days + 1:
+            inverse_pair = f"{to_currency.value}{from_currency.value}=X"
+            _try_fetch(inverse_pair, invert=True)
+
+        return results
+
     def get_multiple_current_prices(
         self, symbols: List[str]
     ) -> Dict[str, Optional[Decimal]]:

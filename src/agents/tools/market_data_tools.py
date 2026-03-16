@@ -12,6 +12,7 @@ import pandas as pd
 from langchain.tools import BaseTool
 from pydantic import BaseModel, Field
 
+from ...data_providers.manager import DataProviderManager
 from ...portfolio.manager import PortfolioManager
 from ...portfolio.market_data_store import MarketDataStore
 from ...portfolio.models import Currency
@@ -682,6 +683,75 @@ class GetMovingAverageSignalTool(BaseTool):
 
         except Exception as e:
             return f"❌ Error calculating MA signal: {str(e)}"
+
+
+class FetchHistoricalFXRatesInput(BaseModel):
+    """Input for bulk historical FX rate fetch."""
+
+    from_currency: str = Field(description="Source currency code (e.g., EUR, GBP)")
+    to_currency: str = Field(description="Target currency code (e.g., USD, CHF)")
+    start_date: str = Field(description="Start date in YYYY-MM-DD format")
+    end_date: str = Field(description="End date in YYYY-MM-DD format")
+
+
+class FetchHistoricalFXRatesTool(BaseTool):
+    """Tool for bulk-fetching and storing historical FX rates over a date range."""
+
+    name: str = "fetch_historical_fx_rates"
+    description: str = """Fetch and store historical FX rates for a currency pair over a date range.
+
+    Retrieves rates from Yahoo Finance in a single call and persists them to the local
+    FX cache so they are available for portfolio calculations.
+
+    Use this when you need historical FX rates for a new currency or to backfill missing data.
+
+    Example: Fetch EUR→USD rates from 2022-01-01 to 2024-12-31
+    """
+    args_schema: type[BaseModel] = FetchHistoricalFXRatesInput
+    data_manager: Optional[DataProviderManager] = None
+
+    def __init__(self, data_manager: DataProviderManager):
+        super().__init__()
+        self.data_manager = data_manager
+
+    def _run(self, from_currency: str, to_currency: str, start_date: str, end_date: str) -> str:
+        """Fetch and persist historical FX rates for a date range."""
+        try:
+            from_cur = Currency(from_currency.upper())
+            to_cur = Currency(to_currency.upper())
+            start = date.fromisoformat(start_date)
+            end = date.fromisoformat(end_date)
+
+            if start > end:
+                return "❌ start_date must be before end_date."
+
+            results = self.data_manager.get_historical_fx_rates_range(from_cur, to_cur, start, end)
+
+            if not results:
+                return (
+                    f"❌ No FX rates found for {from_currency.upper()}→{to_currency.upper()} "
+                    f"between {start_date} and {end_date}. "
+                    f"Check that the currency pair is supported by Yahoo Finance."
+                )
+
+            sorted_dates = sorted(results.keys())
+            first_rate = float(results[sorted_dates[0]])
+            last_rate = float(results[sorted_dates[-1]])
+
+            return "\n".join([
+                f"💱 **Historical FX Rates: {from_currency.upper()} → {to_currency.upper()}**",
+                f"Period: {start_date} to {end_date}",
+                f"Rates stored: {len(results)}",
+                f"First ({sorted_dates[0]}): {first_rate:.6f}",
+                f"Last  ({sorted_dates[-1]}): {last_rate:.6f}",
+                "",
+                "✅ Rates saved to FX cache.",
+            ])
+
+        except ValueError as e:
+            return f"❌ Invalid currency or date: {str(e)}"
+        except Exception as e:
+            return f"❌ Error fetching historical FX rates: {str(e)}"
 
 
 def create_market_data_tools(
