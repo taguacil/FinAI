@@ -51,20 +51,24 @@ class GetPriceHistoryTool(BaseTool):
             end = date.fromisoformat(end_date)
             symbol = symbol.upper().strip()
 
-            # Get prices from MarketDataStore (stored database)
-            raw_prices = self.market_data_store.get_prices(symbol, start, end)
+            # Get prices with currency from MarketDataStore (stored database)
+            raw_entries = self.market_data_store.get_prices_with_currency(symbol, start, end)
 
-            if not raw_prices:
+            if not raw_entries:
                 return f"❌ No price history found for {symbol} between {start_date} and {end_date}. Run fetch_and_update_prices first."
 
             # Convert to sorted list
-            sorted_dates = sorted(raw_prices.keys())
-            prices_list = [(d, float(raw_prices[d])) for d in sorted_dates]
+            sorted_dates = sorted(raw_entries.keys())
+            prices_list = [(d, float(raw_entries[d].price), raw_entries[d].currency.value) for d in sorted_dates]
+
+            # Currency is the same for all entries; grab from first
+            currency = prices_list[0][2]
 
             # Format as readable table
             result = [
                 f"📈 **Price History for {symbol}**",
                 f"Period: {start_date} to {end_date}",
+                f"Currency: {currency}",
                 f"Data points: {len(prices_list)}",
                 "",
                 "| Date | Close |",
@@ -73,13 +77,13 @@ class GetPriceHistoryTool(BaseTool):
 
             # Show first 10 and last 5 rows if more than 20 rows
             if len(prices_list) > 20:
-                for d, price in prices_list[:10]:
+                for d, price, _ in prices_list[:10]:
                     result.append(f"| {d.strftime('%Y-%m-%d')} | {price:.2f} |")
                 result.append("| ... | ... |")
-                for d, price in prices_list[-5:]:
+                for d, price, _ in prices_list[-5:]:
                     result.append(f"| {d.strftime('%Y-%m-%d')} | {price:.2f} |")
             else:
-                for d, price in prices_list:
+                for d, price, _ in prices_list:
                     result.append(f"| {d.strftime('%Y-%m-%d')} | {price:.2f} |")
 
             # Add summary statistics
@@ -94,10 +98,10 @@ class GetPriceHistoryTool(BaseTool):
                     "",
                     "**Summary:**",
                     f"• Period Return: {pct_change:+.2f}%",
-                    f"• Period High: {high:.2f}",
-                    f"• Period Low: {low:.2f}",
-                    f"• First Close: {first_close:.2f}",
-                    f"• Last Close: {last_close:.2f}",
+                    f"• Period High: {high:.2f} {currency}",
+                    f"• Period Low: {low:.2f} {currency}",
+                    f"• First Close: {first_close:.2f} {currency}",
+                    f"• Last Close: {last_close:.2f} {currency}",
                 ])
 
             return "\n".join(result)

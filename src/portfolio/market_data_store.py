@@ -189,6 +189,40 @@ class MarketDataStore:
 
         return result
 
+    def get_prices_with_currency(
+        self, symbol: str, start_date: date, end_date: date
+    ) -> Dict[date, PriceEntry]:
+        """Get prices with currency for a symbol within a date range.
+
+        Args:
+            symbol: The trading symbol
+            start_date: Start date (inclusive)
+            end_date: End date (inclusive)
+
+        Returns:
+            Dict mapping date to PriceEntry (includes currency)
+        """
+        symbol = symbol.upper().strip()
+        conn = self._get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT date, price, currency FROM market_prices WHERE symbol = ? AND date BETWEEN ? AND ?",
+                (symbol, start_date.isoformat(), end_date.isoformat()),
+            )
+            rows = cursor.fetchall()
+            return {
+                date.fromisoformat(row["date"]): PriceEntry(
+                    symbol=symbol,
+                    date=date.fromisoformat(row["date"]),
+                    price=Decimal(row["price"]),
+                    currency=Currency(row["currency"]),
+                )
+                for row in rows
+            }
+        finally:
+            conn.close()
+
     def get_price_with_fallback(
         self, symbol: str, target_date: date, fallback_days: int = 7
     ) -> Optional[Decimal]:
