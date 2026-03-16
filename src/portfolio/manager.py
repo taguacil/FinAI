@@ -1089,13 +1089,22 @@ class PortfolioManager:
         results = []
         for pos in positions:
             symbol = pos["symbol"]
-            current_price = pos.get("current_price")
+            current_price_base = pos.get("current_price")  # in base currency
+            fx_rate = pos.get("fx_rate", Decimal("1")) or Decimal("1")
             quantity = pos.get("quantity", Decimal("0"))
-            currency = pos.get("currency", "USD")
+            native_currency = pos.get("original_currency", pos.get("currency", "USD"))
             name = pos.get("name", symbol)
             instrument_type = pos.get("instrument_type", "stock")
-            avg_cost = pos.get("average_cost", Decimal("0"))
+            avg_cost_base = pos.get("average_cost", Decimal("0"))
             market_value = pos.get("market_value")
+
+            # Convert current price back to native currency for an apples-to-apples comparison
+            # (year_end_price from the store is always in native currency)
+            current_price_native = (
+                current_price_base / fx_rate
+                if current_price_base is not None and fx_rate and fx_rate != 0
+                else current_price_base
+            )
 
             # Look up Dec 31 price using all identifiers (same fallback pattern)
             year_end_price = None
@@ -1123,29 +1132,31 @@ class PortfolioManager:
                             pos_state.isin, year_end
                         )
 
-            # Compute YTD return
+            # Compute YTD return — all prices in native currency
             since_inception = False
             ytd_pct = None
             ytd_value_change = None
             ref_price = year_end_price
 
-            if year_end_price is not None and current_price is not None and year_end_price > 0:
-                ytd_pct = float((current_price - year_end_price) / year_end_price * 100)
-                ytd_value_change = float((current_price - year_end_price) * quantity)
-            elif current_price is not None and avg_cost and avg_cost > 0:
+            if year_end_price is not None and current_price_native is not None and year_end_price > 0:
+                ytd_pct = float((current_price_native - year_end_price) / year_end_price * 100)
+                ytd_value_change = float((current_price_native - year_end_price) * quantity)
+            elif current_price_native is not None and avg_cost_base and avg_cost_base > 0:
                 # No Dec 31 price — position bought after Jan 1, show since inception
+                # Convert avg_cost from base to native for consistent comparison
+                avg_cost_native = avg_cost_base / fx_rate if fx_rate and fx_rate != 0 else avg_cost_base
                 since_inception = True
-                ref_price = avg_cost
-                ytd_pct = float((current_price - avg_cost) / avg_cost * 100)
-                ytd_value_change = float((current_price - avg_cost) * quantity)
+                ref_price = avg_cost_native
+                ytd_pct = float((current_price_native - avg_cost_native) / avg_cost_native * 100)
+                ytd_value_change = float((current_price_native - avg_cost_native) * quantity)
 
             results.append({
                 "symbol": symbol,
                 "name": name,
-                "currency": currency,
+                "currency": native_currency,
                 "quantity": float(quantity),
                 "year_end_price": float(ref_price) if ref_price is not None else None,
-                "current_price": float(current_price) if current_price is not None else None,
+                "current_price": float(current_price_native) if current_price_native is not None else None,
                 "ytd_pct": ytd_pct,
                 "ytd_value_change": ytd_value_change,
                 "market_value": float(market_value) if market_value is not None else None,
@@ -1358,6 +1369,14 @@ class PortfolioManager:
                 market_value = pos_state.quantity * price if price else None
                 cost_basis = pos_state.cost_basis
 
+                # Convert native-currency values to base currency for portfolio totals
+                position_currency = pos_state.currency
+                fx_rate = Decimal("1")
+                if position_currency != base:
+                    fx_rate = self._get_exchange_rate(position_currency, base) or Decimal("1")
+                market_value_base = market_value * fx_rate if market_value else None
+                cost_basis_base = cost_basis * fx_rate
+
                 # Get original instrument from portfolio if available
                 original_pos = self.current_portfolio.positions.get(symbol)
                 instrument = original_pos.instrument if original_pos else FinancialInstrument(
@@ -1376,11 +1395,11 @@ class PortfolioManager:
                     last_updated=datetime.now(),
                 )
 
-                if market_value:
-                    total_positions_value += market_value
-                total_cost_basis += cost_basis
-                if market_value:
-                    total_unrealized_pnl += market_value - cost_basis
+                if market_value_base:
+                    total_positions_value += market_value_base
+                total_cost_basis += cost_basis_base
+                if market_value_base:
+                    total_unrealized_pnl += market_value_base - cost_basis_base
         else:
             # Fallback to current portfolio positions
             for symbol, pos in self.current_portfolio.positions.items():
