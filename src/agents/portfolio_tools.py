@@ -667,6 +667,10 @@ class GetPortfolioSnapshotInput(BaseModel):
     target_date: str = Field(
         description="Date to get portfolio snapshot for in YYYY-MM-DD format"
     )
+    include_local_currency: bool = Field(
+        default=False,
+        description="If True, also show position price and value in the instrument's native currency",
+    )
 
 
 class GetPortfolioSnapshotTool(BaseTool):
@@ -684,7 +688,7 @@ class GetPortfolioSnapshotTool(BaseTool):
         super().__init__()
         self.portfolio_manager = portfolio_manager
 
-    def _run(self, target_date: str) -> str:
+    def _run(self, target_date: str, include_local_currency: bool = False) -> str:
         """Get portfolio snapshot at a specific date."""
         try:
             if not self.portfolio_manager.current_portfolio:
@@ -697,6 +701,7 @@ class GetPortfolioSnapshotTool(BaseTool):
                 return f"❌ Invalid date format: {target_date}. Use YYYY-MM-DD."
 
             portfolio = self.portfolio_manager.current_portfolio
+            base = portfolio.base_currency.value
 
             # Get positions at date
             positions = self.portfolio_manager.get_positions_with_prices(dt)
@@ -713,7 +718,7 @@ class GetPortfolioSnapshotTool(BaseTool):
             lines = [
                 f"📊 Portfolio Snapshot: {portfolio.name}",
                 f"📅 Date: {target_date}",
-                f"💰 Total Value: {total_value:,.2f} {portfolio.base_currency.value}",
+                f"💰 Total Value: {total_value:,.2f} {base}",
                 "",
             ]
 
@@ -745,16 +750,29 @@ class GetPortfolioSnapshotTool(BaseTool):
                         market_value = pos.get("market_value")
                         pnl = pos.get("unrealized_pnl")
                         pnl_pct = pos.get("unrealized_pnl_percent")
+                        local_ccy = pos.get("original_currency", base)
+                        fx_rate = pos.get("fx_rate", 1)
 
-                        price_str = f"@ {price:,.2f}" if price else "(no price)"
-                        value_str = f"= {market_value:,.2f}" if market_value else ""
+                        price_str = f"@ {price:,.2f} {base}" if price else "(no price)"
+                        value_str = f"= {market_value:,.2f} {base}" if market_value else ""
 
                         pnl_str = ""
                         if pnl is not None and pnl_pct is not None:
                             sign = "+" if pnl >= 0 else ""
-                            pnl_str = f" ({sign}{pnl:,.2f}, {sign}{pnl_pct:.1f}%)"
+                            pnl_str = f" ({sign}{pnl:,.2f} {base}, {sign}{pnl_pct:.1f}%)"
 
-                        lines.append(f"    • {symbol}: {qty:,.4g} {price_str} {value_str}{pnl_str}")
+                        line = f"    • {symbol}: {qty:,.4g} {price_str} {value_str}{pnl_str}"
+
+                        if include_local_currency and local_ccy != base and price and fx_rate and fx_rate != 1:
+                            local_price = float(price) / float(fx_rate)
+                            local_value = float(market_value) / float(fx_rate) if market_value else None
+                            local_str = f" [local: {local_price:,.2f}"
+                            if local_value:
+                                local_str += f" = {local_value:,.2f}"
+                            local_str += f" {local_ccy}]"
+                            line += local_str
+
+                        lines.append(line)
             else:
                 lines.append("📈 Positions: None")
 

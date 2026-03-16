@@ -485,13 +485,17 @@ def get_portfolio_summary(include_metrics: bool = True) -> str:
 
 
 @mcp.tool()
-def get_portfolio_snapshot(target_date: str) -> str:
+def get_portfolio_snapshot(target_date: str, include_local_currency: bool = False) -> str:
     """Get portfolio positions, cash balances, and total value at a specific historical date.
 
     Args:
         target_date: Date to get snapshot for in YYYY-MM-DD format
+        include_local_currency: If True, also show price and value in the instrument's native currency
     """
-    return _get_portfolio_snapshot._run(target_date=target_date)
+    return _get_portfolio_snapshot._run(
+        target_date=target_date,
+        include_local_currency=include_local_currency,
+    )
 
 
 @mcp.tool()
