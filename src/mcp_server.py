@@ -874,22 +874,26 @@ def get_historical_instruments(start_date: str, end_date: str) -> str:
 def update_historical_market_data(
     start_date: str,
     end_date: str,
+    symbol: Optional[str] = None,
     include_historical: bool = True,
 ) -> str:
-    """Update market data for all instruments (including sold ones) in a date range.
+    """Update historical market data for one or all instruments in a date range.
 
-    Unlike the regular update, this includes:
-    - Current positions
-    - Sold instruments from transaction history
+    Respects price_currency settings — prices are converted to the instrument's
+    portfolio currency before storing (e.g. GBP → JPY for CNKY).
+
+    Prefer providing a symbol to avoid slow bulk updates.
 
     Args:
         start_date: Start date in YYYY-MM-DD format
         end_date: End date in YYYY-MM-DD format
-        include_historical: Whether to include sold instruments (default True)
+        symbol: Specific instrument to update (recommended). If omitted, ALL instruments are updated.
+        include_historical: Include sold instruments (default True, ignored when symbol is provided)
     """
     return _update_historical_market_data._run(
         start_date=start_date,
         end_date=end_date,
+        symbol=symbol,
         include_historical=include_historical,
     )
 

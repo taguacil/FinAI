@@ -849,6 +849,7 @@ class PortfolioManager:
         start_date: Optional[date] = None,
         end_date: Optional[date] = None,
         include_historical: bool = True,
+        symbol: Optional[str] = None,
     ) -> Dict[str, bool]:
         """Update market data in the centralized MarketDataStore.
 
@@ -876,18 +877,26 @@ class PortfolioManager:
         instruments_to_update: Dict[str, Tuple[FinancialInstrument, str]] = {}
 
         # Add current positions
-        for symbol, position in self.current_portfolio.positions.items():
-            lookup_symbol = position.instrument.data_provider_symbol or symbol
-            instruments_to_update[symbol] = (position.instrument, lookup_symbol)
+        for sym, position in self.current_portfolio.positions.items():
+            lookup_symbol = position.instrument.data_provider_symbol or sym
+            instruments_to_update[sym] = (position.instrument, lookup_symbol)
 
         # Add historical instruments from transactions in date range
         if include_historical:
             historical_instruments = self.get_instruments_in_date_range(start_date, end_date)
-            for symbol, instrument in historical_instruments.items():
-                if symbol not in instruments_to_update:
-                    lookup_symbol = instrument.data_provider_symbol or symbol
-                    instruments_to_update[symbol] = (instrument, lookup_symbol)
-                    logging.debug(f"Including historical instrument: {symbol}")
+            for sym, instrument in historical_instruments.items():
+                if sym not in instruments_to_update:
+                    lookup_symbol = instrument.data_provider_symbol or sym
+                    instruments_to_update[sym] = (instrument, lookup_symbol)
+                    logging.debug(f"Including historical instrument: {sym}")
+
+        # Filter to a single symbol if requested
+        if symbol:
+            sym_upper = symbol.upper().strip()
+            if sym_upper not in instruments_to_update:
+                logging.warning(f"Symbol {sym_upper} not found in instruments to update")
+                return {}
+            instruments_to_update = {sym_upper: instruments_to_update[sym_upper]}
 
         # Fetch and store prices for all instruments
         for symbol, (instrument, lookup_symbol) in instruments_to_update.items():
@@ -898,18 +907,37 @@ class PortfolioManager:
                 )
 
                 if prices:
-                    # Convert to price entries
-                    entries = [
-                        PriceEntry(
-                            symbol=symbol,  # Use portfolio symbol for storage
+                    # Apply price_currency conversion if needed
+                    price_currency = instrument.price_currency
+                    target_currency = instrument.currency
+                    needs_conversion = (
+                        price_currency is not None
+                        and price_currency != target_currency
+                    )
+
+                    entries = []
+                    for p in prices:
+                        raw_price = p.close_price or p.open_price or p.high_price or p.low_price
+                        if raw_price is None:
+                            continue
+                        if needs_conversion:
+                            fx_rate = self._get_exchange_rate_at_date(
+                                price_currency, target_currency, p.date
+                            )
+                            if fx_rate:
+                                raw_price = raw_price * fx_rate
+                            else:
+                                logging.warning(
+                                    f"No FX rate {price_currency.value}->{target_currency.value} "
+                                    f"for {symbol} on {p.date}, storing unconverted price"
+                                )
+                        entries.append(PriceEntry(
+                            symbol=symbol,
                             date=p.date,
-                            price=p.close_price or p.open_price or p.high_price or p.low_price,
-                            currency=instrument.currency,
+                            price=raw_price,
+                            currency=target_currency,
                             source="historical_update",
-                        )
-                        for p in prices
-                        if p.close_price or p.open_price or p.high_price or p.low_price
-                    ]
+                        ))
 
                     if entries:
                         self._market_data_store.set_prices_batch(entries)

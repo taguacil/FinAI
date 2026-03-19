@@ -2158,11 +2158,25 @@ class GetCurrentPriceTool(BaseTool):
             if price is None:
                 return f"❌ Could not get current price for {portfolio_symbol}"
 
+            # Apply price_currency conversion if set
+            display_currency = None
+            if self.portfolio_manager and self.portfolio_manager.current_portfolio:
+                position = self.portfolio_manager.current_portfolio.positions.get(portfolio_symbol)
+                if position:
+                    price_currency = position.instrument.price_currency
+                    target_currency = position.instrument.currency
+                    if price_currency and price_currency != target_currency:
+                        fx_rate = self.portfolio_manager._get_exchange_rate(price_currency, target_currency)
+                        if fx_rate:
+                            price = price * fx_rate
+                    display_currency = target_currency.value
+
             # Also get instrument info for context
             info = self.data_manager.get_instrument_info(lookup_symbol)
             name = info.name if info else portfolio_symbol
+            currency_label = display_currency or (info.currency.value if info and info.currency else "USD")
 
-            return f"💰 **{portfolio_symbol}** ({name}): {price:.2f} USD"
+            return f"💰 **{portfolio_symbol}** ({name}): {price:.2f} {currency_label}"
 
         except Exception as e:
             return f"❌ Error getting price for {symbol}: {str(e)}"
@@ -4462,9 +4476,13 @@ class UpdateHistoricalMarketDataInput(BaseModel):
     end_date: str = Field(
         description="End date in YYYY-MM-DD format"
     )
+    symbol: Optional[str] = Field(
+        default=None,
+        description="If provided, only update this specific instrument. If omitted, all instruments are updated."
+    )
     include_historical: bool = Field(
         default=True,
-        description="Whether to include sold instruments from transaction history"
+        description="Whether to include sold instruments from transaction history (ignored when symbol is provided)"
     )
 
 
@@ -4472,24 +4490,19 @@ class UpdateHistoricalMarketDataTool(BaseTool):
     """Tool for updating market data for all instruments (including sold ones) in a date range."""
 
     name: str = "update_historical_market_data"
-    description: str = """Update market data for all instruments (including sold ones) in a date range.
+    description: str = """Update historical market data for one or all instruments in a date range.
 
-    Unlike the regular market data update, this tool includes:
-    - Current positions (instruments you still hold)
-    - Sold instruments from transaction history (no longer in positions)
-
-    Use cases:
-    - Update market data for historical portfolio value calculations
-    - Ensure complete price coverage for performance analysis
-    - Fill in missing prices for sold instruments
+    Unlike the regular market data update, this tool includes sold instruments.
+    Respects price_currency settings — prices are converted to the instrument's
+    portfolio currency before storing (e.g. GBP → JPY for CNKY).
 
     Parameters:
     - start_date: Start date in YYYY-MM-DD format (required)
     - end_date: End date in YYYY-MM-DD format (required)
-    - include_historical: Whether to include sold instruments (default True)
+    - symbol: Specific instrument to update (recommended). If omitted, ALL instruments are updated.
+    - include_historical: Include sold instruments (default True, ignored when symbol is provided)
 
-    This tool fetches historical prices from data providers and stores them
-    in the market data store for all instruments that had activity in the date range.
+    Prefer providing a symbol to avoid long-running bulk updates.
     """
     args_schema: type[BaseModel] = UpdateHistoricalMarketDataInput
     portfolio_manager: Optional[PortfolioManager] = None
@@ -4502,9 +4515,10 @@ class UpdateHistoricalMarketDataTool(BaseTool):
         self,
         start_date: str,
         end_date: str,
+        symbol: Optional[str] = None,
         include_historical: bool = True,
     ) -> str:
-        """Update market data for all instruments in date range."""
+        """Update market data for one or all instruments in date range."""
         try:
             if not self.portfolio_manager.current_portfolio:
                 return "❌ No portfolio loaded."
@@ -4523,9 +4537,9 @@ class UpdateHistoricalMarketDataTool(BaseTool):
             # Get current positions
             current_positions = set(self.portfolio_manager.current_portfolio.positions.keys())
 
-            # Get historical instruments if requested
+            # Get historical instruments if requested (skip when targeting a single symbol)
             historical_instruments = {}
-            if include_historical:
+            if include_historical and not symbol:
                 historical_instruments = self.portfolio_manager.get_instruments_in_date_range(start, end)
 
             # Count what we're updating
@@ -4536,6 +4550,7 @@ class UpdateHistoricalMarketDataTool(BaseTool):
                 start_date=start,
                 end_date=end,
                 include_historical=include_historical,
+                symbol=symbol,
             )
 
             if not results:

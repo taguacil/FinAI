@@ -386,6 +386,10 @@ class RefreshDataTool(BaseTool):
                 lookup_symbol = provider_symbol if provider_symbol else portfolio_symbol
                 currency = position.instrument.currency  # Use existing currency
 
+                # Determine if price_currency conversion is needed
+                price_currency = position.instrument.price_currency
+                needs_conversion = price_currency is not None and price_currency != currency
+
                 # Find the last stored price and its date
                 last_price = None
                 last_price_date = None
@@ -414,14 +418,26 @@ class RefreshDataTool(BaseTool):
                             for p in price_data:
                                 price_value = p.close_price or p.open_price or p.high_price or p.low_price
                                 if price_value is not None:
+                                    if needs_conversion:
+                                        fx_rate = self.portfolio_manager._get_exchange_rate_at_date(
+                                            price_currency, currency, p.date
+                                        )
+                                        if fx_rate:
+                                            price_value = price_value * fx_rate
                                     store.set_price(portfolio_symbol, p.date, price_value, currency)
                                     prices_persisted += 1
 
-                        # Update in-memory cache with latest price
+                        # Update in-memory cache with latest converted price
                         latest = price_data[-1] if price_data else None
                         if latest:
                             latest_price = latest.close_price or latest.open_price
                             if latest_price is not None:
+                                if needs_conversion:
+                                    fx_rate = self.portfolio_manager._get_exchange_rate_at_date(
+                                        price_currency, currency, latest.date
+                                    )
+                                    if fx_rate:
+                                        latest_price = latest_price * fx_rate
                                 self.market_data_service._price_cache[portfolio_symbol] = PriceResult(
                                     symbol=portfolio_symbol,
                                     price=latest_price,
