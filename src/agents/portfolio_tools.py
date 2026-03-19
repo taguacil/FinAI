@@ -127,6 +127,8 @@ class GetMetricsInput(PortfolioToolInput):
 
     days: int = Field(default=365, description="Number of days to analyze")
     benchmark: str = Field(default="SPY", description="Benchmark symbol for comparison")
+    start_date: Optional[str] = Field(default=None, description="Start date in YYYY-MM-DD format. When provided together with end_date, overrides 'days'.")
+    end_date: Optional[str] = Field(default=None, description="End date in YYYY-MM-DD format. Defaults to today when start_date is provided.")
 
 
 class AddTransactionTool(BaseTool):
@@ -2202,15 +2204,19 @@ class GetPortfolioMetricsTool(BaseTool):
         self.portfolio_manager = portfolio_manager
         self.metrics_calculator = metrics_calculator
 
-    def _run(self, days: int = 365, benchmark: str = "SPY") -> str:
+    def _run(self, days: int = 365, benchmark: str = "SPY", start_date: Optional[str] = None, end_date: Optional[str] = None) -> str:
         """Calculate portfolio metrics."""
         try:
             if not self.portfolio_manager.current_portfolio:
                 return "❌ No portfolio loaded."
 
-            # Get portfolio history for the period
-            end_date = date.today()
-            start_date = end_date - timedelta(days=days)
+            # Resolve date range: explicit start/end take priority over days
+            if start_date:
+                start_date = date.fromisoformat(start_date)
+                end_date = date.fromisoformat(end_date) if end_date else date.today()
+            else:
+                end_date = date.today()
+                start_date = end_date - timedelta(days=days)
 
             try:
                 history_df = self.portfolio_manager.get_portfolio_history(start_date, end_date)
@@ -2228,7 +2234,7 @@ class GetPortfolioMetricsTool(BaseTool):
                 return f"❌ {metrics['error']}"
 
             result = [
-                f"📊 **Portfolio Metrics** ({days} days vs {benchmark})",
+                f"📊 **Portfolio Metrics** ({start_date} → {end_date} vs {benchmark})",
                 "",
                 "**📈 Returns:**",
                 f"  • Total Return: {metrics.get('total_return', 0)*100:.2f}%",

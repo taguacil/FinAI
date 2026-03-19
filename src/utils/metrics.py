@@ -884,13 +884,40 @@ class FinancialMetricsCalculator:
             benchmark_symbol, start_date, end_date
         )
 
-        # Align portfolio and benchmark returns by length
-        min_length = min(len(portfolio_returns), len(benchmark_returns))
-        if min_length > 0:
-            portfolio_returns_aligned = portfolio_returns[-min_length:]
-            benchmark_returns_aligned = benchmark_returns[-min_length:]
+        # Build date-indexed portfolio returns from snapshots for proper alignment.
+        # Snapshots may only exist for certain dates while benchmark has trading days only —
+        # align by actual date to avoid pairing returns from different time periods.
+        portfolio_returns_by_date: Dict[date, float] = {}
+        for i in range(1, len(snapshots)):
+            d = snapshots[i].date
+            prev_value = float(snapshots[i - 1].total_value)
+            curr_value = float(snapshots[i].total_value)
+            if prev_value > 0:
+                external_cf = 0.0
+                if cash_flows_by_day_float:
+                    external_cf = float(cash_flows_by_day_float.get(d, 0.0))
+                portfolio_returns_by_date[d] = (curr_value - prev_value - external_cf) / prev_value
+
+        # Build date-indexed benchmark returns from benchmark_prices
+        sorted_bench_dates = sorted(benchmark_prices.keys())
+        benchmark_returns_by_date: Dict[date, float] = {}
+        for i in range(1, len(sorted_bench_dates)):
+            d = sorted_bench_dates[i]
+            prev_d = sorted_bench_dates[i - 1]
+            curr_price = benchmark_prices[d]
+            prev_price = benchmark_prices[prev_d]
+            if prev_price > 0:
+                benchmark_returns_by_date[d] = (curr_price - prev_price) / prev_price
+
+        # Align on common dates (inner join by date)
+        common_dates = sorted(
+            set(portfolio_returns_by_date.keys()) & set(benchmark_returns_by_date.keys())
+        )
+        if common_dates:
+            portfolio_returns_aligned = [portfolio_returns_by_date[d] for d in common_dates]
+            benchmark_returns_aligned = [benchmark_returns_by_date[d] for d in common_dates]
         else:
-            portfolio_returns_aligned = portfolio_returns
+            portfolio_returns_aligned = []
             benchmark_returns_aligned = []
 
         metrics = {
@@ -1121,13 +1148,43 @@ class FinancialMetricsCalculator:
             benchmark_symbol, start_date, end_date
         )
 
-        # Align returns
-        min_length = min(len(returns), len(benchmark_returns))
-        if min_length > 0:
-            returns_aligned = returns[-min_length:]
-            benchmark_aligned = benchmark_returns[-min_length:]
+        # Build date-indexed portfolio returns for proper alignment.
+        # The portfolio DataFrame has calendar-day frequency (including weekends/holidays),
+        # while benchmark data has only trading days. Aligning by array length would pair
+        # returns from completely different dates — so we align by actual date instead.
+        portfolio_returns_by_date: Dict[date, float] = {}
+        values_arr = df[value_column].values
+        df_dates = [d.date() if hasattr(d, 'date') else d for d in df.index]
+        for i in range(1, len(values_arr)):
+            prev_value = float(values_arr[i - 1])
+            curr_value = float(values_arr[i])
+            if prev_value > 0:
+                d = df_dates[i]
+                external_cf = 0.0
+                if cash_flows_by_day:
+                    external_cf = float(cash_flows_by_day.get(d, 0.0))
+                portfolio_returns_by_date[d] = (curr_value - prev_value - external_cf) / prev_value
+
+        # Build date-indexed benchmark returns from benchmark_prices
+        sorted_bench_dates = sorted(benchmark_prices.keys())
+        benchmark_returns_by_date: Dict[date, float] = {}
+        for i in range(1, len(sorted_bench_dates)):
+            d = sorted_bench_dates[i]
+            prev_d = sorted_bench_dates[i - 1]
+            curr_price = benchmark_prices[d]
+            prev_price = benchmark_prices[prev_d]
+            if prev_price > 0:
+                benchmark_returns_by_date[d] = (curr_price - prev_price) / prev_price
+
+        # Align on common trading dates (inner join by date)
+        common_dates = sorted(
+            set(portfolio_returns_by_date.keys()) & set(benchmark_returns_by_date.keys())
+        )
+        if common_dates:
+            returns_aligned = [portfolio_returns_by_date[d] for d in common_dates]
+            benchmark_aligned = [benchmark_returns_by_date[d] for d in common_dates]
         else:
-            returns_aligned = returns
+            returns_aligned = []
             benchmark_aligned = []
 
         # Calculate max drawdown from values
