@@ -865,30 +865,10 @@ class PortfolioTrackerUI:
             ytd_history_df = portfolio_manager.get_portfolio_history(start_of_year, today)
 
             if not ytd_history_df.empty and len(ytd_history_df) >= 2:
-                # Build external cash flows by day (respect live fetch toggle)
-                if fetch_live:
-                    flows_dec = portfolio_manager.get_external_cash_flows_by_day(
-                        start_of_year, today
-                    )
-                else:
-                    # Base-only approximation without FX calls
-                    flows_dec = {}
-                    base = portfolio_manager.current_portfolio.base_currency
-                    for txn in portfolio_manager.current_portfolio.transactions:
-                        d = txn.timestamp.date()
-                        if d < start_of_year or d > today:
-                            continue
-                        if txn.transaction_type not in [
-                            TransactionType.DEPOSIT,
-                            TransactionType.WITHDRAWAL,
-                        ]:
-                            continue
-                        if txn.currency == base:
-                            amt = txn.total_value
-                            if txn.transaction_type == TransactionType.WITHDRAWAL:
-                                amt = -amt
-                            flows_dec[d] = flows_dec.get(d, Decimal("0")) + amt
-
+                # Get external cash flows with FX conversion (uses cached rates)
+                flows_dec = portfolio_manager.get_external_cash_flows_by_day(
+                    start_of_year, today
+                )
                 flows_float = {d: float(v) for d, v in flows_dec.items()}
 
                 # Compute TWR using the calculator's DataFrame-based return function

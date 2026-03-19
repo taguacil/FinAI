@@ -29,6 +29,7 @@ from .models import (
 )
 from .portfolio_history import PortfolioHistory, PositionState
 from .storage import FileBasedStorage
+from ..utils.metrics import FinancialMetricsCalculator
 
 if TYPE_CHECKING:
     from ..services.market_data_service import MarketDataService
@@ -1274,19 +1275,40 @@ class PortfolioManager:
                 "since_inception": since_inception,
             })
 
-        # Portfolio-level YTD
+        # Portfolio-level YTD using TWR (Time-Weighted Return)
         portfolio_ytd = {}
-        history = self._get_portfolio_history()
-        if history:
-            year_end_value = history.get_value_at_date(year_end)
-            current_value = history.get_value_at_date(as_of_date)
-            if year_end_value and year_end_value > 0:
-                pct = float((current_value - year_end_value) / year_end_value * 100)
+        ytd_start = date(as_of_date.year, 1, 1)
+
+        # Get portfolio history for YTD period
+        ytd_df = self.get_portfolio_history(ytd_start, as_of_date)
+
+        if not ytd_df.empty and len(ytd_df) >= 2:
+            # Get external cash flows for TWR adjustment
+            ytd_flows = self.get_external_cash_flows_by_day(ytd_start, as_of_date)
+            ytd_flows_float = {d: float(v) for d, v in ytd_flows.items()}
+
+            # Calculate TWR using FinancialMetricsCalculator
+            calc = FinancialMetricsCalculator(self.data_manager)
+            daily_returns = calc.calculate_returns_from_df(
+                ytd_df, "total_value", ytd_flows_float
+            )
+
+            if daily_returns:
+                # Geometric aggregation for period return
+                twr = 1.0
+                for r in daily_returns:
+                    twr *= 1.0 + r
+                ytd_pct = (twr - 1.0) * 100.0
+
+                # Get start and end values for context
+                start_value = float(ytd_df["total_value"].iloc[0])
+                end_value = float(ytd_df["total_value"].iloc[-1])
+
                 portfolio_ytd = {
-                    "year_end_value": float(year_end_value),
-                    "current_value": float(current_value),
-                    "ytd_pct": pct,
-                    "ytd_value_change": float(current_value - year_end_value),
+                    "year_end_value": start_value,
+                    "current_value": end_value,
+                    "ytd_pct": ytd_pct,
+                    "ytd_value_change": end_value - start_value,
                 }
 
         return {

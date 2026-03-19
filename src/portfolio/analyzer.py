@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Union
 import pandas as pd
 
 from ..data_providers.manager import DataProviderManager
+from ..utils.metrics import FinancialMetricsCalculator
 from .models import Currency, Portfolio, Position, TransactionType
 from .storage import FileBasedStorage
 
@@ -58,7 +59,7 @@ class PortfolioAnalyzer:
         days: int = 365,
         portfolio_history: Optional["PortfolioHistory"] = None,
     ) -> Dict:
-        """Calculate performance metrics using PortfolioHistory.
+        """Calculate performance metrics using PortfolioHistory with TWR.
 
         Args:
             portfolio: The portfolio to analyze
@@ -82,19 +83,25 @@ class PortfolioAnalyzer:
         first_value = Decimal(str(df["total_value"].iloc[0]))
         last_value = Decimal(str(df["total_value"].iloc[-1]))
 
-        total_return = (
-            ((last_value - first_value) / first_value * 100)
-            if first_value > 0
-            else Decimal("0")
-        )
+        # Calculate TWR (Time-Weighted Return) with cash flow adjustment
+        flows = self.get_external_cash_flows_by_day(portfolio, start_date, end_date)
+        flows_float = {d: float(v) for d, v in flows.items()}
 
-        # Calculate daily returns using pandas
-        daily_returns = df["total_value"].pct_change().dropna()
+        calc = FinancialMetricsCalculator(self.data_manager)
+        daily_returns = calc.calculate_returns_from_df(df, "total_value", flows_float)
 
+        total_return = Decimal("0")
+        if daily_returns:
+            twr = 1.0
+            for r in daily_returns:
+                twr *= 1.0 + r
+            total_return = Decimal(str((twr - 1.0) * 100))
+
+        # Calculate volatility from TWR daily returns
         volatility = Decimal("0")
         if len(daily_returns) > 1:
-            # Annualized volatility
-            vol = daily_returns.std() * (252**0.5) * 100
+            import numpy as np
+            vol = np.std(daily_returns) * (252**0.5) * 100
             volatility = Decimal(str(vol))
 
         return {

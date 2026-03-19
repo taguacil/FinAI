@@ -2070,8 +2070,12 @@ class GetPortfolioMetricsTool(BaseTool):
             if history_df.empty or len(history_df) < 2:
                 return "❌ Insufficient historical data for metrics calculation. Need at least 2 data points. Update market data first."
 
+            # Get external cash flows for TWR adjustment
+            cash_flows = self.portfolio_manager.get_external_cash_flows_by_day(start_date, end_date)
+            cash_flows_float = {d: float(v) for d, v in cash_flows.items()}
+
             metrics = self.metrics_calculator.calculate_metrics_from_df(
-                history_df, benchmark_symbol=benchmark
+                history_df, benchmark_symbol=benchmark, cash_flows_by_day=cash_flows_float
             )
 
             if "error" in metrics:
@@ -4223,16 +4227,16 @@ class GetYTDPerformanceTool(BaseTool):
                 f"📅 As of: {as_of} | Reference: {year_end}",
             ]
 
-            # Portfolio-level YTD
+            # Portfolio-level YTD (Time-Weighted Return)
             if portfolio:
                 sign = "+" if portfolio["ytd_pct"] >= 0 else ""
                 val_sign = "+" if portfolio["ytd_value_change"] >= 0 else ""
                 lines.append(
-                    f"💰 Portfolio YTD: {sign}{portfolio['ytd_pct']:.2f}% "
+                    f"💰 Portfolio YTD (TWR): {sign}{portfolio['ytd_pct']:.2f}% "
                     f"({val_sign}{portfolio['ytd_value_change']:,.2f} {base_ccy})"
                 )
             else:
-                lines.append("💰 Portfolio YTD: N/A (insufficient data)")
+                lines.append("💰 Portfolio YTD (TWR): N/A (insufficient data)")
 
             lines.append("")
 
