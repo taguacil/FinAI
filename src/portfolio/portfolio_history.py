@@ -433,6 +433,10 @@ class PortfolioHistory:
     ) -> pd.DataFrame:
         """Get portfolio value history as a DataFrame.
 
+        Optimized: position state (quantity, cash) only changes on transaction dates,
+        so we replay once per transaction boundary and reuse the same state for
+        intervening days — only prices and FX rates are re-evaluated daily.
+
         Args:
             start_date: Start date
             end_date: End date
@@ -446,11 +450,21 @@ class PortfolioHistory:
             DataFrame with columns: date, total_value, cash_value, positions_value
         """
         data: List[Dict] = []
-        current = start_date
+        base = target_currency or self.portfolio.base_currency
 
+        # Transaction dates where position state changes (within our range)
+        txn_dates_in_range = set(
+            d for d in self._transaction_dates if start_date < d <= end_date
+        )
+
+        # Get initial state once
+        state = self._replay_transactions_to_date(start_date)
+
+        current = start_date
         while current <= end_date:
-            state = self._replay_transactions_to_date(current)
-            base = target_currency or self.portfolio.base_currency
+            # Only re-replay when we hit a transaction date (state changed)
+            if current in txn_dates_in_range:
+                state = self._replay_transactions_to_date(current)
 
             # Create date-aware FX rate function for this date
             def fx_rate_for_current(from_curr: Currency, to_curr: Currency, dt: date = current) -> Optional[Decimal]:
@@ -499,6 +513,8 @@ class PortfolioHistory:
     ) -> pd.DataFrame:
         """Get position value history for all symbols.
 
+        Optimized: replays state only on transaction dates, reuses for intervening days.
+
         Args:
             start_date: Start date
             end_date: End date
@@ -516,12 +532,24 @@ class PortfolioHistory:
         if not all_symbols:
             return pd.DataFrame()
 
+        # Transaction dates where position state changes (within our range)
+        txn_dates_in_range = set(
+            d for d in self._transaction_dates if start_date < d <= end_date
+        )
+
+        # Get initial state once
+        state = self._replay_transactions_to_date(start_date)
+        positions = state.positions
+
         # Build data for each date
         data: List[Dict] = []
         current = start_date
 
         while current <= end_date:
-            positions = self.get_positions_at_date(current)
+            # Only re-replay when we hit a transaction date
+            if current in txn_dates_in_range:
+                state = self._replay_transactions_to_date(current)
+                positions = state.positions
 
             row = {"date": current}
             for symbol in all_symbols:

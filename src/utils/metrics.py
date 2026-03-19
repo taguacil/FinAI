@@ -602,16 +602,18 @@ class FinancialMetricsCalculator:
         self, returns: List[float], risk_free_rate: float = 0.02
     ) -> float:
         """Calculate Sharpe ratio."""
-        if len(returns) < 2:
+        # Filter out zero returns from weekends/holidays (same as calculate_volatility)
+        filtered = self._filter_zero_returns(returns)
+        if len(filtered) < 2:
             return 0.0
 
-        avg_return = np.mean(returns)
-        volatility = np.std(returns, ddof=1)
+        avg_return = np.mean(filtered)
+        volatility = np.std(filtered, ddof=1)
 
         if volatility == 0:
             return 0.0
 
-        # Annualize
+        # Annualize assuming 252 trading days
         annualized_return = avg_return * 252
         annualized_volatility = volatility * np.sqrt(252)
 
@@ -674,7 +676,7 @@ class FinancialMetricsCalculator:
         benchmark_returns: List[float],
         risk_free_rate: float = 0.02,
     ) -> float:
-        """Calculate Jensen's alpha."""
+        """Calculate Jensen's alpha using geometric annualized returns."""
         if (
             len(portfolio_returns) != len(benchmark_returns)
             or len(portfolio_returns) < 2
@@ -683,11 +685,12 @@ class FinancialMetricsCalculator:
 
         beta = self.calculate_beta(portfolio_returns, benchmark_returns)
 
-        avg_portfolio_return = np.mean(portfolio_returns) * 252  # Annualized
-        avg_benchmark_return = np.mean(benchmark_returns) * 252  # Annualized
+        # Use geometric annualization consistent with portfolio return calculation
+        ann_portfolio = self._annualize_geometric(portfolio_returns)
+        ann_benchmark = self._annualize_geometric(benchmark_returns)
 
-        alpha = avg_portfolio_return - (
-            risk_free_rate + beta * (avg_benchmark_return - risk_free_rate)
+        alpha = ann_portfolio - (
+            risk_free_rate + beta * (ann_benchmark - risk_free_rate)
         )
         return float(alpha)
 
@@ -723,24 +726,24 @@ class FinancialMetricsCalculator:
         risk_free_rate: float = 0.02,
     ) -> float:
         """Calculate Sortino ratio (uses downside deviation instead of total volatility)."""
-        if len(returns) < 2:
+        # Filter out zero returns from weekends/holidays (same as volatility/Sharpe)
+        filtered = self._filter_zero_returns(returns)
+        if len(filtered) < 2:
             return 0.0
 
-        returns_array = np.array(returns)
-        excess_returns = returns_array - (target_return / 252)  # Daily target
+        returns_array = np.array(filtered)
+        daily_target = target_return / 252
 
-        # Calculate downside deviation (only negative excess returns)
-        downside_returns = excess_returns[excess_returns < 0]
+        # Standard downside deviation: clip positive excess to zero, use ALL returns
+        # as denominator (not just the negative ones)
+        downside_diff = np.minimum(returns_array - daily_target, 0)
 
-        if len(downside_returns) == 0:
-            return float("inf")  # No downside risk
-
-        downside_deviation = np.sqrt(np.mean(downside_returns**2))
+        downside_deviation = np.sqrt(np.mean(downside_diff ** 2))
 
         if downside_deviation == 0:
-            return 0.0
+            return float("inf")  # No downside risk
 
-        avg_return = np.mean(returns) * 252  # Annualized
+        avg_return = np.mean(returns_array) * 252  # Annualized
         annualized_downside_dev = downside_deviation * np.sqrt(252)
 
         sortino = (avg_return - risk_free_rate) / annualized_downside_dev
@@ -884,14 +887,24 @@ class FinancialMetricsCalculator:
             benchmark_symbol, start_date, end_date
         )
 
-        # Align portfolio and benchmark returns by length
-        min_length = min(len(portfolio_returns), len(benchmark_returns))
-        if min_length > 0:
-            portfolio_returns_aligned = portfolio_returns[-min_length:]
-            benchmark_returns_aligned = benchmark_returns[-min_length:]
-        else:
-            portfolio_returns_aligned = portfolio_returns
-            benchmark_returns_aligned = []
+        # Build date-indexed portfolio returns from snapshots for proper alignment.
+        # Snapshots may have calendar-day frequency while benchmark has trading days only —
+        # align by actual date to avoid pairing returns from different time periods.
+        portfolio_returns_by_date: Dict[date, float] = {}
+        for i in range(1, len(snapshots)):
+            d = snapshots[i].date
+            prev_value = float(snapshots[i - 1].total_value)
+            curr_value = float(snapshots[i].total_value)
+            if prev_value > 0:
+                external_cf = 0.0
+                if cash_flows_by_day_float:
+                    external_cf = float(cash_flows_by_day_float.get(d, 0.0))
+                portfolio_returns_by_date[d] = (curr_value - prev_value - external_cf) / prev_value
+
+        benchmark_returns_by_date = self._benchmark_returns_by_date(benchmark_prices)
+        portfolio_returns_aligned, benchmark_returns_aligned = self._align_returns_by_date(
+            portfolio_returns_by_date, benchmark_returns_by_date
+        )
 
         metrics = {
             # Basic metrics - Fixed to use proper geometric linking
@@ -952,7 +965,7 @@ class FinancialMetricsCalculator:
                     "information_ratio": self.calculate_information_ratio(
                         portfolio_returns_aligned, benchmark_returns_aligned
                     ),
-                    "benchmark_return": float(np.mean(benchmark_returns_aligned) * 252),
+                    "benchmark_return": self._annualize_geometric(benchmark_returns_aligned),
                     "benchmark_volatility": self.calculate_volatility(
                         benchmark_returns_aligned
                     ),
@@ -1121,14 +1134,27 @@ class FinancialMetricsCalculator:
             benchmark_symbol, start_date, end_date
         )
 
-        # Align returns
-        min_length = min(len(returns), len(benchmark_returns))
-        if min_length > 0:
-            returns_aligned = returns[-min_length:]
-            benchmark_aligned = benchmark_returns[-min_length:]
-        else:
-            returns_aligned = returns
-            benchmark_aligned = []
+        # Build date-indexed portfolio returns for proper alignment.
+        # The portfolio DataFrame has calendar-day frequency (including weekends/holidays),
+        # while benchmark data has only trading days. Aligning by array length would pair
+        # returns from completely different dates — so we align by actual date instead.
+        portfolio_returns_by_date: Dict[date, float] = {}
+        values_arr = df[value_column].values
+        df_dates = [d.date() if hasattr(d, 'date') else d for d in df.index]
+        for i in range(1, len(values_arr)):
+            prev_value = float(values_arr[i - 1])
+            curr_value = float(values_arr[i])
+            if prev_value > 0:
+                d = df_dates[i]
+                external_cf = 0.0
+                if cash_flows_by_day:
+                    external_cf = float(cash_flows_by_day.get(d, 0.0))
+                portfolio_returns_by_date[d] = (curr_value - prev_value - external_cf) / prev_value
+
+        benchmark_returns_by_date = self._benchmark_returns_by_date(benchmark_prices)
+        returns_aligned, benchmark_aligned = self._align_returns_by_date(
+            portfolio_returns_by_date, benchmark_returns_by_date
+        )
 
         # Calculate max drawdown from values
         values = df[value_column].values
@@ -1161,7 +1187,7 @@ class FinancialMetricsCalculator:
                 "beta": self.calculate_beta(returns_aligned, benchmark_aligned),
                 "alpha": self.calculate_alpha(returns_aligned, benchmark_aligned, risk_free_rate),
                 "information_ratio": self.calculate_information_ratio(returns_aligned, benchmark_aligned),
-                "benchmark_return": float(np.mean(benchmark_aligned) * 252),
+                "benchmark_return": self._annualize_geometric(benchmark_aligned),
                 "benchmark_volatility": self.calculate_volatility(benchmark_aligned),
             })
 
@@ -1191,6 +1217,60 @@ class FinancialMetricsCalculator:
                 max_duration = max(max_duration, current_duration)
 
         return max_drawdown, max_duration
+
+    # ------------------------------------------------------------------ #
+    # Shared helpers for date-alignment and geometric annualization        #
+    # ------------------------------------------------------------------ #
+
+    def _annualize_geometric(self, returns: List[float]) -> float:
+        """Annualize returns using geometric linking. Assumes trading-day frequency."""
+        if not returns:
+            return 0.0
+        total = 1.0
+        for r in returns:
+            total *= (1 + r)
+        total -= 1.0
+        years = len(returns) / 252
+        if years <= 0:
+            return 0.0
+        if abs(years - 1.0) < 0.01:
+            return float(total)
+        return float((1 + total) ** (1 / years) - 1)
+
+    def _benchmark_returns_by_date(
+        self, benchmark_prices: Dict[date, float]
+    ) -> Dict[date, float]:
+        """Build date-indexed benchmark returns from a prices dict."""
+        sorted_dates = sorted(benchmark_prices.keys())
+        returns_by_date: Dict[date, float] = {}
+        for i in range(1, len(sorted_dates)):
+            d = sorted_dates[i]
+            prev_d = sorted_dates[i - 1]
+            curr_price = benchmark_prices[d]
+            prev_price = benchmark_prices[prev_d]
+            if prev_price > 0:
+                returns_by_date[d] = (curr_price - prev_price) / prev_price
+        return returns_by_date
+
+    def _align_returns_by_date(
+        self,
+        portfolio_by_date: Dict[date, float],
+        benchmark_by_date: Dict[date, float],
+    ) -> Tuple[List[float], List[float]]:
+        """Align portfolio and benchmark returns on common trading dates."""
+        common_dates = sorted(
+            set(portfolio_by_date.keys()) & set(benchmark_by_date.keys())
+        )
+        if common_dates:
+            return (
+                [portfolio_by_date[d] for d in common_dates],
+                [benchmark_by_date[d] for d in common_dates],
+            )
+        return [], []
+
+    def _filter_zero_returns(self, returns: List[float]) -> List[float]:
+        """Filter out near-zero returns from weekends/holidays with forward-filled prices."""
+        return [r for r in returns if abs(r) > 1e-12]
 
     def calculate_time_weighted_return_from_df(
         self,

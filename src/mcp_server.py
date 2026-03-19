@@ -550,14 +550,16 @@ def get_transaction_history(days: int = 30) -> str:
 
 
 @mcp.tool()
-def get_portfolio_metrics(days: int = 365, benchmark: str = "SPY") -> str:
+def get_portfolio_metrics(days: int = 365, benchmark: str = "SPY", start_date: str = None, end_date: str = None) -> str:
     """Calculate detailed portfolio performance metrics including returns, volatility, Sharpe ratio.
 
     Args:
-        days: Number of days to analyze (default 365)
+        days: Number of days to analyze (default 365). Ignored when start_date is provided.
         benchmark: Benchmark symbol for comparison (default SPY)
+        start_date: Optional start date in YYYY-MM-DD format. When provided, overrides 'days'.
+        end_date: Optional end date in YYYY-MM-DD format (defaults to today when start_date is set).
     """
-    return _get_portfolio_metrics._run(days=days, benchmark=benchmark)
+    return _get_portfolio_metrics._run(days=days, benchmark=benchmark, start_date=start_date, end_date=end_date)
 
 
 # =====================================================================

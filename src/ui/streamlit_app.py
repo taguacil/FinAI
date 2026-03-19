@@ -2322,11 +2322,8 @@ class PortfolioTrackerUI:
 
         # Run optimization button
         if st.button("🚀 Run Optimization", type="primary", use_container_width=True):
-            with st.spinner("Fetching price data and running optimization..."):
+            with st.spinner("Running optimization..."):
                 try:
-                    # Update prices first
-                    portfolio_manager.update_current_prices()
-
                     # Calculate total portfolio value
                     total_value = sum(
                         pos.market_value or (pos.quantity * pos.average_cost)

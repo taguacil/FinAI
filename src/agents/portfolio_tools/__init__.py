@@ -1,12 +1,10 @@
 """
-LangChain tools for portfolio management and analysis.
+Portfolio tools package.
 
-This module re-exports from the portfolio_tools package for backwards compatibility.
+Re-exports all models and tools for backwards compatibility.
 """
 
-# Re-export everything from the package
-from .portfolio_tools import (
-    # Input models
+from .models import (
     AddTransactionInput,
     BulkAddTransactionsInput,
     BulkSetMarketPriceInput,
@@ -32,7 +30,8 @@ from .portfolio_tools import (
     SetPriceCurrencyInput,
     TransactionItem,
     UpdateHistoricalMarketDataInput,
-    # Tools
+)
+from ._tools import (
     AddTransactionTool,
     AdvancedWhatIfTool,
     BulkAddTransactionsTool,
