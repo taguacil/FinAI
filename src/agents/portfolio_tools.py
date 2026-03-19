@@ -2794,6 +2794,23 @@ class FetchAndUpdatePricesTool(BaseTool):
             success_count = 0
             failed_dates = []
 
+            # Determine if price currency conversion is needed
+            price_currency = (
+                position.instrument.price_currency
+                if position and position.instrument.price_currency
+                else None
+            )
+            target_currency = (
+                position.instrument.currency
+                if position
+                else None
+            )
+            needs_conversion = (
+                price_currency is not None
+                and target_currency is not None
+                and price_currency != target_currency
+            )
+
             for price_data in prices:
                 price_date = price_data.date
                 # Use close price, fall back to other prices
@@ -2807,6 +2824,19 @@ class FetchAndUpdatePricesTool(BaseTool):
                 if price_value is None:
                     failed_dates.append(str(price_date))
                     continue
+
+                # Convert price currency before storing (e.g. GBP -> JPY)
+                if needs_conversion:
+                    fx_rate = self.portfolio_manager._get_exchange_rate_at_date(
+                        price_currency, target_currency, price_date
+                    )
+                    if fx_rate:
+                        price_value = price_value * fx_rate
+                    else:
+                        logging.warning(
+                            f"Could not get FX rate {price_currency.value}->{target_currency.value} "
+                            f"for {portfolio_symbol} on {price_date}, storing unconverted price"
+                        )
 
                 success = self.portfolio_manager.set_position_price(
                     symbol=portfolio_symbol,
