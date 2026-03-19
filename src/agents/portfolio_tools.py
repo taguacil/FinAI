@@ -2928,6 +2928,84 @@ class SetDataProviderSymbolTool(BaseTool):
             return f"❌ Error setting data provider symbol: {str(e)}"
 
 
+class SetPriceCurrencyInput(BaseModel):
+    """Input for setting the price currency for a position."""
+
+    symbol: str = Field(
+        description="Portfolio symbol (the symbol used in your portfolio)"
+    )
+    price_currency: str = Field(
+        description=(
+            "Currency the data provider returns prices in (e.g., GBP when provider returns "
+            "GBX/GBP but the instrument is tracked in JPY). "
+            "Supported values: USD, EUR, GBP, JPY, CHF, CAD, AUD."
+        )
+    )
+
+
+class SetPriceCurrencyTool(BaseTool):
+    """Tool for setting the price currency for a portfolio position."""
+
+    name: str = "set_price_currency"
+    description: str = """Set the price currency for a portfolio position.
+
+    Use this when the data provider returns prices in a different currency than the
+    instrument is tracked in. The system will automatically convert fetched prices
+    to the instrument's portfolio currency before storing.
+
+    Example workflow for CNKY (tracked in JPY, listed on LSE in GBX):
+      1. set_data_provider_symbol(symbol="CNKY", data_provider_symbol="CNKY.L")
+      2. set_price_currency(symbol="CNKY", price_currency="GBP")
+    → Future price refreshes will fetch CNKY.L in GBX, auto-convert to GBP, then to JPY.
+
+    Note: GBX (pence) is automatically converted to GBP by the data provider before
+    this currency conversion step runs, so always use GBP (not GBX) as the price_currency
+    for LSE-listed instruments.
+    """
+    args_schema: type[BaseModel] = SetPriceCurrencyInput
+    portfolio_manager: Optional[PortfolioManager] = None
+
+    def __init__(self, portfolio_manager: PortfolioManager):
+        super().__init__()
+        self.portfolio_manager = portfolio_manager
+
+    def _run(self, symbol: str, price_currency: str) -> str:
+        """Set the price currency for a position."""
+        try:
+            if not self.portfolio_manager.current_portfolio:
+                return "❌ No portfolio loaded."
+
+            portfolio_symbol = symbol.upper().strip()
+
+            if portfolio_symbol not in self.portfolio_manager.current_portfolio.positions:
+                return f"❌ Symbol '{portfolio_symbol}' not found in portfolio."
+
+            from ..portfolio.models import Currency
+            try:
+                currency = Currency(price_currency.upper().strip())
+            except ValueError:
+                supported = ", ".join(c.value for c in Currency)
+                return f"❌ Unsupported currency '{price_currency}'. Supported: {supported}"
+
+            success = self.portfolio_manager.set_price_currency(portfolio_symbol, currency)
+
+            if success:
+                position = self.portfolio_manager.current_portfolio.positions[portfolio_symbol]
+                target_currency = position.instrument.currency.value
+                return (
+                    f"✅ Price currency set for {portfolio_symbol}:\n"
+                    f"• Instrument: {position.instrument.name}\n"
+                    f"• Provider returns prices in: {currency.value}\n"
+                    f"• Prices will be stored in: {target_currency}\n\n"
+                    f"Future price refreshes will automatically convert {currency.value} → {target_currency} before storing."
+                )
+            else:
+                return f"❌ Failed to set price currency for {portfolio_symbol}."
+
+        except Exception as e:
+            return f"❌ Error setting price currency: {str(e)}"
+
+
 class BulkSetMarketPriceInput(BaseModel):
     """Input for bulk setting market prices."""
 

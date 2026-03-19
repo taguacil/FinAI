@@ -64,6 +64,7 @@ from src.agents.portfolio_tools import (
     SearchCompanyTool,
     SearchInstrumentTool,
     SetDataProviderSymbolTool,
+    SetPriceCurrencyTool,
     SetMarketPriceTool,
     SimulateWhatIfTool,
     UpdateHistoricalMarketDataTool,
@@ -128,6 +129,7 @@ _set_market_price = SetMarketPriceTool(portfolio_manager)
 _bulk_set_market_price = BulkSetMarketPriceTool(portfolio_manager)
 _fetch_and_update_prices = FetchAndUpdatePricesTool(portfolio_manager, data_manager)
 _set_data_provider_symbol = SetDataProviderSymbolTool(portfolio_manager)
+_set_price_currency = SetPriceCurrencyTool(portfolio_manager)
 _calculator = CalculatorTool()
 _ingest_pdf = IngestPdfTool()
 _optimize_portfolio = OptimizePortfolioTool(portfolio_manager, data_manager)
@@ -703,6 +705,28 @@ def set_data_provider_symbol(
         symbol=symbol,
         data_provider_symbol=data_provider_symbol,
     )
+
+
+@mcp.tool()
+def set_price_currency(symbol: str, price_currency: str) -> str:
+    """Set the price currency for a portfolio position.
+
+    Use this when the data provider returns prices in a different currency than the
+    instrument is tracked in. The system will automatically convert fetched prices
+    to the instrument's portfolio currency before storing.
+
+    Example workflow for CNKY (tracked in JPY, fetched from LSE in GBX/GBP):
+        set_data_provider_symbol(symbol="CNKY", data_provider_symbol="CNKY.L")
+        set_price_currency(symbol="CNKY", price_currency="GBP")
+
+    Note: GBX (pence) is auto-converted to GBP by the data provider, so always
+    use GBP (not GBX) for LSE-listed instruments.
+
+    Args:
+        symbol: Portfolio symbol (the symbol used in your portfolio)
+        price_currency: Currency the data provider returns prices in (e.g., GBP, USD, EUR)
+    """
+    return _set_price_currency._run(symbol=symbol, price_currency=price_currency)
 
 
 @mcp.tool()

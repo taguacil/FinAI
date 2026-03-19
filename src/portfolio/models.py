@@ -81,6 +81,10 @@ class FinancialInstrument(BaseModel):
         description="Symbol used by the data provider if different from the portfolio symbol (e.g., BTC-USD for Bitcoin)",
         max_length=50,
     )
+    price_currency: Optional[Currency] = Field(
+        None,
+        description="Currency in which the data provider returns prices, if different from the instrument's portfolio currency. The system will automatically convert fetched prices to instrument.currency before storing. Example: set to GBP when the provider returns prices in GBP/GBX but the instrument is tracked in JPY.",
+    )
 
     class Config:
         use_enum_values = False

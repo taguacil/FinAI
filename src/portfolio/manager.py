@@ -403,6 +403,18 @@ class PortfolioManager:
             portfolio_symbol = lookup_to_portfolio.get(lookup_symbol)
             if portfolio_symbol and portfolio_symbol in self.current_portfolio.positions and price is not None:
                 position = self.current_portfolio.positions[portfolio_symbol]
+
+                # Convert price if provider currency differs from instrument currency
+                price_currency = position.instrument.price_currency
+                target_currency = position.instrument.currency
+                if price_currency and price_currency != target_currency:
+                    fx_rate = self._get_exchange_rate(price_currency, target_currency)
+                    if fx_rate:
+                        price = price * fx_rate
+                        logging.debug(f"Converted {portfolio_symbol} price from {price_currency.value} to {target_currency.value} (rate: {fx_rate})")
+                    else:
+                        logging.warning(f"Could not get FX rate {price_currency.value}->{target_currency.value} for {portfolio_symbol}, storing unconverted price")
+
                 position.current_price = price
                 position.last_updated = datetime.now()
                 results[portfolio_symbol] = True
@@ -636,6 +648,43 @@ class PortfolioManager:
             return True
         except Exception as e:
             logging.error(f"Error setting data_provider_symbol: {e}")
+            return False
+
+    def set_price_currency(self, symbol: str, price_currency: Currency) -> bool:
+        """Set the price currency for an existing position.
+
+        Use this when the data provider returns prices in a different currency
+        than the instrument is tracked in. The system will automatically convert
+        fetched prices to the instrument's currency before storing.
+
+        Example: CNKY tracked in JPY but fetched as CNKY.L in GBP →
+            set_data_provider_symbol("CNKY", "CNKY.L")
+            set_price_currency("CNKY", Currency.GBP)
+
+        Args:
+            symbol: The portfolio symbol
+            price_currency: Currency the data provider returns prices in
+
+        Returns:
+            True if successful, False otherwise
+        """
+        if not self.current_portfolio:
+            logging.error("No portfolio loaded")
+            return False
+
+        symbol = symbol.upper().strip()
+
+        if symbol not in self.current_portfolio.positions:
+            logging.error(f"Symbol {symbol} not found in portfolio positions")
+            return False
+
+        try:
+            self.current_portfolio.positions[symbol].instrument.price_currency = price_currency
+            self.storage.save_portfolio(self.current_portfolio)
+            logging.info(f"Set price_currency for {symbol} to {price_currency.value}")
+            return True
+        except Exception as e:
+            logging.error(f"Error setting price_currency: {e}")
             return False
 
     def _get_exchange_rate(
