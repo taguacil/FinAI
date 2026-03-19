@@ -381,16 +381,9 @@ class RefreshDataTool(BaseTool):
             start_date = today - timedelta(days=MAX_DAYS_TO_UPDATE)
 
             for portfolio_symbol, position in portfolio.positions.items():
-                # Read existing data_provider_symbol and currency (DO NOT MODIFY)
-                provider_symbol = position.instrument.data_provider_symbol
-                lookup_symbol = provider_symbol if provider_symbol else portfolio_symbol
-                currency = position.instrument.currency  # Use existing currency
+                currency = position.instrument.currency
 
-                # Determine if price_currency conversion is needed
-                price_currency = position.instrument.price_currency
-                needs_conversion = price_currency is not None and price_currency != currency
-
-                # Find the last stored price and its date
+                # Find the last stored price and its date (for carry-forward fallback)
                 last_price = None
                 last_price_date = None
                 if store:
@@ -402,49 +395,27 @@ class RefreshDataTool(BaseTool):
                             last_price = float(list(prices.values())[0])
                             break
 
-                # Try to fetch from data provider
+                # Fetch, convert (price_currency → currency), and store via central path
                 fetched_data = False
                 try:
-                    price_data = data_manager.get_historical_prices(
-                        lookup_symbol, start_date, today
+                    stored, _ = self.portfolio_manager._fetch_and_store_prices(
+                        portfolio_symbol, start_date, today, position.instrument
                     )
-
-                    if price_data:
+                    if stored > 0:
                         fetched_data = True
                         symbols_updated += 1
+                        prices_persisted += stored
 
-                        # Store each price in the MarketDataStore (using existing currency)
-                        if store:
-                            for p in price_data:
-                                price_value = p.close_price or p.open_price or p.high_price or p.low_price
-                                if price_value is not None:
-                                    if needs_conversion:
-                                        fx_rate = self.portfolio_manager._get_exchange_rate_at_date(
-                                            price_currency, currency, p.date
-                                        )
-                                        if fx_rate:
-                                            price_value = price_value * fx_rate
-                                    store.set_price(portfolio_symbol, p.date, price_value, currency)
-                                    prices_persisted += 1
-
-                        # Update in-memory cache with latest converted price
-                        latest = price_data[-1] if price_data else None
-                        if latest:
-                            latest_price = latest.close_price or latest.open_price
-                            if latest_price is not None:
-                                if needs_conversion:
-                                    fx_rate = self.portfolio_manager._get_exchange_rate_at_date(
-                                        price_currency, currency, latest.date
-                                    )
-                                    if fx_rate:
-                                        latest_price = latest_price * fx_rate
-                                self.market_data_service._price_cache[portfolio_symbol] = PriceResult(
-                                    symbol=portfolio_symbol,
-                                    price=latest_price,
-                                    timestamp=datetime.now(),
-                                    is_stale=False,
-                                )
-
+                        # Update in-memory cache with latest stored price
+                        latest_prices = store.get_prices(portfolio_symbol, today, today) if store else {}
+                        latest_price = list(latest_prices.values())[0] if latest_prices else None
+                        if latest_price is not None:
+                            self.market_data_service._price_cache[portfolio_symbol] = PriceResult(
+                                symbol=portfolio_symbol,
+                                price=float(latest_price),
+                                timestamp=datetime.now(),
+                                is_stale=False,
+                            )
                 except Exception:
                     # Data provider failed - will try to carry forward
                     pass

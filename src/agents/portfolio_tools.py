@@ -2780,19 +2780,18 @@ class FetchAndUpdatePricesTool(BaseTool):
             if start > end:
                 return "❌ Start date must be before or equal to end date."
 
-            # Fetch prices from provider
-            try:
-                prices = self.data_manager.get_historical_prices(
-                    lookup_symbol, start, end
-                )
-            except Exception as e:
-                return (
-                    f"❌ Failed to fetch prices from provider for '{lookup_symbol}':\n"
-                    f"Error: {str(e)}\n\n"
-                    f"💡 Try using bulk_set_market_price to manually enter prices."
-                )
+            # If an ad-hoc provider_symbol was given, apply it to the instrument
+            # so _fetch_and_store_prices picks it up automatically
+            if provider_symbol and position:
+                position.instrument.data_provider_symbol = lookup_symbol
 
-            if not prices:
+            instrument = position.instrument if position else None
+            success_count, failed_date_list = self.portfolio_manager._fetch_and_store_prices(
+                portfolio_symbol, start, end, instrument
+            )
+            failed_dates = [str(d) for d in failed_date_list]
+
+            if success_count == 0:
                 return (
                     f"❌ No price data returned for '{lookup_symbol}' from {start_date} to {end_date}.\n\n"
                     f"Possible reasons:\n"
@@ -2803,74 +2802,6 @@ class FetchAndUpdatePricesTool(BaseTool):
                     f"• Use a different provider_symbol (e.g., 'BTC-USD' instead of 'BTC')\n"
                     f"• Use bulk_set_market_price to manually enter prices"
                 )
-
-            # Apply prices to portfolio
-            success_count = 0
-            failed_dates = []
-
-            # Determine if price currency conversion is needed
-            price_currency = (
-                position.instrument.price_currency
-                if position and position.instrument.price_currency
-                else None
-            )
-            target_currency = (
-                position.instrument.currency
-                if position
-                else None
-            )
-            needs_conversion = (
-                price_currency is not None
-                and target_currency is not None
-                and price_currency != target_currency
-            )
-
-            for price_data in prices:
-                price_date = price_data.date
-                # Use close price, fall back to other prices
-                price_value = (
-                    price_data.close_price
-                    or price_data.open_price
-                    or price_data.high_price
-                    or price_data.low_price
-                )
-
-                if price_value is None:
-                    failed_dates.append(str(price_date))
-                    continue
-
-                # Convert price currency before storing (e.g. GBP -> JPY)
-                if needs_conversion:
-                    fx_rate = self.portfolio_manager._get_exchange_rate_at_date(
-                        price_currency, target_currency, price_date
-                    )
-                    if fx_rate:
-                        price_value = price_value * fx_rate
-                    else:
-                        logging.warning(
-                            f"Could not get FX rate {price_currency.value}->{target_currency.value} "
-                            f"for {portfolio_symbol} on {price_date}, storing unconverted price"
-                        )
-
-                success = self.portfolio_manager.set_position_price(
-                    symbol=portfolio_symbol,
-                    price=price_value,
-                    target_date=price_date,
-                    update_current=(price_date == date.today()),
-                )
-
-                if success:
-                    success_count += 1
-                else:
-                    failed_dates.append(str(price_date))
-
-            # If a provider_symbol was used and prices were found, store it for future use
-            # (only if position still exists in current portfolio)
-            if provider_symbol and success_count > 0 and not is_sold_instrument:
-                # Store the data_provider_symbol so future updates use the correct symbol
-                position.instrument.data_provider_symbol = lookup_symbol
-                self.portfolio_manager.storage.save_portfolio(self.portfolio_manager.current_portfolio)
-                logging.info(f"Stored data_provider_symbol '{lookup_symbol}' for {portfolio_symbol}")
 
             # Build result message
             if is_sold_instrument:

@@ -844,6 +844,87 @@ class PortfolioManager:
                 target_currency=target_currency,
             )
 
+    def _fetch_and_store_prices(
+        self,
+        symbol: str,
+        start_date: date,
+        end_date: date,
+        instrument: Optional[FinancialInstrument] = None,
+    ) -> Tuple[int, List[date]]:
+        """Single path for fetching, converting, and storing prices.
+
+        Handles data_provider_symbol remapping, price_currency → instrument.currency
+        conversion, and storage in MarketDataStore. Also updates position.current_price
+        when today falls within the requested range.
+
+        Returns:
+            Tuple of (stored_count, failed_dates)
+        """
+        if instrument is None:
+            position = self.current_portfolio.positions.get(symbol) if self.current_portfolio else None
+            instrument = position.instrument if position else None
+
+        if instrument is None:
+            logging.warning(f"No instrument found for {symbol}")
+            return 0, []
+
+        lookup_symbol = instrument.data_provider_symbol or symbol
+        price_currency = instrument.price_currency
+        target_currency = instrument.currency
+        needs_conversion = price_currency is not None and price_currency != target_currency
+
+        try:
+            prices = self.data_manager.get_historical_prices(lookup_symbol, start_date, end_date)
+        except Exception as e:
+            logging.error(f"Error fetching prices for {symbol} (lookup: {lookup_symbol}): {e}")
+            return 0, []
+
+        if not prices:
+            return 0, []
+
+        entries = []
+        failed_dates = []
+        today = date.today()
+
+        for p in prices:
+            raw_price = p.close_price or p.open_price or p.high_price or p.low_price
+            if raw_price is None:
+                failed_dates.append(p.date)
+                continue
+
+            if needs_conversion:
+                fx_rate = self._get_exchange_rate_at_date(price_currency, target_currency, p.date)
+                if fx_rate:
+                    raw_price = raw_price * fx_rate
+                else:
+                    logging.warning(
+                        f"No FX rate {price_currency.value}->{target_currency.value} "
+                        f"for {symbol} on {p.date}, storing unconverted"
+                    )
+
+            entries.append(PriceEntry(
+                symbol=symbol,
+                date=p.date,
+                price=raw_price,
+                currency=target_currency,
+                source="market_data",
+            ))
+
+            # Keep position.current_price in sync when today is fetched
+            if p.date == today and self.current_portfolio:
+                position = self.current_portfolio.positions.get(symbol)
+                if position:
+                    position.current_price = raw_price
+                    position.last_updated = datetime.now()
+
+        if entries:
+            self._market_data_store.set_prices_batch(entries)
+            if self.current_portfolio:
+                self.storage.save_portfolio(self.current_portfolio)
+            logging.info(f"Stored {len(entries)} prices for {symbol} ({lookup_symbol})")
+
+        return len(entries), failed_dates
+
     def update_market_data(
         self,
         start_date: Optional[date] = None,
@@ -899,59 +980,9 @@ class PortfolioManager:
             instruments_to_update = {sym_upper: instruments_to_update[sym_upper]}
 
         # Fetch and store prices for all instruments
-        for symbol, (instrument, lookup_symbol) in instruments_to_update.items():
-            try:
-                # Fetch historical prices
-                prices = self.data_manager.get_historical_prices(
-                    lookup_symbol, start_date, end_date
-                )
-
-                if prices:
-                    # Apply price_currency conversion if needed
-                    price_currency = instrument.price_currency
-                    target_currency = instrument.currency
-                    needs_conversion = (
-                        price_currency is not None
-                        and price_currency != target_currency
-                    )
-
-                    entries = []
-                    for p in prices:
-                        raw_price = p.close_price or p.open_price or p.high_price or p.low_price
-                        if raw_price is None:
-                            continue
-                        if needs_conversion:
-                            fx_rate = self._get_exchange_rate_at_date(
-                                price_currency, target_currency, p.date
-                            )
-                            if fx_rate:
-                                raw_price = raw_price * fx_rate
-                            else:
-                                logging.warning(
-                                    f"No FX rate {price_currency.value}->{target_currency.value} "
-                                    f"for {symbol} on {p.date}, storing unconverted price"
-                                )
-                        entries.append(PriceEntry(
-                            symbol=symbol,
-                            date=p.date,
-                            price=raw_price,
-                            currency=target_currency,
-                            source="historical_update",
-                        ))
-
-                    if entries:
-                        self._market_data_store.set_prices_batch(entries)
-                        results[symbol] = True
-                        logging.info(f"Updated {len(entries)} historical prices for {symbol}")
-                    else:
-                        results[symbol] = False
-                else:
-                    results[symbol] = False
-                    logging.warning(f"No historical prices found for {symbol}")
-
-            except Exception as e:
-                results[symbol] = False
-                logging.error(f"Error updating market data for {symbol}: {e}")
+        for symbol, (instrument, _) in instruments_to_update.items():
+            stored, _ = self._fetch_and_store_prices(symbol, start_date, end_date, instrument)
+            results[symbol] = stored > 0
 
         # Invalidate portfolio history cache since prices changed
         self._invalidate_portfolio_history()
