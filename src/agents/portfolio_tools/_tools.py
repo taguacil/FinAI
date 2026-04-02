@@ -2243,7 +2243,7 @@ class ModifyTransactionTool(BaseTool):
                 modifications.append(f"notes: {old_notes} → {notes}")
 
             if instrument_type is not None:
-                from ..portfolio.models import InstrumentType
+                from ...portfolio.models import InstrumentType
                 try:
                     new_type = InstrumentType(instrument_type.lower())
                     old_type = transaction.instrument.instrument_type.value
@@ -2390,7 +2390,7 @@ class SetMarketPriceTool(BaseTool):
     ) -> str:
         """Set market price for an instrument."""
         try:
-            from ..portfolio.models import Currency as CurrencyEnum
+            from ...portfolio.models import Currency as CurrencyEnum
 
             if not self.portfolio_manager.current_portfolio:
                 return "❌ No portfolio loaded."
@@ -2718,7 +2718,7 @@ class SetPriceCurrencyTool(BaseTool):
             if portfolio_symbol not in self.portfolio_manager.current_portfolio.positions:
                 return f"❌ Symbol '{portfolio_symbol}' not found in portfolio."
 
-            from ..portfolio.models import Currency
+            from ...portfolio.models import Currency
             try:
                 currency = Currency(price_currency.upper().strip())
             except ValueError:
@@ -2793,7 +2793,7 @@ class BulkSetMarketPriceTool(BaseTool):
         """
         import json
         from datetime import datetime as dt
-        from ..portfolio.models import Currency as CurrencyEnum
+        from ...portfolio.models import Currency as CurrencyEnum
 
         price_entries = []
         errors = []
@@ -2899,7 +2899,7 @@ class BulkSetMarketPriceTool(BaseTool):
     def _run(self, symbol: Optional[str] = None, prices: str = "", currency: Optional[str] = None) -> str:
         """Bulk set market prices for one or more instruments."""
         try:
-            from ..portfolio.models import Currency as CurrencyEnum
+            from ...portfolio.models import Currency as CurrencyEnum
 
             if not self.portfolio_manager.current_portfolio:
                 return "❌ No portfolio loaded."
@@ -3349,7 +3349,7 @@ class OptimizePortfolioTool(BaseTool):
     ) -> str:
         """Run portfolio optimization."""
         try:
-            from ..portfolio.optimizer import OptimizationObjective
+            from ...portfolio.optimizer import OptimizationObjective
 
             if not self.portfolio_manager.current_portfolio:
                 return "❌ No portfolio loaded. Please create or load a portfolio first."
@@ -3688,8 +3688,8 @@ class ScenarioOptimizationTool(BaseTool):
     ) -> str:
         """Run optimization under different market scenarios."""
         try:
-            from ..portfolio.optimizer import OptimizationObjective, OptimizationMethod
-            from ..portfolio.scenarios import PortfolioScenarioEngine, ScenarioType
+            from ...portfolio.optimizer import OptimizationObjective, OptimizationMethod
+            from ...portfolio.scenarios import PortfolioScenarioEngine, ScenarioType
 
             if not self.portfolio_manager.current_portfolio:
                 return "❌ No portfolio loaded. Please create or load a portfolio first."

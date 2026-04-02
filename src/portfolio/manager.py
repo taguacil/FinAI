@@ -895,6 +895,16 @@ class PortfolioManager:
                 failed_dates.append(p.date)
                 continue
 
+            # Validate that the data provider returned the expected currency
+            if needs_conversion and p.currency is not None and p.currency != price_currency:
+                logging.warning(
+                    f"Currency mismatch for {symbol} on {p.date}: "
+                    f"expected {price_currency.value} but provider returned {p.currency.value}, "
+                    f"skipping date to avoid double-conversion"
+                )
+                failed_dates.append(p.date)
+                continue
+
             if needs_conversion:
                 fx_rate = self._get_exchange_rate_at_date(price_currency, target_currency, p.date)
                 if fx_rate:
@@ -902,8 +912,10 @@ class PortfolioManager:
                 else:
                     logging.warning(
                         f"No FX rate {price_currency.value}->{target_currency.value} "
-                        f"for {symbol} on {p.date}, storing unconverted"
+                        f"for {symbol} on {p.date}, skipping date"
                     )
+                    failed_dates.append(p.date)
+                    continue
 
             entries.append(PriceEntry(
                 symbol=symbol,

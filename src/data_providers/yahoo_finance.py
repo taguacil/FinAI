@@ -135,6 +135,19 @@ class YahooFinanceProvider(BaseDataProvider):
             currency_str = info.get("currency", "USD") if info else "USD"
             needs_conversion = currency_str in self.MINOR_CURRENCY_DIVISORS
 
+            # Resolve the major currency for tagging PriceData
+            major_currency_map = {
+                "GBp": "GBP",
+                "GBX": "GBP",
+                "ILA": "ILS",
+                "ZAc": "ZAR",
+            }
+            resolved_currency_str = major_currency_map.get(currency_str, currency_str)
+            try:
+                resolved_currency = Currency(resolved_currency_str)
+            except ValueError:
+                resolved_currency = None
+
             # Get historical data
             hist = ticker.history(start=start_date, end=end_date + timedelta(days=1))
 
@@ -198,6 +211,7 @@ class YahooFinanceProvider(BaseDataProvider):
                                 if not pd.isna(row["Volume"])
                                 else None
                             ),
+                            currency=resolved_currency,
                         )
                     )
                 except (ValueError, TypeError) as e:
