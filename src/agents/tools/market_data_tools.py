@@ -6,6 +6,7 @@ batch pricing, and data freshness monitoring.
 """
 
 from datetime import date
+from decimal import Decimal
 from typing import Dict, List, Optional
 
 import pandas as pd
@@ -392,7 +393,8 @@ class RefreshDataTool(BaseTool):
                         prices = store.get_prices(portfolio_symbol, check_date, check_date)
                         if prices:
                             last_price_date = check_date
-                            last_price = float(list(prices.values())[0])
+                            raw = list(prices.values())[0]
+                            last_price = raw if isinstance(raw, Decimal) else Decimal(str(raw))
                             break
 
                 # Fetch, convert (price_currency → currency), and store via central path
@@ -439,7 +441,7 @@ class RefreshDataTool(BaseTool):
                         # Update in-memory cache
                         self.market_data_service._price_cache[portfolio_symbol] = PriceResult(
                             symbol=portfolio_symbol,
-                            price=last_price,
+                            price=float(last_price),
                             timestamp=datetime.now(),
                             is_stale=False,
                         )
