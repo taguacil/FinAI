@@ -10,7 +10,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Set
 
-
 # Tools that read portfolio / market data and do not mutate any persisted state.
 READ_TOOLS: Set[str] = {
     # Portfolio reads
@@ -35,7 +34,11 @@ READ_TOOLS: Set[str] = {
     "search_instrument",
     "search_company",
     "resolve_instrument",
-    # Analytics (pure compute, no state change)
+    # Analytics. These do not mutate portfolio or market data, but the
+    # simulation tools below persist an audit record of each run under
+    # data/simulations/ (via _record_simulation) so results can be re-checked
+    # later. That append-only log is the only side effect; it never changes
+    # portfolio holdings, transactions, or prices.
     "optimize_portfolio",
     "simulate_what_if",
     "advanced_what_if",
