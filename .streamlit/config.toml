@@ -1,0 +1,16 @@
+# FinAI — Modern fintech dark theme
+# Base colors are also mirrored in src/ui/streamlit_app.py (apply_global_styles / plotly template).
+
+[theme]
+base = "dark"
+primaryColor = "#2DD4BF"            # teal accent
+backgroundColor = "#0B0F1A"         # app background (deep navy)
+secondaryBackgroundColor = "#131A2A" # cards / sidebar / widgets
+textColor = "#E6EDF3"               # primary text
+font = "sans serif"
+
+[server]
+headless = true
+
+[browser]
+gatherUsageStats = false

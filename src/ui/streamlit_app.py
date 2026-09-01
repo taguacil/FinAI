@@ -13,8 +13,65 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+import plotly.io as pio
 import streamlit as st
-from pypdf import PdfReader
+
+# --- FinAI theme tokens (kept in sync with .streamlit/config.toml) ---
+FINAI_BG = "#0B0F1A"
+FINAI_SURFACE = "#131A2A"
+FINAI_SURFACE_ALT = "#0F1626"
+FINAI_BORDER = "#1E2A3D"
+FINAI_ACCENT = "#2DD4BF"
+FINAI_TEXT = "#E6EDF3"
+FINAI_MUTED = "#8B98A5"
+FINAI_POSITIVE = "#22C55E"
+FINAI_NEGATIVE = "#F87171"
+FINAI_COLORWAY = [
+    "#2DD4BF", "#6366F1", "#F59E0B", "#22C55E",
+    "#F87171", "#38BDF8", "#A78BFA", "#FB7185",
+]
+
+
+def _register_plotly_theme():
+    """Register and activate a dark Plotly template that blends with the UI."""
+    pio.templates["finai_dark"] = go.layout.Template(
+        layout=dict(
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            font=dict(
+                color=FINAI_TEXT,
+                family="Inter, -apple-system, Segoe UI, Roboto, sans-serif",
+                size=13,
+            ),
+            colorway=FINAI_COLORWAY,
+            xaxis=dict(
+                gridcolor=FINAI_BORDER,
+                zerolinecolor=FINAI_BORDER,
+                linecolor=FINAI_BORDER,
+                tickcolor=FINAI_BORDER,
+            ),
+            yaxis=dict(
+                gridcolor=FINAI_BORDER,
+                zerolinecolor=FINAI_BORDER,
+                linecolor=FINAI_BORDER,
+                tickcolor=FINAI_BORDER,
+            ),
+            legend=dict(bgcolor="rgba(0,0,0,0)", bordercolor=FINAI_BORDER),
+            hoverlabel=dict(
+                bgcolor=FINAI_SURFACE,
+                bordercolor=FINAI_BORDER,
+                font=dict(color=FINAI_TEXT),
+            ),
+            margin=dict(t=48, r=16, b=40, l=16),
+        )
+    )
+    pio.templates.default = "finai_dark"
+    # Make plotly.express pick up the dark template by default too.
+    px.defaults.template = "finai_dark"
+    px.defaults.color_discrete_sequence = FINAI_COLORWAY
+
+
+_register_plotly_theme()
 
 # Add src to path for imports
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -23,7 +80,6 @@ sys.path.append(_PROJECT_ROOT)
 # Use absolute path for data directory to match MCP server
 _DATA_DIR = os.path.join(_PROJECT_ROOT, "data")
 
-from src.agents.llm_config import MODEL_REGISTRY, get_available_models
 from src.agents.portfolio_agent import PortfolioAgent
 from src.data_providers.manager import DataProviderManager
 from src.portfolio.manager import PortfolioManager
@@ -47,10 +103,161 @@ class PortfolioTrackerUI:
     def setup_page_config(self):
         """Configure Streamlit page."""
         st.set_page_config(
-            page_title="AI Portfolio Tracker",
+            page_title="FinAI · Portfolio Tracker",
             page_icon="📊",
             layout="wide",
             initial_sidebar_state="expanded",
+        )
+
+    def apply_global_styles(self):
+        """Inject the FinAI dark design-system CSS. Purely cosmetic."""
+        st.markdown(
+            f"""
+            <link rel="preconnect" href="https://fonts.googleapis.com">
+            <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+            <style>
+            :root {{
+                --finai-bg: {FINAI_BG};
+                --finai-surface: {FINAI_SURFACE};
+                --finai-surface-alt: {FINAI_SURFACE_ALT};
+                --finai-border: {FINAI_BORDER};
+                --finai-accent: {FINAI_ACCENT};
+                --finai-text: {FINAI_TEXT};
+                --finai-muted: {FINAI_MUTED};
+                --finai-positive: {FINAI_POSITIVE};
+                --finai-negative: {FINAI_NEGATIVE};
+                --finai-radius: 14px;
+            }}
+
+            html, body, [class*="css"], .stApp {{
+                font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            }}
+            .stApp {{ background: var(--finai-bg); color: var(--finai-text); }}
+
+            /* Tidy the top chrome */
+            [data-testid="stHeader"] {{ background: transparent; }}
+            [data-testid="stMain"] .block-container {{
+                padding-top: 2.4rem;
+                padding-bottom: 3rem;
+                max-width: 1360px;
+            }}
+
+            /* Typography */
+            h1, h2, h3, h4 {{ font-family: 'Inter', sans-serif; letter-spacing: -0.02em; }}
+            h1 {{ font-weight: 800; }}
+            h2 {{ font-weight: 700; }}
+            h3 {{ font-weight: 600; }}
+
+            /* Hero header */
+            .finai-hero {{
+                display: flex; align-items: center; gap: 0.85rem;
+                padding: 0 0 0.35rem 0;
+            }}
+            .finai-hero .dot {{
+                width: 12px; height: 12px; border-radius: 50%;
+                background: var(--finai-accent);
+                box-shadow: 0 0 0 4px rgba(45,212,191,0.15);
+            }}
+            .finai-hero h1 {{ margin: 0; font-size: 1.9rem; line-height: 1; }}
+            .finai-hero .accent {{ color: var(--finai-accent); }}
+            .finai-subtitle {{ color: var(--finai-muted); font-size: 0.95rem; margin: 0.35rem 0 1.1rem 0; }}
+            .finai-rule {{
+                height: 1px; border: 0; margin: 0 0 1.4rem 0;
+                background: linear-gradient(90deg, var(--finai-accent), transparent);
+                opacity: 0.5;
+            }}
+
+            /* Metric cards */
+            [data-testid="stMetric"] {{
+                background: var(--finai-surface);
+                border: 1px solid var(--finai-border);
+                border-radius: var(--finai-radius);
+                padding: 1rem 1.15rem;
+                box-shadow: 0 1px 2px rgba(0,0,0,0.25);
+                transition: border-color 0.15s ease, transform 0.15s ease;
+            }}
+            [data-testid="stMetric"]:hover {{
+                border-color: rgba(45,212,191,0.55);
+                transform: translateY(-1px);
+            }}
+            [data-testid="stMetricLabel"] p {{
+                color: var(--finai-muted);
+                font-size: 0.78rem; font-weight: 600;
+                text-transform: uppercase; letter-spacing: 0.06em;
+            }}
+            [data-testid="stMetricValue"] {{ font-weight: 700; font-size: 1.6rem; }}
+
+            /* Tabs -> segmented control */
+            .stTabs [data-baseweb="tab-list"] {{
+                gap: 0.35rem;
+                background: var(--finai-surface-alt);
+                padding: 0.35rem;
+                border-radius: 12px;
+                border: 1px solid var(--finai-border);
+            }}
+            .stTabs [data-baseweb="tab"] {{
+                height: auto; padding: 0.5rem 0.95rem;
+                border-radius: 9px; color: var(--finai-muted);
+                font-weight: 600; font-size: 0.9rem;
+            }}
+            .stTabs [data-baseweb="tab"]:hover {{ color: var(--finai-text); background: rgba(255,255,255,0.03); }}
+            .stTabs [aria-selected="true"] {{
+                background: var(--finai-accent) !important;
+                color: #04231F !important;
+            }}
+            .stTabs [data-baseweb="tab-highlight"], .stTabs [data-baseweb="tab-border"] {{ display: none; }}
+
+            /* Sidebar */
+            [data-testid="stSidebar"] {{
+                background: var(--finai-surface-alt);
+                border-right: 1px solid var(--finai-border);
+            }}
+            [data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3 {{ color: var(--finai-text); }}
+
+            /* Buttons */
+            .stButton > button, .stDownloadButton > button, .stFormSubmitButton > button {{
+                border-radius: 10px;
+                border: 1px solid var(--finai-border);
+                font-weight: 600;
+                transition: all 0.15s ease;
+            }}
+            .stButton > button[kind="primary"], .stFormSubmitButton > button {{
+                background: var(--finai-accent);
+                color: #04231F; border: none;
+            }}
+            .stButton > button[kind="primary"]:hover, .stFormSubmitButton > button:hover {{
+                filter: brightness(1.08);
+            }}
+            .stButton > button:hover {{ border-color: var(--finai-accent); color: var(--finai-accent); }}
+
+            /* Inputs & selects */
+            [data-baseweb="select"] > div, .stTextInput input, .stNumberInput input, .stDateInput input {{
+                border-radius: 10px !important;
+            }}
+
+            /* Containers, expanders, tables */
+            [data-testid="stExpander"] {{
+                border: 1px solid var(--finai-border);
+                border-radius: var(--finai-radius);
+                background: var(--finai-surface);
+            }}
+            [data-testid="stDataFrame"], [data-testid="stTable"] {{
+                border: 1px solid var(--finai-border);
+                border-radius: var(--finai-radius);
+                overflow: hidden;
+            }}
+            [data-testid="stVerticalBlockBorderWrapper"] {{ border-radius: var(--finai-radius); }}
+
+            /* Alerts a touch softer */
+            [data-testid="stAlert"] {{ border-radius: 12px; }}
+
+            /* Scrollbar */
+            ::-webkit-scrollbar {{ width: 10px; height: 10px; }}
+            ::-webkit-scrollbar-thumb {{ background: var(--finai-border); border-radius: 8px; }}
+            ::-webkit-scrollbar-thumb:hover {{ background: #2a3a52; }}
+            </style>
+            """,
+            unsafe_allow_html=True,
         )
 
     @st.cache_resource
@@ -115,48 +322,53 @@ class PortfolioTrackerUI:
         except Exception:
             pass
 
+        # Global look & feel
+        self.apply_global_styles()
+
         # Header
-        st.title("🤖 AI Portfolio Tracker")
         st.markdown(
-            "*Your intelligent financial companion for portfolio management and investment advice*"
+            """
+            <div class="finai-hero">
+                <span class="dot"></span>
+                <h1>Fin<span class="accent">AI</span></h1>
+            </div>
+            <p class="finai-subtitle">Intelligent portfolio management, analytics &amp; optimization.</p>
+            <hr class="finai-rule" />
+            """,
+            unsafe_allow_html=True,
         )
 
         # Sidebar
         self.render_sidebar(portfolio_manager, market_data_service)
 
         # Main content tabs
-        tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs(
-            ["💬 AI Chat", "📊 Portfolio", "📈 Analytics", "⚖️ Optimize", "🔁 Backtest", "🔮 Scenarios", "🗄️ Market Data", "⚙️ Settings"]
+        tab_portfolio, tab_analytics, tab_optimize, tab_backtest, tab_scenarios, tab_market, tab_settings = st.tabs(
+            ["📊 Portfolio", "📈 Analytics", "⚖️ Optimize", "🔁 Backtest", "🔮 Scenarios", "🗄️ Market Data", "⚙️ Settings"]
         )
 
-        with tab1:
-            self.render_chat_interface(agent)
-
-        with tab2:
+        with tab_portfolio:
             self.render_portfolio_overview(portfolio_manager, market_data_service)
 
-        with tab3:
+        with tab_analytics:
             self.render_analytics(portfolio_manager, metrics_calculator)
 
-        with tab4:
+        with tab_optimize:
             self.render_optimization(portfolio_manager, market_data_service)
 
-        with tab5:
+        with tab_backtest:
             self.render_backtest(portfolio_manager, metrics_calculator)
 
-        with tab6:
+        with tab_scenarios:
             self.render_scenarios(portfolio_manager, metrics_calculator)
 
-        with tab7:
+        with tab_market:
             render_market_data_page(_DATA_DIR)
 
-        with tab8:
+        with tab_settings:
             self.render_settings()
 
     def init_session_state(self):
         """Initialize session state variables."""
-        if "chat_history" not in st.session_state:
-            st.session_state.chat_history = []
         if "portfolio_loaded" not in st.session_state:
             st.session_state.portfolio_loaded = False
         if "selected_portfolio" not in st.session_state:
@@ -308,358 +520,6 @@ class PortfolioTrackerUI:
                 st.session_state.portfolio_loaded = False
                 st.session_state.selected_portfolio = portfolio.id  # Remember selection
                 st.rerun()
-
-    def render_chat_interface(self, agent):
-        """Render the AI chat interface."""
-        st.header("💬 Chat with AI Financial Advisor")
-
-        # Chat history
-        chat_container = st.container()
-
-        with chat_container:
-            if not st.session_state.chat_history:
-                # Initialize conversation
-                initial_message = agent.initialize_conversation()
-                st.session_state.chat_history.append(
-                    {"role": "assistant", "content": initial_message}
-                )
-
-            # Display chat history
-            for message in st.session_state.chat_history:
-                if message["role"] == "user":
-                    with st.chat_message("user"):
-                        st.write(message["content"])
-                else:
-                    with st.chat_message("assistant"):
-                        st.markdown(message["content"])
-
-        # Chat input
-        user_input = st.chat_input(
-            "Ask me about your portfolio, investments, or market conditions..."
-        )
-
-        if user_input:
-            # Add user message
-            st.session_state.chat_history.append(
-                {"role": "user", "content": user_input}
-            )
-
-            # Get AI response
-            with st.spinner("Thinking..."):
-                try:
-                    response = agent.chat(user_input)
-                    st.session_state.chat_history.append(
-                        {"role": "assistant", "content": response}
-                    )
-                except Exception as e:
-                    error_msg = f"Sorry, I encountered an error: {str(e)}"
-                    st.session_state.chat_history.append(
-                        {"role": "assistant", "content": error_msg}
-                    )
-
-            st.rerun()
-
-        # Quick Actions - prominent buttons at the top
-        st.markdown("---")
-        action_col1, action_col2, action_col3, action_col4 = st.columns(4)
-
-        with action_col1:
-            if st.button("📊 Portfolio Summary", use_container_width=True):
-                if st.session_state.portfolio_loaded:
-                    response = agent.chat("Please show me my current portfolio summary")
-                    st.session_state.chat_history.append(
-                        {"role": "assistant", "content": response}
-                    )
-                    st.rerun()
-                else:
-                    st.warning("Please load a portfolio first")
-
-        with action_col2:
-            if st.button("📈 Performance Analysis", use_container_width=True):
-                if st.session_state.portfolio_loaded:
-                    response = agent.analyze_portfolio_performance()
-                    st.session_state.chat_history.append(
-                        {"role": "assistant", "content": response}
-                    )
-                    st.rerun()
-                else:
-                    st.warning("Please load a portfolio first")
-
-        with action_col3:
-            if st.button("💡 Investment Ideas", use_container_width=True):
-                if st.session_state.portfolio_loaded:
-                    response = agent.chat("Based on my current portfolio, what investment opportunities should I consider?")
-                    st.session_state.chat_history.append(
-                        {"role": "assistant", "content": response}
-                    )
-                    st.rerun()
-                else:
-                    st.warning("Please load a portfolio first")
-
-        with action_col4:
-            if st.button("🧹 Clear Chat", use_container_width=True):
-                st.session_state.chat_history = []
-                agent.clear_conversation()
-                st.rerun()
-
-        # Advanced Options - collapsible section
-        with st.expander("⚙️ Advanced Options", expanded=False):
-            adv_col1, adv_col2 = st.columns(2)
-
-            # PDF Analysis
-            with adv_col1:
-                st.markdown("**📄 Document Analysis**")
-                uploaded_pdf = st.file_uploader(
-                    "Upload PDF (datasheet, prospectus, etc.)",
-                    type=["pdf"],
-                    accept_multiple_files=False,
-                    key="pdf_uploader"
-                )
-                if uploaded_pdf is not None:
-                    st.caption(
-                        f"Selected: {uploaded_pdf.name} ({uploaded_pdf.size/1024:.1f} KB)"
-                    )
-                    pdf_bytes = uploaded_pdf.read()
-
-                    pdf_btn_col1, pdf_btn_col2 = st.columns(2)
-                    with pdf_btn_col1:
-                        if st.button("📎 Attach to Chat", use_container_width=True):
-                            try:
-                                import io
-
-                                reader = PdfReader(io.BytesIO(pdf_bytes))
-                                texts = []
-                                for page in reader.pages:
-                                    try:
-                                        t = page.extract_text() or ""
-                                        if t:
-                                            texts.append(t)
-                                    except Exception:
-                                        continue
-                                content = "\n\n".join(texts).strip()
-                                if not content:
-                                    st.warning("No text extracted from the PDF.")
-                                else:
-                                    if len(content) > 100_000:
-                                        content = content[:100_000] + "\n\n...[truncated]"
-                                    st.session_state.chat_history.append(
-                                        {
-                                            "role": "user",
-                                            "content": f"📄 Attached PDF: {uploaded_pdf.name}\n\n{content}",
-                                        }
-                                    )
-                                    st.success("PDF content attached to chat.")
-                                    st.rerun()
-                            except Exception as e:
-                                st.error(f"Failed to read PDF: {e}")
-
-                    with pdf_btn_col2:
-                        if st.button("🔍 Analyze Now", use_container_width=True):
-                            try:
-                                import io
-
-                                reader = PdfReader(io.BytesIO(pdf_bytes))
-                                texts = []
-                                for page in reader.pages:
-                                    try:
-                                        t = page.extract_text() or ""
-                                        if t:
-                                            texts.append(t)
-                                    except Exception:
-                                        continue
-                                content = "\n\n".join(texts).strip()
-                                if not content:
-                                    st.warning("No text extracted from the PDF.")
-                                else:
-                                    if len(content) > 80_000:
-                                        content = content[:80_000] + "\n\n...[truncated]"
-                                    prompt = (
-                                        f"Please analyze the attached PDF datasheet '{uploaded_pdf.name}'. "
-                                        f"Summarize key points, risks, and any financial metrics or terms.\n\n"
-                                        f"Extracted text follows:\n{content}"
-                                    )
-                                    st.session_state.chat_history.append(
-                                        {"role": "user", "content": prompt}
-                                    )
-                                    with st.spinner("Analyzing PDF..."):
-                                        response = agent.chat(prompt)
-                                    st.session_state.chat_history.append(
-                                        {"role": "assistant", "content": response}
-                                    )
-                                    st.rerun()
-                            except Exception as e:
-                                st.error(f"Failed to analyze PDF: {e}")
-
-            # AI Model Selection
-            with adv_col2:
-                st.markdown("**🤖 AI Model Configuration**")
-                # Get models from central registry
-                available_models = get_available_models()
-                model_choice = st.selectbox(
-                    "Select Model",
-                    available_models,
-                    format_func=lambda x: x[1],  # Display name
-                    key="model_selector"
-                )
-                if st.button("Apply Model", use_container_width=True):
-                    try:
-                        model_key, display_name, config = model_choice
-                        # Use the new simplified interface
-                        agent.set_llm_config(model_key=model_key)
-                        st.success(f"Model set to {display_name}")
-                    except Exception as e:
-                        st.error(f"Failed to set model: {e}")
-
-    def _render_fx_warnings(self):
-        """Render FX rate fallback warnings if any exist."""
-        if "fx_fallback_warnings" in st.session_state and st.session_state.fx_fallback_warnings:
-            warnings = st.session_state.fx_fallback_warnings
-            with st.expander(f"⚠️ FX Rate Issues ({len(warnings)} currency pair(s))", expanded=False):
-                st.warning(
-                    "Some FX rates were unavailable and defaulted to 1.0 (no conversion). "
-                    "This may cause inaccurate values for multi-currency portfolios."
-                )
-                for warning in warnings[:10]:  # Show first 10
-                    st.caption(f"• {warning}")
-                if len(warnings) > 10:
-                    st.caption(f"... and {len(warnings) - 10} more")
-                if st.button("Clear FX Warnings", key="clear_fx_warnings"):
-                    st.session_state.fx_fallback_warnings = []
-                    st.rerun()
-
-    def _render_price_fallback_prompt(self, portfolio_manager):
-        """Render price fallback prompt when an instrument has no market price."""
-        if not st.session_state.get("pending_price_fallback"):
-            return
-
-        data = st.session_state.pending_price_fallback
-
-        with st.container():
-            st.warning(
-                f"No market price found for **{data['symbol']}** ({data.get('instrument_name', 'Unknown')}).\n\n"
-                "This instrument may not have automatic price feeds (e.g., bonds, private securities)."
-            )
-
-            choice = st.radio(
-                "What would you like to do?",
-                [
-                    f"Use purchase price (${data['purchase_price']:.2f}) as market price",
-                    "Enter a custom market price",
-                    "Skip (leave market price as unavailable)"
-                ],
-                key="price_fallback_choice"
-            )
-
-            custom_price = None
-            if choice.startswith("Enter"):
-                custom_price = st.number_input(
-                    "Custom market price",
-                    min_value=0.01,
-                    value=float(data['purchase_price']),
-                    step=0.01,
-                    key="custom_market_price"
-                )
-
-            col1, col2 = st.columns(2)
-            with col1:
-                if st.button("Confirm", key="confirm_price_fallback", type="primary"):
-                    try:
-                        if choice.startswith("Use purchase"):
-                            # Use purchase price as market price
-                            success = portfolio_manager.set_position_price(
-                                symbol=data["symbol"],
-                                price=Decimal(str(data["purchase_price"])),
-                                target_date=date.fromisoformat(data["date"]),
-                            )
-                            if success:
-                                st.success(f"Set market price for {data['symbol']} to ${data['purchase_price']:.2f}")
-                        elif choice.startswith("Enter") and custom_price:
-                            # Use custom price
-                            success = portfolio_manager.set_position_price(
-                                symbol=data["symbol"],
-                                price=Decimal(str(custom_price)),
-                                target_date=date.fromisoformat(data["date"]),
-                            )
-                            if success:
-                                st.success(f"Set market price for {data['symbol']} to ${custom_price:.2f}")
-                        # Clear the pending fallback
-                        st.session_state.pending_price_fallback = None
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Error setting price: {e}")
-
-            with col2:
-                if st.button("Cancel", key="cancel_price_fallback"):
-                    st.session_state.pending_price_fallback = None
-                    st.rerun()
-
-    def _render_positions_without_prices(self, portfolio_manager, positions):
-        """Render UI for bulk setting prices on positions without prices."""
-        positions_without_prices = [
-            pos for pos in positions
-            if not pos.get("has_current_price") and pos.get("symbol") != "CASH"
-        ]
-
-        if not positions_without_prices:
-            return
-
-        with st.expander(
-            f"💰 Set prices for {len(positions_without_prices)} instruments without prices",
-            expanded=False
-        ):
-            st.info(
-                "These instruments don't have automatic price feeds. "
-                "You can set their prices manually using purchase price or a custom value."
-            )
-
-            # Create a form for bulk price setting
-            for pos in positions_without_prices:
-                symbol = pos["symbol"]
-                avg_cost = pos.get("average_cost", Decimal("0"))
-
-                col1, col2, col3 = st.columns([2, 2, 1])
-
-                with col1:
-                    st.text(f"{symbol}")
-                    st.caption(f"{pos.get('name', 'Unknown')}")
-
-                with col2:
-                    use_purchase = st.checkbox(
-                        f"Use ${float(avg_cost):.2f} (purchase price)",
-                        key=f"use_purchase_{symbol}",
-                        value=True
-                    )
-                    if not use_purchase:
-                        st.number_input(
-                            "Custom price",
-                            key=f"custom_price_{symbol}",
-                            min_value=0.01,
-                            value=float(avg_cost),
-                            step=0.01
-                        )
-
-                with col3:
-                    if st.button("Set", key=f"set_price_{symbol}"):
-                        try:
-                            if st.session_state.get(f"use_purchase_{symbol}", True):
-                                price_to_set = avg_cost
-                            else:
-                                price_to_set = Decimal(str(st.session_state.get(f"custom_price_{symbol}", avg_cost)))
-
-                            success = portfolio_manager.set_position_price(
-                                symbol=symbol,
-                                price=price_to_set,
-                                target_date=date.today(),
-                            )
-                            if success:
-                                st.success(f"Set price for {symbol}")
-                                st.rerun()
-                            else:
-                                st.error(f"Failed to set price for {symbol}")
-                        except Exception as e:
-                            st.error(f"Error: {e}")
-
-                st.divider()
 
     def render_portfolio_overview(self, portfolio_manager, market_data_service):
         """Render portfolio overview with transactions."""
