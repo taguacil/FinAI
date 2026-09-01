@@ -9,17 +9,40 @@
   </div>
 {% else %}
 <div x-data="analytics()" x-init="init()">
-  <!-- Period selector -->
-  <div class="flex items-center justify-between mb-5 flex-wrap gap-3">
+  <!-- Period + currency controls -->
+  {% set ccy = data.display_currency %}
+  <div class="flex items-start justify-between mb-5 flex-wrap gap-3">
     <p class="page-sub">Performance, risk and benchmark analytics
       {% if data.period and data.period.start %}· {{ data.period.start }} → {{ data.period.end }}{% endif %}
+      {% if ccy and ccy != data.base_currency %}· in {{ ccy }}{% endif %}
     </p>
-    <div class="seg">
-      {% set periods = [(30, '1M'), (90, '3M'), (180, '6M'), (365, '1Y'), (0, 'All')] %}
-      {% for d, lbl in periods %}
-      <a href="/analytics?portfolio={{ active_portfolio_id or '' }}&days={{ d }}"
-         class="seg-item {{ 'seg-item-active' if days == d else '' }}">{{ lbl }}</a>
-      {% endfor %}
+    <div class="flex items-center gap-2 flex-wrap">
+      <!-- Presets -->
+      <div class="seg">
+        {% set presets = [
+          ('30', '1M', 'days=30'), ('90', '3M', 'days=90'),
+          ('180', '6M', 'days=180'), ('365', '1Y', 'days=365'),
+          ('ytd', 'YTD', 'start=' ~ year_start ~ '&end=' ~ today),
+          ('0', 'All', 'days=0')
+        ] %}
+        {% for key, lbl, q in presets %}
+        <a href="/analytics?portfolio={{ active_portfolio_id or '' }}&{{ q }}&currency={{ ccy }}"
+           class="seg-item {{ 'seg-item-active' if preset == key else '' }}">{{ lbl }}</a>
+        {% endfor %}
+      </div>
+      <!-- Calendar range + currency -->
+      <form method="get" action="/analytics" class="flex items-center gap-2">
+        <input type="hidden" name="portfolio" value="{{ active_portfolio_id or '' }}" />
+        <input type="date" name="start" value="{{ range_start }}" max="{{ today }}" class="input input-sm mono" />
+        <span class="text-muted text-xs">→</span>
+        <input type="date" name="end" value="{{ range_end }}" max="{{ today }}" class="input input-sm mono" />
+        <select name="currency" class="select select-sm" onchange="this.form.submit()">
+          {% for c in data.currencies %}
+          <option value="{{ c }}" {{ 'selected' if c == ccy else '' }}>{{ c }}</option>
+          {% endfor %}
+        </select>
+        <button type="submit" class="btn btn-sm {{ 'btn-accent' if preset == 'custom' else '' }}">Apply</button>
+      </form>
     </div>
   </div>
 
@@ -108,8 +131,8 @@
         </div>
       </template>
       <template x-if="!d.benchmark">
-        <p class="hint">Benchmark comparison needs live market data.
-          <span x-show="d.offline">You're in cache-only mode — fetch prices in <a href="/data?portfolio={{ active_portfolio_id or '' }}" class="text-accent">Data &amp; Settings</a>.</span>
+        <p class="hint">No <span x-text="d.benchmark_symbol"></span> data overlaps this period. Try a range covered by your stored prices, or fetch more in
+          <a href="/data?portfolio={{ active_portfolio_id or '' }}" class="text-accent">Data &amp; Settings</a>.
         </p>
       </template>
     </div>

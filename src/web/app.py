@@ -85,10 +85,28 @@ def api_dashboard(portfolio: Optional[str] = None):
 
 @app.get("/analytics", response_class=HTMLResponse)
 def analytics(request: Request, portfolio: Optional[str] = None,
-              days: int = 365, benchmark: str = "SPY"):
+              days: int = 365, benchmark: str = "SPY",
+              start: Optional[str] = None, end: Optional[str] = None,
+              currency: Optional[str] = None):
     ctx, base = _base_context(request, "analytics", portfolio)
-    base["data"] = ctx.analytics(days=days, benchmark=benchmark or "SPY")
+    today = date.today()
+    year_start = date(today.year, 1, 1)
+    start_d = _parse_date(start, today) if start else None
+    end_d = _parse_date(end, today) if end else None
+    base["data"] = ctx.analytics(days=days, benchmark=benchmark or "SPY",
+                                 start_date=start_d, end_date=end_d, currency=currency)
+    # Which control is active (drives selector highlight).
+    if start_d or end_d:
+        is_ytd = start_d == year_start and (end_d is None or end_d == today)
+        base["preset"] = "ytd" if is_ytd else "custom"
+    else:
+        base["preset"] = str(days)
     base["days"] = days
+    base["today"] = today.isoformat()
+    base["year_start"] = year_start.isoformat()
+    base["range_start"] = (start_d.isoformat() if start_d
+                           else (base["data"].get("period") or {}).get("start"))
+    base["range_end"] = (end_d.isoformat() if end_d else today.isoformat())
     return templates.TemplateResponse("analytics.html", base)
 
 

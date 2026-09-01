@@ -39,9 +39,19 @@ from ..portfolio.models import PortfolioSnapshot
 class FinancialMetricsCalculator:
     """Calculator for various financial metrics and portfolio analysis."""
 
-    def __init__(self, data_manager: Optional[DataProviderManager] = None):
-        """Initialize metrics calculator."""
+    def __init__(self, data_manager: Optional[DataProviderManager] = None,
+                 market_data_store=None):
+        """Initialize metrics calculator.
+
+        Args:
+            data_manager: Live/cached data provider used to fetch benchmark prices.
+            market_data_store: Optional local price store (MarketDataStore). When
+                the live provider returns nothing (e.g. no network), benchmark
+                prices are read from this cache instead, so benchmark comparison
+                keeps working from locally stored data.
+        """
         self.data_manager = data_manager or DataProviderManager()
+        self.market_data_store = market_data_store
 
     def calculate_time_weighted_return(
         self,
@@ -791,11 +801,37 @@ class FinancialMetricsCalculator:
                             daily_return = (curr_price - prev_price) / prev_price
                             returns.append(daily_return)
 
+            # Fall back to the local price store when the live provider had
+            # nothing (offline, rate-limited, or symbol not covered online).
+            if not prices and self.market_data_store is not None:
+                return self._benchmark_from_store(symbol, start_date, end_date)
+
             return returns, prices
 
         except Exception as e:
             logging.error(f"Error getting benchmark data for {symbol}: {e}")
+            if self.market_data_store is not None:
+                try:
+                    return self._benchmark_from_store(symbol, start_date, end_date)
+                except Exception:  # noqa: BLE001
+                    pass
             return [], {}
+
+    def _benchmark_from_store(
+        self, symbol: str, start_date: date, end_date: date
+    ) -> tuple[List[float], Dict[date, float]]:
+        """Read benchmark prices/returns from the local MarketDataStore cache."""
+        stored = self.market_data_store.get_prices(symbol, start_date, end_date)
+        prices: Dict[date, float] = {}
+        returns: List[float] = []
+        prev_price: Optional[float] = None
+        for d in sorted(stored):
+            curr_price = float(stored[d])
+            prices[d] = curr_price
+            if prev_price is not None and prev_price > 0:
+                returns.append((curr_price - prev_price) / prev_price)
+            prev_price = curr_price
+        return returns, prices
 
     def get_benchmark_returns(
         self, symbol: str, start_date: date, end_date: date

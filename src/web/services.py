@@ -88,7 +88,11 @@ class AppContext:
         market_data_service = MarketDataService(data_provider)
         self.storage = storage
         self.manager = PortfolioManager(storage, market_data_service, data_dir=data_dir)
-        self.metrics = FinancialMetricsCalculator(data_provider)
+        # Give the metrics calculator the local price store so benchmark
+        # comparison works from cached data even with no live providers.
+        self.metrics = FinancialMetricsCalculator(
+            data_provider, market_data_store=self.manager.market_data_store
+        )
 
     def set_online(self, online: bool) -> None:
         """Toggle live data providers (used by explicit price-refresh actions)."""
@@ -250,25 +254,52 @@ class AppContext:
 
     # -- analytics -----------------------------------------------------------
 
-    def analytics(self, days: int = 365, benchmark: str = "SPY") -> Dict[str, Any]:
-        """Performance, risk and (when data allows) benchmark analytics."""
+    def analytics(self, days: int = 365, benchmark: str = "SPY",
+                  start_date: Optional[date] = None, end_date: Optional[date] = None,
+                  currency: Optional[str] = None) -> Dict[str, Any]:
+        """Performance, risk and (when data allows) benchmark analytics.
+
+        An explicit start_date/end_date pair (from the calendar) takes
+        precedence over the `days` preset. `currency` denominates the whole
+        analysis in a chosen currency (defaults to the portfolio base
+        currency); conversion uses cached historical FX rates.
+        """
         pm = self.manager
         portfolio = pm.current_portfolio
         if not portfolio:
             return {"empty": True}
 
         base_ccy = portfolio.base_currency.value
-        end = date.today()
-        start = (end - timedelta(days=days)) if days and days > 0 else self._history_start()
+        # display currency (falls back to base); only override when it differs
+        try:
+            display_ccy = Currency(currency) if currency else portfolio.base_currency
+        except ValueError:
+            display_ccy = portfolio.base_currency
+        target_ccy = display_ccy if display_ccy != portfolio.base_currency else None
+
+        end = end_date or date.today()
+        if start_date:
+            start = start_date
+        elif days and days > 0:
+            start = end - timedelta(days=days)
+        else:
+            start = self._history_start()
+
+        all_currencies = [c.value for c in Currency]
 
         try:
-            df = pm.get_portfolio_history_filtered(start, end, view_mode="all")
+            df = pm.get_portfolio_history_filtered(
+                start, end, view_mode="all", target_currency=target_ccy
+            )
         except Exception:
             df = pd.DataFrame()
 
         if not isinstance(df, pd.DataFrame) or df.empty or "total_value" not in df:
-            return {"empty": False, "base_currency": base_ccy, "no_history": True,
-                    "period": {"days": days}}
+            return {"empty": False, "base_currency": base_ccy,
+                    "display_currency": display_ccy.value, "currencies": all_currencies,
+                    "no_history": True,
+                    "period": {"days": days, "start": start.isoformat(),
+                               "end": end.isoformat()}}
 
         # cash flows for time-weighted returns
         try:
@@ -353,6 +384,8 @@ class AppContext:
             "empty": False,
             "no_history": False,
             "base_currency": base_ccy,
+            "display_currency": display_ccy.value,
+            "currencies": all_currencies,
             "benchmark_symbol": benchmark,
             "offline": self.offline,
             "period": {"days": days, "start": start.isoformat(), "end": end.isoformat()},
@@ -715,26 +748,42 @@ class AppContext:
             return {"empty": True}
         base_ccy = portfolio.base_currency.value
 
+        store = pm.market_data_store
         try:
-            price_count = pm.market_data_store.get_price_count()
+            price_count = store.get_price_count()
         except Exception:
             price_count = None
         try:
-            symbols_tracked = len(pm.market_data_store.get_symbols())
+            symbols_tracked = len(store.get_symbols())
         except Exception:
             symbols_tracked = None
-        try:
-            fresh = pm.market_data_service.freshness
-            freshness_display = fresh.freshness_display
-            is_stale = fresh.is_stale
-        except Exception:
-            freshness_display, is_stale = "Unknown", True
+
+        # Map each position to the symbol its prices are stored under, so we can
+        # report the date of the *actual* most recent stored price (a far more
+        # honest "freshness" signal than a wall-clock last-refresh timestamp).
+        dps_by_symbol = {
+            sym: (getattr(pos.instrument, "data_provider_symbol", None) or sym)
+            for sym, pos in portfolio.positions.items()
+        }
+
+        def _latest_price_date(symbol: str) -> Optional[date]:
+            for candidate in {symbol, dps_by_symbol.get(symbol, symbol)}:
+                try:
+                    latest = store.get_latest_price(candidate)
+                except Exception:
+                    latest = None
+                if latest:
+                    return latest[0]
+            return None
 
         rows = []
+        latest_overall: Optional[date] = None
         for p in pm.get_position_summary():
             fx = _f(p.get("fx_rate")) or 1.0
             price_base = _f(p.get("current_price"))
-            lu = p.get("last_updated")
+            last_date = _latest_price_date(p["symbol"])
+            if last_date and (latest_overall is None or last_date > latest_overall):
+                latest_overall = last_date
             rows.append({
                 "symbol": p["symbol"],
                 "name": p["name"],
@@ -743,9 +792,16 @@ class AppContext:
                 "price_base": price_base,
                 "is_fx": p.get("original_currency") != base_ccy,
                 "has_price": p.get("has_current_price"),
-                "last_updated": lu.isoformat() if hasattr(lu, "isoformat") else None,
+                "last_price_date": last_date.isoformat() if last_date else None,
             })
         rows.sort(key=lambda r: (r["has_price"], r["symbol"]))
+
+        # "Data as of" = newest stored price across the book; stale if we have
+        # nothing within the last week (calendar-based, not refresh-based).
+        data_as_of = latest_overall.isoformat() if latest_overall else None
+        is_stale = (latest_overall is None) or (
+            (date.today() - latest_overall).days > 7
+        )
 
         return {
             "empty": False,
@@ -759,7 +815,7 @@ class AppContext:
                 "positions": len(rows),
                 "price_count": price_count,
                 "symbols_tracked": symbols_tracked,
-                "freshness": freshness_display,
+                "data_as_of": data_as_of,
                 "is_stale": is_stale,
             },
             "prices": rows,

@@ -17,7 +17,11 @@
 
   <div class="flex items-center justify-between mb-5 flex-wrap gap-3">
     <p class="page-sub">Market data, pricing and portfolio settings.</p>
-    <span class="chip {{ 'chip-sell' if data.offline else 'chip-buy' }}">{{ 'Cache-only' if data.offline else 'Online' }}</span>
+    {% if data.stats.data_as_of %}
+    <span class="chip {{ 'chip-sell' if data.stats.is_stale else 'chip-buy' }}">Data as of {{ data.stats.data_as_of }}</span>
+    {% else %}
+    <span class="chip chip-sell">No stored prices</span>
+    {% endif %}
   </div>
 
   <!-- Overview stats -->
@@ -28,8 +32,8 @@
       <span class="metric-value mono">{{ data.stats.positions }}</span></div>
     <div class="card card-tight metric"><span class="metric-label">Prices stored</span>
       <span class="metric-value mono">{{ data.stats.price_count }}</span></div>
-    <div class="card card-tight metric"><span class="metric-label">Freshness</span>
-      <span class="metric-value mono {{ 'neg' if data.stats.is_stale else '' }}">{{ data.stats.freshness or '—' }}</span></div>
+    <div class="card card-tight metric"><span class="metric-label">Data as of</span>
+      <span class="metric-value mono {{ 'neg' if data.stats.is_stale else '' }}">{{ data.stats.data_as_of or '—' }}</span></div>
   </div>
 
   <!-- Refresh actions -->
@@ -37,7 +41,7 @@
     <div class="flex items-center justify-between flex-wrap gap-3">
       <div>
         <div class="section-title mb-1">Fetch market data</div>
-        <p class="hint text-xs">Temporarily goes online to pull the latest prices, then returns to cache-only mode.</p>
+        <p class="hint text-xs">Pulls the latest prices from your data providers into local storage.</p>
       </div>
       <div class="flex items-center gap-2">
         <form method="post" action="/data/refresh">
@@ -61,7 +65,7 @@
       <div class="overflow-x-auto" style="max-height: 520px;">
         <table class="tbl">
           <thead class="sticky-head"><tr>
-            <th>Symbol</th><th>Name</th><th class="num">Price (native)</th><th class="num">Price ({{ data.base_currency }})</th><th class="num">Updated</th>
+            <th>Symbol</th><th>Name</th><th class="num">Price (native)</th><th class="num">Price ({{ data.base_currency }})</th><th class="num">Last price</th>
           </tr></thead>
           <tbody>
             {% for p in data.prices %}
@@ -73,7 +77,7 @@
                 {% else %}<span class="neg text-xs">no price</span>{% endif %}
               </td>
               <td class="num">{% if p.has_price and p.is_fx %}{{ '{:,.2f}'.format(p.price_base) }}{% elif p.has_price %}—{% else %}—{% endif %}</td>
-              <td class="num text-muted text-xs">{{ p.last_updated or '—' }}</td>
+              <td class="num text-muted text-xs">{{ p.last_price_date or '—' }}</td>
             </tr>
             {% endfor %}
             {% if not data.prices %}
