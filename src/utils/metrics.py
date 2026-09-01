@@ -678,6 +678,8 @@ class FinancialMetricsCalculator:
             return 0.0
 
         beta = covariance / benchmark_variance
+        if not np.isfinite(beta):
+            return 0.0
         return float(beta)
 
     def calculate_alpha(
@@ -777,11 +779,21 @@ class FinancialMetricsCalculator:
     def get_benchmark_data(
         self, symbol: str, start_date: date, end_date: date
     ) -> tuple[List[float], Dict[date, float]]:
-        """Get benchmark returns and prices with a single fetch.
+        """Get benchmark returns and prices for the given window.
+
+        When a local price store is wired in, it is the single read path:
+        analysis reads whatever has been persisted and never triggers a live
+        fetch. Populating the benchmark series is a separate, explicit step
+        (see MarketDataStore.ensure_prices / the app's refresh action), keeping
+        fetch decoupled from computation. Callers without a store (CLI/MCP)
+        fall back to fetching from the live provider.
 
         Returns:
             Tuple of (returns list, prices dict)
         """
+        if self.market_data_store is not None:
+            return self._benchmark_from_store(symbol, start_date, end_date)
+
         try:
             price_data = self.data_manager.get_historical_prices(
                 symbol, start_date, end_date
@@ -801,20 +813,10 @@ class FinancialMetricsCalculator:
                             daily_return = (curr_price - prev_price) / prev_price
                             returns.append(daily_return)
 
-            # Fall back to the local price store when the live provider had
-            # nothing (offline, rate-limited, or symbol not covered online).
-            if not prices and self.market_data_store is not None:
-                return self._benchmark_from_store(symbol, start_date, end_date)
-
             return returns, prices
 
         except Exception as e:
             logging.error(f"Error getting benchmark data for {symbol}: {e}")
-            if self.market_data_store is not None:
-                try:
-                    return self._benchmark_from_store(symbol, start_date, end_date)
-                except Exception:  # noqa: BLE001
-                    pass
             return [], {}
 
     def _benchmark_from_store(
@@ -1210,7 +1212,9 @@ class FinancialMetricsCalculator:
             "cvar_5pct": self.calculate_conditional_var(returns, 0.05),
             "calmar_ratio": annualized_return / max_drawdown if max_drawdown > 0 else float("inf"),
             "benchmark_symbol": benchmark_symbol,
-            "benchmark_available": len(benchmark_aligned) > 0,
+            # Comparison metrics (beta/alpha/…) need >=2 aligned points to be
+            # meaningful; the curve itself can still render from benchmark_prices.
+            "benchmark_available": len(benchmark_aligned) >= 2,
             "benchmark_prices": benchmark_prices,
             "days_analyzed": len(df),
             "start_value": float(values[0]),
@@ -1218,7 +1222,7 @@ class FinancialMetricsCalculator:
         }
 
         # Benchmark comparison metrics
-        if len(benchmark_aligned) > 0:
+        if len(benchmark_aligned) >= 2:
             metrics.update({
                 "beta": self.calculate_beta(returns_aligned, benchmark_aligned),
                 "alpha": self.calculate_alpha(returns_aligned, benchmark_aligned, risk_free_rate),

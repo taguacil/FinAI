@@ -50,7 +50,7 @@
         </select>
       </div>
       <div><label class="label">Benchmark</label><input type="text" name="bt_benchmark" value="{{ bt.params.benchmark_symbol }}" class="input mono" /></div>
-      <div><label class="label">Lookback</label><input type="number" name="lookback_days" min="30" step="10" value="{{ bt.params.lookback_days }}" class="input mono" /></div>
+      <div><label class="label">Lookback</label><input type="number" name="lookback_days" min="30" step="1" value="{{ bt.params.lookback_days }}" class="input mono" /></div>
       <div class="flex items-end"><button type="submit" class="btn btn-accent w-full"><i data-lucide="play" class="h-4 w-4"></i> Run</button></div>
     </div>
   </form>

@@ -325,10 +325,12 @@ class AppContext:
             port_cum.append((acc - 1.0) * 100)
         cum_dates = dates[1:1 + len(port_cum)]
 
-        # benchmark cumulative return (%), aligned to the portfolio dates
+        # benchmark cumulative return (%), aligned to the portfolio dates.
+        # The curve renders whenever we have stored benchmark prices; the
+        # comparison metrics (beta/alpha/…) require >=2 aligned points.
         bench_available = bool(m.get("benchmark_available"))
         bench_cum = None
-        if bench_available and m.get("benchmark_prices"):
+        if m.get("benchmark_prices"):
             try:
                 s = pd.Series(m["benchmark_prices"])
                 s.index = pd.to_datetime(list(s.index))
@@ -834,6 +836,28 @@ class AppContext:
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "error": str(exc)}
 
+    def _ensure_benchmark(self, symbol: str = "SPY") -> None:
+        """Populate the benchmark price series into the local store.
+
+        This is the explicit fetch step for the benchmark — kept separate from
+        analytics/backtest, which only ever read from the store. Must be called
+        while providers are online (see refresh_prices).
+        """
+        store = self.manager.market_data_store
+        if store is None:
+            return
+        start = self._history_start()
+        end = date.today()
+
+        def _fetch(sym: str, a: date, b: date):
+            out = []
+            for p in self.data_provider.get_historical_prices(sym, a, b):
+                if p.close_price:
+                    out.append((p.date, Decimal(str(p.close_price))))
+            return out
+
+        store.ensure_prices(symbol, start, end, data_provider=_fetch)
+
     def refresh_prices(self, historical: bool = False) -> Dict[str, Any]:
         """Fetch live prices (temporarily going online), then return to cache-only."""
         pm = self.manager
@@ -844,6 +868,9 @@ class AppContext:
             self.set_online(True)
             if historical:
                 res = pm.update_market_data()
+                # Seed the benchmark series into the store as part of the same
+                # explicit fetch, so analytics/backtest can read it offline.
+                self._ensure_benchmark("SPY")
             else:
                 res = pm.update_current_prices()
             updated = sum(1 for v in (res or {}).values() if v)
