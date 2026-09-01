@@ -150,6 +150,11 @@ class TestDataProviderManager:
 
     def test_get_exchange_rate_caching(self, manager, mock_yahoo_provider):
         """Test exchange rate caching."""
+        # Bypass the persistent FX cache so the in-memory caching path is exercised.
+        manager.fx_cache = Mock()
+        manager.fx_cache.get_current_rate.return_value = None
+        manager.fx_cache.validate_rate.return_value = True
+
         mock_yahoo_provider.get_exchange_rate.return_value = Decimal("0.85")
 
         # First call should hit the provider
@@ -165,6 +170,11 @@ class TestDataProviderManager:
 
     def test_get_exchange_rate_force_refresh(self, manager, mock_yahoo_provider):
         """Test exchange rate retrieval with force refresh."""
+        # Bypass the persistent FX cache so provider calls are observable.
+        manager.fx_cache = Mock()
+        manager.fx_cache.get_current_rate.return_value = None
+        manager.fx_cache.validate_rate.return_value = True
+
         mock_yahoo_provider.get_exchange_rate.return_value = Decimal("0.85")
 
         # First call

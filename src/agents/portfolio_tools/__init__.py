@@ -28,9 +28,11 @@ from .models import (
     SetDataProviderSymbolInput,
     SetMarketPriceInput,
     SetPriceCurrencyInput,
+    SetPriceSeriesInput,
     TransactionItem,
     UpdateHistoricalMarketDataInput,
 )
+from .backtest_tool import BacktestPortfolioTool
 from ._tools import (
     AddTransactionTool,
     AdvancedWhatIfTool,
@@ -60,8 +62,10 @@ from ._tools import (
     SetDataProviderSymbolTool,
     SetMarketPriceTool,
     SetPriceCurrencyTool,
+    SetPriceSeriesTool,
     SimulateWhatIfTool,
     UpdateHistoricalMarketDataTool,
+    create_portfolio_tools,
 )
 
 __all__ = [
@@ -89,11 +93,13 @@ __all__ = [
     "SetDataProviderSymbolInput",
     "SetMarketPriceInput",
     "SetPriceCurrencyInput",
+    "SetPriceSeriesInput",
     "TransactionItem",
     "UpdateHistoricalMarketDataInput",
     # Tools
     "AddTransactionTool",
     "AdvancedWhatIfTool",
+    "BacktestPortfolioTool",
     "BulkAddTransactionsTool",
     "BulkSetMarketPriceTool",
     "CalculatorTool",
@@ -120,6 +126,9 @@ __all__ = [
     "SetDataProviderSymbolTool",
     "SetMarketPriceTool",
     "SetPriceCurrencyTool",
+    "SetPriceSeriesTool",
     "SimulateWhatIfTool",
     "UpdateHistoricalMarketDataTool",
+    # Factory
+    "create_portfolio_tools",
 ]

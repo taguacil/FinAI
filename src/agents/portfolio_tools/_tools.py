@@ -40,6 +40,7 @@ from .models import (
     SetDataProviderSymbolInput,
     SetMarketPriceInput,
     SetPriceCurrencyInput,
+    SetPriceSeriesInput,
     TransactionItem,
     UpdateHistoricalMarketDataInput,
 )
@@ -142,7 +143,7 @@ class AddTransactionTool(BaseTool):
                     missing_fields.append("amount (the monetary value)")
                 if not currency:
                     missing_fields.append("currency (USD, EUR, GBP, etc.)")
-                if not date:
+                if not date and not days_ago:
                     missing_fields.append("date (when did this occur)")
 
                 if missing_fields:
@@ -161,7 +162,7 @@ class AddTransactionTool(BaseTool):
                     missing_fields.append("symbol (which stock paid the dividend)")
                 if amount <= 0:
                     missing_fields.append("amount (the dividend amount)")
-                if not date:
+                if not date and not days_ago:
                     missing_fields.append("date (when was it paid)")
 
                 if missing_fields:
@@ -180,7 +181,7 @@ class AddTransactionTool(BaseTool):
                     missing_fields.append("quantity (how many shares/units)")
                 if price <= 0:
                     missing_fields.append("price (price per share/unit)")
-                if not date:
+                if not date and not days_ago:
                     missing_fields.append("date (when did this transaction occur)")
 
                 if missing_fields:
@@ -905,6 +906,7 @@ class AdvancedWhatIfTool(BaseTool):
         market_volatility: float = 0.20,
         recurring_deposits: float = 0.0,
         stress_test: bool = False,
+        random_seed: int = 42,
     ) -> str:
         """Run advanced what-if analysis with portfolio modifications.
 
@@ -922,6 +924,9 @@ class AdvancedWhatIfTool(BaseTool):
             market_volatility: Market volatility (as decimal, e.g., 0.20 for 20%)
             recurring_deposits: Monthly recurring deposits in USD
             stress_test: Whether to apply stress testing conditions
+            random_seed: Seed for the Monte Carlo simulation. The same seed with the
+                same inputs reproduces identical results; use a different seed to draw
+                a fresh set of random paths.
         """
         try:
             from src.portfolio.scenarios import (
@@ -956,7 +961,7 @@ class AdvancedWhatIfTool(BaseTool):
             )
 
             # Run simulation
-            engine = PortfolioScenarioEngine(random_seed=42)
+            engine = PortfolioScenarioEngine(random_seed=random_seed)
             result = engine.run_scenario_simulation(modified_snapshot, scenario_config)
 
             # Format results
@@ -1327,6 +1332,7 @@ class HypotheticalPositionTool(BaseTool):
         investment_amount: str = "",
         scenario: str = "likely",
         time_horizon: float = 1.0,
+        random_seed: int = 42,
     ) -> str:
         """Test a hypothetical position in the portfolio.
 
@@ -1337,6 +1343,8 @@ class HypotheticalPositionTool(BaseTool):
             investment_amount: Alternative to quantity - dollar amount to invest (e.g., "$5000")
             scenario: Market scenario to test (optimistic, likely, pessimistic, stress)
             time_horizon: Years to project the investment (0.5 to 5.0)
+            random_seed: Seed for the Monte Carlo simulation; same seed + inputs
+                reproduces identical results.
         """
         try:
             if not self.portfolio_manager.current_portfolio:
@@ -1398,7 +1406,8 @@ class HypotheticalPositionTool(BaseTool):
                 monte_carlo_runs=1000,
                 add_positions=add_position_str,
                 market_return=params["market_return"],
-                market_volatility=params["market_volatility"]
+                market_volatility=params["market_volatility"],
+                random_seed=random_seed,
             )
 
             # Add hypothetical-specific formatting
@@ -4309,13 +4318,16 @@ class InterpolatePricesTool(BaseTool):
     - Finds the nearest available price before and after the date range
     - Calculates daily price change using linear interpolation
     - Fills in all missing dates between the boundary prices
-    - Skips dates that already have prices (won't overwrite existing data)
+    - By default skips dates that already have prices (won't overwrite existing data)
+    - Set overwrite=True to recompute and REPLACE every date in the range (repairs
+      a range corrupted by stale interpolated rows)
 
     Parameters:
     - symbols: Comma-separated list of symbols (e.g., "GLENCORE_2028,BAYER_2026")
               If not provided, interpolates all current portfolio positions
     - start_date: Start of date range to fill (YYYY-MM-DD)
     - end_date: End of date range to fill (YYYY-MM-DD)
+    - overwrite: If True, replace existing prices in the range (default False)
 
     Example:
         interpolate_prices(symbols="GLENCORE_2028,BAYER_2026", start_date="2026-02-01", end_date="2026-02-20")
@@ -4332,6 +4344,7 @@ class InterpolatePricesTool(BaseTool):
         start_date: str,
         end_date: str,
         symbols: Optional[str] = None,
+        overwrite: bool = False,
     ) -> str:
         """Execute price interpolation."""
         from datetime import datetime as dt
@@ -4370,7 +4383,7 @@ class InterpolatePricesTool(BaseTool):
 
             for symbol in symbol_list:
                 try:
-                    count = market_data_store.interpolate_prices(symbol, start, end)
+                    count = market_data_store.interpolate_prices(symbol, start, end, overwrite=overwrite)
                     if count > 0:
                         results.append(f"  • {symbol}: {count} prices interpolated")
                         total_interpolated += count
@@ -4383,6 +4396,7 @@ class InterpolatePricesTool(BaseTool):
             lines = [
                 "📊 **Price Interpolation Results**",
                 f"📅 Date range: {start_date} to {end_date}",
+                f"♻️ Mode: {'overwrite (existing prices replaced)' if overwrite else 'fill-only (existing prices kept)'}",
                 f"🔢 Total interpolated: {total_interpolated} prices",
                 "",
             ]
@@ -4400,3 +4414,203 @@ class InterpolatePricesTool(BaseTool):
 
         except Exception as e:
             return f"❌ Error interpolating prices: {str(e)}"
+
+
+class SetPriceSeriesTool(BaseTool):
+    """Tool for building a full daily price series from a handful of anchor points."""
+
+    name: str = "set_price_series"
+    description: str = """Build a complete daily price series for one instrument from a few known anchor points.
+
+    This is the preferred tool for backfilling illiquid instruments (bonds, CLNs, structured
+    notes, reverse convertibles, funds, tracker certificates) whose prices you read off a chart.
+
+    How it works:
+    - You supply a handful of (date, value) anchors read from a chart.
+    - The tool linearly interpolates a value for EVERY calendar day between the first and last
+      anchor.
+    - It OVERWRITES any existing prices in that range (so it cannot leave stale rows behind — this
+      avoids the corruption that plain interpolate_prices can cause when old rows already exist).
+
+    Parameters:
+    - symbol: The instrument symbol.
+    - anchors: Known points as "YYYY-MM-DD:value,YYYY-MM-DD:value,..." (at least 2, any order).
+    - currency: Currency of the values (converted to native if different). Defaults to native.
+    - as_percent_of_par: If True, values are percent-of-par quotes and are divided by 100 before
+      storage (e.g. 97.43 → 0.9743). Use for bonds / CLNs / notes / reverse convertibles.
+
+    Notes:
+    - The series spans exactly first-anchor → last-anchor. For a position bought after the window
+      start, make the buy date the first anchor at par (e.g. "2026-04-24:100" with
+      as_percent_of_par=True). To pin today's value to a statement, make it the last anchor.
+
+    Examples:
+    - Bond from chart (percent of par):
+      set_price_series(symbol="PHILLIPS_2035", anchors="2026-03-16:99.5,2026-03-27:97.0,2026-09-01:97.43", currency="USD", as_percent_of_par=True)
+    - Fund in absolute price:
+      set_price_series(symbol="VTEQ_SWISS", anchors="2026-03-16:180,2026-07-05:197,2026-09-01:188.87", currency="CHF")
+    """
+    args_schema: type[BaseModel] = SetPriceSeriesInput
+    portfolio_manager: Optional[PortfolioManager] = None
+
+    def __init__(self, portfolio_manager: PortfolioManager):
+        super().__init__()
+        self.portfolio_manager = portfolio_manager
+
+    def _run(
+        self,
+        symbol: str,
+        anchors: str,
+        currency: Optional[str] = None,
+        as_percent_of_par: bool = False,
+    ) -> str:
+        """Build and store a daily price series from anchor points."""
+        from datetime import datetime as dt
+        from ...portfolio.models import Currency as CurrencyEnum
+
+        try:
+            if not self.portfolio_manager.current_portfolio:
+                return "❌ No portfolio loaded."
+
+            symbol = symbol.upper().strip()
+
+            # Parse currency if provided
+            price_currency = None
+            if currency:
+                try:
+                    price_currency = CurrencyEnum(currency.upper())
+                except ValueError:
+                    valid = [c.value for c in CurrencyEnum]
+                    return f"❌ Invalid currency '{currency}'. Valid options: {', '.join(valid)}"
+
+            # Parse anchors: "YYYY-MM-DD:value,..."
+            parsed: list[tuple[date, Decimal]] = []
+            errors: list[str] = []
+            divisor = Decimal("100") if as_percent_of_par else Decimal("1")
+
+            for raw in anchors.split(","):
+                raw = raw.strip()
+                if not raw:
+                    continue
+                if ":" not in raw:
+                    errors.append(f"Invalid anchor '{raw}' - expected 'YYYY-MM-DD:value'")
+                    continue
+                date_str, value_str = raw.split(":", 1)
+                try:
+                    anchor_date = dt.strptime(date_str.strip(), "%Y-%m-%d").date()
+                except ValueError:
+                    errors.append(f"Invalid date '{date_str.strip()}' - use YYYY-MM-DD")
+                    continue
+                try:
+                    value = Decimal(value_str.strip()) / divisor
+                    if value <= 0:
+                        errors.append(f"Invalid value '{value_str.strip()}' - must be positive")
+                        continue
+                except Exception:
+                    errors.append(f"Invalid value '{value_str.strip()}' - must be a number")
+                    continue
+                parsed.append((anchor_date, value))
+
+            if len(parsed) < 2:
+                msg = "❌ Need at least 2 valid anchor points to build a series."
+                if errors:
+                    msg += "\nErrors:\n" + "\n".join(f"• {e}" for e in errors)
+                return msg
+
+            # Sort by date and drop duplicate dates (last one wins)
+            anchor_map = {}
+            for anchor_date, value in parsed:
+                anchor_map[anchor_date] = value
+            anchors_sorted = sorted(anchor_map.items())
+
+            # Piecewise-linear daily fill between consecutive anchors (inclusive)
+            series: dict[date, Decimal] = {}
+            for (d0, v0), (d1, v1) in zip(anchors_sorted, anchors_sorted[1:]):
+                span = (d1 - d0).days
+                if span <= 0:
+                    continue
+                step = (v1 - v0) / Decimal(str(span))
+                for i in range(span + 1):
+                    series[d0 + timedelta(days=i)] = (v0 + step * Decimal(str(i))).quantize(Decimal("0.000001"))
+
+            if not series:
+                return "❌ Could not build a series (anchors did not span any days)."
+
+            # Resolve the instrument's native currency (matches the manager's rule).
+            position = self.portfolio_manager.current_portfolio.positions.get(symbol)
+            is_sold_instrument = position is None
+            if position is not None:
+                native_currency = position.instrument.currency
+            else:
+                native_currency = self.portfolio_manager.current_portfolio.base_currency
+
+            # Percent-of-par quotes are dimensionless ratios: FX conversion would
+            # corrupt them, so it is deliberately skipped. Absolute prices quoted
+            # in a non-native currency are converted per-day at that day's rate.
+            needs_fx = (
+                price_currency is not None
+                and price_currency != native_currency
+                and not as_percent_of_par
+            )
+            fx_skipped_for_par = (
+                as_percent_of_par
+                and price_currency is not None
+                and price_currency != native_currency
+            )
+
+            # Build the batch (values in native currency), converting where needed.
+            entries: list[tuple[str, date, Decimal]] = []
+            failed_dates: list[str] = []
+            for price_date in sorted(series):
+                value = series[price_date]
+                if needs_fx:
+                    fx_rate = self.portfolio_manager._get_exchange_rate_at_date(
+                        price_currency, native_currency, price_date
+                    )
+                    if fx_rate is None:
+                        fx_rate = self.portfolio_manager._get_exchange_rate(
+                            price_currency, native_currency
+                        )
+                    if fx_rate is None:
+                        failed_dates.append(str(price_date))
+                        continue
+                    value = value * fx_rate
+                entries.append((symbol, price_date, value))
+
+            # Single batched write + one cache invalidation (was O(days) before).
+            success_count = self.portfolio_manager.set_positions_prices_batch(
+                entries, source="anchor_interpolated"
+            )
+
+            first_day = min(series)
+            last_day = max(series)
+            par_note = " (percent-of-par ÷100)" if as_percent_of_par else ""
+            currency_note = f" (currency: {price_currency.value})" if price_currency else ""
+            name = position.instrument.name if position else "sold instrument"
+            lines = [
+                f"✅ Built daily price series for {symbol} ({name}):",
+                f"• Anchors used: {len(anchors_sorted)}{par_note}",
+                f"• Days written: {success_count}{currency_note}",
+                f"• Date range: {first_day} to {last_day}",
+                "• Existing prices in range were overwritten (source: anchor_interpolated)",
+            ]
+            if fx_skipped_for_par:
+                lines.append(
+                    f"• Note: '{price_currency.value}' ignored for FX — percent-of-par "
+                    "values are dimensionless ratios and stored without conversion"
+                )
+            if is_sold_instrument:
+                lines.append("• Note: sold instrument - only historical market data entries were updated")
+            if failed_dates:
+                lines.append(f"• Failed dates ({len(failed_dates)}): {', '.join(failed_dates[:10])}"
+                             + (" ..." if len(failed_dates) > 10 else ""))
+            if errors:
+                lines.append("\n⚠️ Anchor parsing warnings:")
+                lines.extend(f"• {e}" for e in errors[:5])
+                if len(errors) > 5:
+                    lines.append(f"  ... and {len(errors) - 5} more")
+
+            return "\n".join(lines)
+
+        except Exception as e:
+            return f"❌ Error building price series: {str(e)}"

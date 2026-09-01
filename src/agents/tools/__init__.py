@@ -29,6 +29,7 @@ from ..portfolio_tools import (
     SetMarketPriceTool,
     SimulateWhatIfTool,
     UpdateHistoricalMarketDataTool,
+    create_portfolio_tools,
 )
 
 # Re-export market data tools
@@ -66,6 +67,7 @@ __all__ = [
     "SetMarketPriceTool",
     "SimulateWhatIfTool",
     "UpdateHistoricalMarketDataTool",
+    "create_portfolio_tools",
     # Market data tools
     "GetPriceHistoryTool",
     "GetFXRateTool",

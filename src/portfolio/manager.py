@@ -451,6 +451,7 @@ class PortfolioManager:
         target_date: Optional[date] = None,
         update_current: bool = True,
         currency: Optional[Currency] = None,
+        source: str = "manual",
     ) -> bool:
         """Set a custom/manual price for a position on a specific date.
 
@@ -468,6 +469,8 @@ class PortfolioManager:
             currency: The currency of the price being set. If different from the
                      instrument's native currency, the price will be converted.
                      Defaults to the instrument's currency if not specified.
+            source: Origin tag stored with the price (e.g. "manual",
+                    "anchor_interpolated"). Defaults to "manual".
 
         Returns:
             True if successful, False otherwise
@@ -520,7 +523,7 @@ class PortfolioManager:
                 price_date=target_date,
                 price=final_price,
                 currency=instrument_currency,
-                source="manual",
+                source=source,
             )
 
             if not success:
@@ -548,13 +551,22 @@ class PortfolioManager:
     def set_positions_prices_batch(
         self,
         entries: List[Tuple[str, date, Decimal]],
+        source: str = "manual_batch",
     ) -> int:
         """Set prices for multiple positions/symbols in a single batch operation.
 
-        This is more efficient than calling set_position_price multiple times.
+        This is more efficient than calling set_position_price multiple times: it
+        writes all rows in one MarketDataStore transaction and invalidates the
+        portfolio-history cache once, rather than per row.
+
+        Prices are stored as-is in each symbol's native currency (no FX
+        conversion is applied here); pre-convert the values before calling if
+        they are quoted in a different currency.
 
         Args:
             entries: List of (symbol, date, price) tuples
+            source: Origin tag stored with each price (e.g. "manual_batch",
+                "anchor_interpolated").
 
         Returns:
             Number of prices successfully stored
@@ -590,7 +602,7 @@ class PortfolioManager:
                     date=price_date,
                     price=price,
                     currency=currency,
-                    source="manual_batch",
+                    source=source,
                 ))
 
             # Batch store prices in MarketDataStore

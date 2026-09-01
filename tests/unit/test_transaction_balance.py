@@ -6,6 +6,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from src.data_providers.manager import DataProviderManager
 from src.portfolio.manager import PortfolioManager
 from src.portfolio.models import (
     Currency,
@@ -33,7 +34,7 @@ class TestTransactionCurrentBalance:
         # Mock the dependencies
         mock_storage = Mock()
         mock_storage.save_portfolio = Mock()
-        mock_data_manager = Mock()
+        mock_data_manager = Mock(spec=DataProviderManager)
         mock_data_manager.get_instrument_info = Mock(return_value=None)
 
         manager = PortfolioManager(storage=mock_storage, data_manager=mock_data_manager)
@@ -68,7 +69,7 @@ class TestTransactionCurrentBalance:
         # Mock the dependencies
         mock_storage = Mock()
         mock_storage.save_portfolio = Mock()
-        mock_data_manager = Mock()
+        mock_data_manager = Mock(spec=DataProviderManager)
         mock_data_manager.get_instrument_info = Mock(return_value=None)
 
         manager = PortfolioManager(storage=mock_storage, data_manager=mock_data_manager)
@@ -106,7 +107,7 @@ class TestTransactionCurrentBalance:
         # Mock the dependencies
         mock_storage = Mock()
         mock_storage.save_portfolio = Mock()
-        mock_data_manager = Mock()
+        mock_data_manager = Mock(spec=DataProviderManager)
         mock_data_manager.get_instrument_info = Mock(return_value=None)
 
         manager = PortfolioManager(storage=mock_storage, data_manager=mock_data_manager)
@@ -143,7 +144,7 @@ class TestTransactionCurrentBalance:
         # Mock the dependencies
         mock_storage = Mock()
         mock_storage.save_portfolio = Mock()
-        mock_data_manager = Mock()
+        mock_data_manager = Mock(spec=DataProviderManager)
         mock_data_manager.get_instrument_info = Mock(return_value=None)
 
         manager = PortfolioManager(storage=mock_storage, data_manager=mock_data_manager)
@@ -191,7 +192,7 @@ class TestTransactionCurrentBalance:
         # Mock the dependencies
         mock_storage = Mock()
         mock_storage.save_portfolio = Mock()
-        mock_data_manager = Mock()
+        mock_data_manager = Mock(spec=DataProviderManager)
         mock_data_manager.get_instrument_info = Mock(return_value=None)
 
         manager = PortfolioManager(storage=mock_storage, data_manager=mock_data_manager)
@@ -226,7 +227,7 @@ class TestTransactionCurrentBalance:
         # Mock the dependencies
         mock_storage = Mock()
         mock_storage.save_portfolio = Mock()
-        mock_data_manager = Mock()
+        mock_data_manager = Mock(spec=DataProviderManager)
         mock_data_manager.get_instrument_info = Mock(return_value=None)
 
         manager = PortfolioManager(storage=mock_storage, data_manager=mock_data_manager)
@@ -266,7 +267,7 @@ class TestTransactionCurrentBalance:
         # Mock the dependencies
         mock_storage = Mock()
         mock_storage.save_portfolio = Mock()
-        mock_data_manager = Mock()
+        mock_data_manager = Mock(spec=DataProviderManager)
         mock_data_manager.get_instrument_info = Mock(return_value=None)
 
         manager = PortfolioManager(storage=mock_storage, data_manager=mock_data_manager)
@@ -305,7 +306,7 @@ class TestTransactionCurrentBalance:
         # Mock the dependencies
         mock_storage = Mock()
         mock_storage.save_portfolio = Mock()
-        mock_data_manager = Mock()
+        mock_data_manager = Mock(spec=DataProviderManager)
         mock_data_manager.get_instrument_info = Mock(return_value=None)
 
         manager = PortfolioManager(storage=mock_storage, data_manager=mock_data_manager)
@@ -350,7 +351,7 @@ class TestTransactionCurrentBalance:
         # Mock the dependencies
         mock_storage = Mock()
         mock_storage.save_portfolio = Mock()
-        mock_data_manager = Mock()
+        mock_data_manager = Mock(spec=DataProviderManager)
         mock_data_manager.get_instrument_info = Mock(return_value=None)
 
         manager = PortfolioManager(storage=mock_storage, data_manager=mock_data_manager)
@@ -387,7 +388,7 @@ class TestTransactionCurrentBalance:
         # Mock the dependencies
         mock_storage = Mock()
         mock_storage.save_portfolio = Mock()
-        mock_data_manager = Mock()
+        mock_data_manager = Mock(spec=DataProviderManager)
         mock_data_manager.get_instrument_info = Mock(return_value=None)
 
         manager = PortfolioManager(storage=mock_storage, data_manager=mock_data_manager)
@@ -449,7 +450,7 @@ class TestTransactionCurrentBalance:
         # Mock the dependencies
         mock_storage = Mock()
         mock_storage.save_portfolio = Mock()
-        mock_data_manager = Mock()
+        mock_data_manager = Mock(spec=DataProviderManager)
         mock_data_manager.get_instrument_info = Mock(return_value=None)
 
         manager = PortfolioManager(storage=mock_storage, data_manager=mock_data_manager)
@@ -498,7 +499,7 @@ class TestTransactionCurrentBalance:
         # Mock the dependencies
         mock_storage = Mock()
         mock_storage.save_portfolio = Mock()
-        mock_data_manager = Mock()
+        mock_data_manager = Mock(spec=DataProviderManager)
         mock_data_manager.get_instrument_info = Mock(return_value=None)
 
         manager = PortfolioManager(storage=mock_storage, data_manager=mock_data_manager)

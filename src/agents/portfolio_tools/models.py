@@ -417,3 +417,28 @@ class InterpolatePricesInput(BaseModel):
     end_date: str = Field(
         description="End date of the range to fill in YYYY-MM-DD format"
     )
+    overwrite: bool = Field(
+        default=False,
+        description="If True, recompute and replace ALL dates in the range, including dates that already have prices. Use to repair a range corrupted by stale interpolated rows. Default False (only fill empty dates)."
+    )
+
+
+class SetPriceSeriesInput(BaseModel):
+    """Input for building a daily price series from anchor points."""
+
+    symbol: str = Field(
+        description="Instrument symbol (e.g., VTEQ_SWISS, CLN_META)."
+    )
+    anchors: str = Field(
+        description="""Known price anchor points as "YYYY-MM-DD:value,YYYY-MM-DD:value,..." (at least 2, any order).
+        The tool linearly interpolates a value for EVERY calendar day between the first and last anchor and
+        OVERWRITES any existing prices in that range. Example: "2026-03-16:99.5,2026-03-27:97.0,2026-09-01:97.43"."""
+    )
+    currency: Optional[str] = Field(
+        default=None,
+        description="Currency of the anchor values (e.g., USD, CHF, EUR). Converted to the instrument's native currency if different. Defaults to native currency."
+    )
+    as_percent_of_par: bool = Field(
+        default=False,
+        description="If True, anchor values are percent-of-par quotes (e.g., 97.43 for 97.43%) and are divided by 100 before storage (→ 0.9743). Use for bonds, CLNs, notes, and reverse convertibles."
+    )

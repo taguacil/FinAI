@@ -1,12 +1,16 @@
 """
 MCP (Model Context Protocol) server exposing all portfolio agent tools.
 
-Supports two transports:
-  - SSE (HTTP, default): for Cursor and other HTTP-based MCP clients
+Supports three transports:
+  - Streamable HTTP (recommended for HTTP clients): modern MCP transport, /mcp endpoint
+  - SSE (HTTP, legacy/default): for older HTTP-based MCP clients, /sse endpoint
   - stdio: for Claude Desktop and other process-based MCP clients
 
 Usage:
-    # SSE mode (default) - starts HTTP server
+    # Streamable HTTP mode - modern HTTP transport with Bearer auth
+    uv run python -m src.mcp_server --http
+
+    # SSE mode (default) - legacy HTTP server
     uv run python -m src.mcp_server
 
     # stdio mode - for Claude Desktop
@@ -15,9 +19,9 @@ Usage:
 Environment variables:
     PORTFOLIO_NAME - Name of portfolio to load on startup (default: first available)
     DATA_DIR - Data directory path (default: "data")
-    FINAI_API_KEY - API key for Bearer token auth (required for SSE mode)
-    HOST - Server host (default: "localhost", SSE mode only)
-    PORT - Server port (default: 8000, SSE mode only)
+    FINAI_API_KEY - API key for Bearer token auth (required for HTTP/SSE modes)
+    HOST - Server host (default: "localhost", HTTP/SSE modes only)
+    PORT - Server port (default: 8000, HTTP/SSE modes only)
 """
 
 import logging
@@ -30,16 +34,11 @@ from mcp.server.fastmcp import FastMCP
 # Add project root to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.data_providers.manager import DataProviderManager
-from src.portfolio.manager import PortfolioManager
-from src.portfolio.storage import FileBasedStorage
-from src.services.market_data_service import MarketDataService
-from src.utils.metrics import FinancialMetricsCalculator
-
 # Tool classes
 from src.agents.portfolio_tools import (
     AddTransactionTool,
     AdvancedWhatIfTool,
+    BacktestPortfolioTool,
     BulkAddTransactionsTool,
     BulkSetMarketPriceTool,
     CalculatorTool,
@@ -51,9 +50,9 @@ from src.agents.portfolio_tools import (
     GetPortfolioMetricsTool,
     GetPortfolioSnapshotTool,
     GetPortfolioSummaryTool,
-    GetYTDPerformanceTool,
     GetTransactionHistoryTool,
     GetTransactionsTool,
+    GetYTDPerformanceTool,
     HypotheticalPositionTool,
     IngestPdfTool,
     InterpolatePricesTool,
@@ -64,8 +63,9 @@ from src.agents.portfolio_tools import (
     SearchCompanyTool,
     SearchInstrumentTool,
     SetDataProviderSymbolTool,
-    SetPriceCurrencyTool,
     SetMarketPriceTool,
+    SetPriceCurrencyTool,
+    SetPriceSeriesTool,
     SimulateWhatIfTool,
     UpdateHistoricalMarketDataTool,
 )
@@ -78,6 +78,12 @@ from src.agents.tools.market_data_tools import (
     GetPriceHistoryTool,
     RefreshDataTool,
 )
+from src.data_providers.manager import DataProviderManager
+from src.portfolio.manager import PortfolioManager
+from src.portfolio.simulation_store import SimulationStore
+from src.portfolio.storage import FileBasedStorage
+from src.services.market_data_service import MarketDataService
+from src.utils.metrics import FinancialMetricsCalculator
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -93,6 +99,7 @@ data_manager = DataProviderManager()
 market_data_service = MarketDataService(data_manager)
 portfolio_manager = PortfolioManager(storage, market_data_service, data_dir=DATA_DIR)
 metrics_calculator = FinancialMetricsCalculator(data_manager)
+simulation_store = SimulationStore(DATA_DIR)
 
 # Load portfolio
 available = storage.list_portfolios()
@@ -127,6 +134,7 @@ _get_portfolio_metrics = GetPortfolioMetricsTool(portfolio_manager, metrics_calc
 _get_transaction_history = GetTransactionHistoryTool(portfolio_manager)
 _set_market_price = SetMarketPriceTool(portfolio_manager)
 _bulk_set_market_price = BulkSetMarketPriceTool(portfolio_manager)
+_set_price_series = SetPriceSeriesTool(portfolio_manager)
 _fetch_and_update_prices = FetchAndUpdatePricesTool(portfolio_manager, data_manager)
 _set_data_provider_symbol = SetDataProviderSymbolTool(portfolio_manager)
 _set_price_currency = SetPriceCurrencyTool(portfolio_manager)
@@ -145,6 +153,9 @@ _update_historical_market_data = UpdateHistoricalMarketDataTool(portfolio_manage
 _get_ytd_performance = GetYTDPerformanceTool(portfolio_manager)
 _interpolate_prices = InterpolatePricesTool(portfolio_manager)
 _get_ma_signal = GetMovingAverageSignalTool(portfolio_manager.market_data_store)
+_backtest_portfolio = BacktestPortfolioTool(
+    portfolio_manager, data_manager, metrics_calculator
+)
 
 # --- Create MCP server ---
 mcp = FastMCP("FinAI Portfolio")
@@ -159,7 +170,9 @@ mcp = FastMCP("FinAI Portfolio")
 def portfolio_context() -> str:
     """Current portfolio context including positions, balances, and value."""
     if not portfolio_manager.current_portfolio:
-        return "No portfolio loaded. Use list_portfolios and select_portfolio to load one."
+        return (
+            "No portfolio loaded. Use list_portfolios and select_portfolio to load one."
+        )
     p = portfolio_manager.current_portfolio
     lines = [
         f"Portfolio: {p.name}",
@@ -267,10 +280,14 @@ def list_portfolios() -> str:
         portfolio = storage.load_portfolio(pid)
         if portfolio:
             name = portfolio.name or pid
-            active = " (active)" if (
-                portfolio_manager.current_portfolio
-                and portfolio_manager.current_portfolio.id == pid
-            ) else ""
+            active = (
+                " (active)"
+                if (
+                    portfolio_manager.current_portfolio
+                    and portfolio_manager.current_portfolio.id == pid
+                )
+                else ""
+            )
             lines.append(f"- {pid}: {name}{active}")
         else:
             lines.append(f"- {pid}")
@@ -487,7 +504,9 @@ def get_portfolio_summary(include_metrics: bool = True) -> str:
 
 
 @mcp.tool()
-def get_portfolio_snapshot(target_date: str, include_local_currency: bool = False) -> str:
+def get_portfolio_snapshot(
+    target_date: str, include_local_currency: bool = False
+) -> str:
     """Get portfolio positions, cash balances, and total value at a specific historical date.
 
     Args:
@@ -550,7 +569,12 @@ def get_transaction_history(days: int = 30) -> str:
 
 
 @mcp.tool()
-def get_portfolio_metrics(days: int = 365, benchmark: str = "SPY", start_date: str = None, end_date: str = None) -> str:
+def get_portfolio_metrics(
+    days: int = 365,
+    benchmark: str = "SPY",
+    start_date: str = None,
+    end_date: str = None,
+) -> str:
     """Calculate detailed portfolio performance metrics including returns, volatility, Sharpe ratio.
 
     Args:
@@ -559,7 +583,9 @@ def get_portfolio_metrics(days: int = 365, benchmark: str = "SPY", start_date: s
         start_date: Optional start date in YYYY-MM-DD format. When provided, overrides 'days'.
         end_date: Optional end date in YYYY-MM-DD format (defaults to today when start_date is set).
     """
-    return _get_portfolio_metrics._run(days=days, benchmark=benchmark, start_date=start_date, end_date=end_date)
+    return _get_portfolio_metrics._run(
+        days=days, benchmark=benchmark, start_date=start_date, end_date=end_date
+    )
 
 
 # =====================================================================
@@ -623,7 +649,9 @@ def set_market_price(
 
 
 @mcp.tool()
-def bulk_set_market_price(prices: str, symbol: Optional[str] = None, currency: Optional[str] = None) -> str:
+def bulk_set_market_price(
+    prices: str, symbol: Optional[str] = None, currency: Optional[str] = None
+) -> str:
     """Set market prices for an instrument across multiple dates at once.
 
     Use for entering historical price data manually when market data isn't available.
@@ -905,6 +933,7 @@ def interpolate_prices(
     start_date: str,
     end_date: str,
     symbols: Optional[str] = None,
+    overwrite: bool = False,
 ) -> str:
     """Fill in missing market prices using linear interpolation between known values.
 
@@ -917,24 +946,115 @@ def interpolate_prices(
     - Finds the nearest available price before and after the date range
     - Calculates daily price change using linear interpolation
     - Fills in all missing dates between the boundary prices
-    - Skips dates that already have prices (won't overwrite existing data)
+    - By default skips dates that already have prices (won't overwrite existing data)
+    - With overwrite=True, recomputes and REPLACES every date in the range (use this
+      to repair a range corrupted by stale interpolated rows)
+
+    Note: For manual chart-based backfills of illiquid instruments, prefer
+    set_price_series, which builds a full daily curve from multiple anchor points and
+    always overwrites the range.
 
     Args:
         start_date: Start of date range to fill (YYYY-MM-DD)
         end_date: End of date range to fill (YYYY-MM-DD)
         symbols: Comma-separated list of symbols (e.g., "GLENCORE_2028,BAYER_2026").
                  If not provided, interpolates all current portfolio positions.
+        overwrite: If True, replace existing prices in the range instead of only
+                   filling empty dates. Default False.
     """
     return _interpolate_prices._run(
         start_date=start_date,
         end_date=end_date,
         symbols=symbols,
+        overwrite=overwrite,
+    )
+
+
+@mcp.tool()
+def set_price_series(
+    symbol: str,
+    anchors: str,
+    currency: Optional[str] = None,
+    as_percent_of_par: bool = False,
+) -> str:
+    """Build a complete daily price series for one instrument from a few anchor points.
+
+    Preferred tool for backfilling illiquid instruments (bonds, CLNs, structured notes,
+    reverse convertibles, funds, tracker certificates) whose prices you read off a chart.
+
+    How it works:
+    - You supply a handful of (date, value) anchors read from the chart.
+    - It linearly interpolates a value for EVERY calendar day between the first and last
+      anchor.
+    - It OVERWRITES any existing prices in that range, so it cannot leave stale rows
+      behind (avoids the corruption plain interpolate_prices can cause over old data).
+
+    IMPORTANT - Percent of par:
+    For bonds / CLNs / notes / reverse convertibles quoted as a percentage of par, pass
+    as_percent_of_par=True and give values like 97.43 (for 97.43%); they are divided by
+    100 before storage (→ 0.9743). For funds/certificates priced absolutely, leave it
+    False and pass the raw price.
+
+    Tips:
+    - The series spans exactly first-anchor → last-anchor. For a position bought after
+      the window start, make the buy date the first anchor at par (e.g.
+      "2026-04-24:100" with as_percent_of_par=True).
+    - To pin today's value to a statement, make it the last anchor.
+
+    Args:
+        symbol: The instrument symbol.
+        anchors: "YYYY-MM-DD:value,YYYY-MM-DD:value,..." (at least 2, any order).
+        currency: Currency of the values (converted to native if different).
+                  Defaults to the instrument's native currency.
+        as_percent_of_par: If True, divide values by 100 before storage.
+    """
+    return _set_price_series._run(
+        symbol=symbol,
+        anchors=anchors,
+        currency=currency,
+        as_percent_of_par=as_percent_of_par,
     )
 
 
 # =====================================================================
 # Scenario & Optimization Tools
 # =====================================================================
+
+
+def _record_simulation(
+    tool: str,
+    inputs: dict,
+    output: str,
+    random_seed: Optional[int] = None,
+) -> str:
+    """Persist a simulation run and return a footer note to append to the output.
+
+    Successful runs are saved under data/simulations/ so they can be re-checked
+    later via list_simulations / get_simulation. Failed runs (error output) are
+    not persisted. Never raises: a storage failure just returns an empty footer.
+
+    Error outputs are detected by the leading ``❌`` marker that every tool uses
+    for failures (tolerating leading whitespace/newlines). Empty output is also
+    treated as a non-persistable failure.
+    """
+    if not output or not output.strip():
+        return ""
+    if output.lstrip().startswith("❌"):
+        return ""
+    try:
+        p = portfolio_manager.current_portfolio
+        sim_id = simulation_store.save(
+            tool=tool,
+            inputs=inputs,
+            output=output,
+            portfolio_id=p.id if p else None,
+            portfolio_name=(p.name if p else None),
+            random_seed=random_seed,
+        )
+        return f"\n\n💾 Saved as simulation `{sim_id}` — re-check later with get_simulation."
+    except Exception as e:  # pragma: no cover - best-effort persistence
+        logger.warning(f"Failed to save simulation ({tool}): {e}")
+        return ""
 
 
 @mcp.tool()
@@ -952,11 +1072,21 @@ def simulate_what_if(
         exclude_symbols: Comma-separated symbols to exclude (e.g., "AAPL,TSLA")
         exclude_txn_ids: Comma-separated transaction IDs to exclude
     """
-    return _simulate_what_if._run(
+    output = _simulate_what_if._run(
         start=start,
         end=end,
         exclude_symbols=exclude_symbols,
         exclude_txn_ids=exclude_txn_ids,
+    )
+    return output + _record_simulation(
+        "simulate_what_if",
+        {
+            "start": start,
+            "end": end,
+            "exclude_symbols": exclude_symbols,
+            "exclude_txn_ids": exclude_txn_ids,
+        },
+        output,
     )
 
 
@@ -971,6 +1101,7 @@ def advanced_what_if(
     market_volatility: float = 0.20,
     recurring_deposits: float = 0.0,
     stress_test: bool = False,
+    random_seed: int = 42,
 ) -> str:
     """Run advanced what-if scenarios with Monte Carlo simulation.
 
@@ -986,8 +1117,11 @@ def advanced_what_if(
         market_volatility: Expected annual market volatility (decimal, e.g. 0.20 for 20%)
         recurring_deposits: Monthly recurring deposit amount in USD
         stress_test: Whether to include stress testing conditions
+        random_seed: Seed for the Monte Carlo simulation. Reuse the seed reported by
+            a saved run (see get_simulation) to reproduce it exactly; change it to
+            draw fresh random paths.
     """
-    return _advanced_what_if._run(
+    output = _advanced_what_if._run(
         scenario_type=scenario_type,
         projection_years=projection_years,
         monte_carlo_runs=monte_carlo_runs,
@@ -997,6 +1131,24 @@ def advanced_what_if(
         market_volatility=market_volatility,
         recurring_deposits=recurring_deposits,
         stress_test=stress_test,
+        random_seed=random_seed,
+    )
+    return output + _record_simulation(
+        "advanced_what_if",
+        {
+            "scenario_type": scenario_type,
+            "projection_years": projection_years,
+            "monte_carlo_runs": monte_carlo_runs,
+            "modify_positions": modify_positions,
+            "add_positions": add_positions,
+            "market_return": market_return,
+            "market_volatility": market_volatility,
+            "recurring_deposits": recurring_deposits,
+            "stress_test": stress_test,
+            "random_seed": random_seed,
+        },
+        output,
+        random_seed=random_seed,
     )
 
 
@@ -1008,6 +1160,7 @@ def test_hypothetical_position(
     investment_amount: str = "",
     scenario: str = "likely",
     time_horizon: float = 1.0,
+    random_seed: int = 42,
 ) -> str:
     """Test a hypothetical position to see projected outcomes before buying.
 
@@ -1023,17 +1176,34 @@ def test_hypothetical_position(
         investment_amount: Total investment amount (alternative to quantity), e.g. "$5000"
         scenario: Market scenario (optimistic, likely, pessimistic, stress)
         time_horizon: Projection period in years (0.5 to 5.0)
+        random_seed: Seed for the Monte Carlo simulation; same seed + inputs
+            reproduces identical projections.
 
     Example: test_hypothetical_position("AAPL", investment_amount="$5000") will
     auto-fetch current AAPL price and calculate shares accordingly.
     """
-    return _hypothetical_position._run(
+    output = _hypothetical_position._run(
         symbol=symbol,
         quantity=quantity,
         purchase_price=purchase_price,
         investment_amount=investment_amount,
         scenario=scenario,
         time_horizon=time_horizon,
+        random_seed=random_seed,
+    )
+    return output + _record_simulation(
+        "test_hypothetical_position",
+        {
+            "symbol": symbol,
+            "quantity": quantity,
+            "purchase_price": purchase_price,
+            "investment_amount": investment_amount,
+            "scenario": scenario,
+            "time_horizon": time_horizon,
+            "random_seed": random_seed,
+        },
+        output,
+        random_seed=random_seed,
     )
 
 
@@ -1063,7 +1233,7 @@ def optimize_portfolio(
         include_cash: Whether to include cash position in optimization
         risk_free_rate: Risk-free rate assumption (default 0.04 = 4%)
     """
-    return _optimize_portfolio._run(
+    output = _optimize_portfolio._run(
         locked_symbols=locked_symbols,
         method=method,
         compare=compare,
@@ -1072,6 +1242,87 @@ def optimize_portfolio(
         target_volatility=target_volatility,
         include_cash=include_cash,
         risk_free_rate=risk_free_rate,
+    )
+    return output + _record_simulation(
+        "optimize_portfolio",
+        {
+            "locked_symbols": locked_symbols,
+            "method": method,
+            "compare": compare,
+            "lookback_days": lookback_days,
+            "objective": objective,
+            "target_volatility": target_volatility,
+            "include_cash": include_cash,
+            "risk_free_rate": risk_free_rate,
+        },
+        output,
+    )
+
+
+@mcp.tool()
+def backtest_portfolio(
+    start_date: str,
+    end_date: str,
+    symbols: Optional[str] = None,
+    strategies: str = "hrp,equal_weight,buy_and_hold",
+    initial_capital: float = 100_000.0,
+    rebalance_frequency: str = "monthly",
+    lookback_days: int = 252,
+    risk_free_rate: float = 0.04,
+    benchmark: str = "SPY",
+    transaction_cost_bps: float = 0.0,
+    ensure_data: bool = True,
+) -> str:
+    """Backtest one or more rebalancing strategies over a historical window.
+
+    Simulates investing initial_capital and rebalancing on a schedule, then reports
+    an equity-curve summary (final value, total/annualized return, volatility,
+    Sharpe, max drawdown) per strategy plus a benchmark. Strategies are walk-forward
+    and point-in-time (no look-ahead).
+
+    Args:
+        start_date: Backtest start in YYYY-MM-DD format.
+        end_date: Backtest end in YYYY-MM-DD format.
+        symbols: Comma-separated universe (e.g., "AAPL,MSFT,GLD"). If omitted, uses
+            the current portfolio's positions.
+        strategies: Comma-separated strategy specs. Valid: hrp, markowitz/max_sharpe,
+            min_volatility, equal_weight, buy_and_hold.
+        initial_capital: Starting capital in the portfolio base currency.
+        rebalance_frequency: daily, weekly, monthly, quarterly, or none.
+        lookback_days: Trailing window (days) the optimizer sees at each rebalance.
+        risk_free_rate: Annual risk-free rate (e.g., 0.04 = 4%).
+        benchmark: Benchmark symbol for comparison (default SPY).
+        transaction_cost_bps: Per-trade cost in basis points of traded notional.
+        ensure_data: If true, fetch/refresh market data for the window first.
+    """
+    output = _backtest_portfolio._run(
+        start_date=start_date,
+        end_date=end_date,
+        symbols=symbols,
+        strategies=strategies,
+        initial_capital=initial_capital,
+        rebalance_frequency=rebalance_frequency,
+        lookback_days=lookback_days,
+        risk_free_rate=risk_free_rate,
+        benchmark=benchmark,
+        transaction_cost_bps=transaction_cost_bps,
+        ensure_data=ensure_data,
+    )
+    return output + _record_simulation(
+        "backtest_portfolio",
+        {
+            "start_date": start_date,
+            "end_date": end_date,
+            "symbols": symbols,
+            "strategies": strategies,
+            "initial_capital": initial_capital,
+            "rebalance_frequency": rebalance_frequency,
+            "lookback_days": lookback_days,
+            "risk_free_rate": risk_free_rate,
+            "benchmark": benchmark,
+            "transaction_cost_bps": transaction_cost_bps,
+        },
+        output,
     )
 
 
@@ -1097,7 +1348,7 @@ def scenario_optimization(
         monte_carlo_runs: Number of Monte Carlo runs per scenario
         confidence_levels: Comma-separated confidence levels for projections
     """
-    return _scenario_optimization._run(
+    output = _scenario_optimization._run(
         scenarios=scenarios,
         objective=objective,
         include_cash=include_cash,
@@ -1105,6 +1356,104 @@ def scenario_optimization(
         monte_carlo_runs=monte_carlo_runs,
         confidence_levels=confidence_levels,
     )
+    return output + _record_simulation(
+        "scenario_optimization",
+        {
+            "scenarios": scenarios,
+            "objective": objective,
+            "include_cash": include_cash,
+            "projection_years": projection_years,
+            "monte_carlo_runs": monte_carlo_runs,
+            "confidence_levels": confidence_levels,
+        },
+        output,
+    )
+
+
+@mcp.tool()
+def list_simulations(
+    tool: str = "",
+    only_current_portfolio: bool = True,
+    limit: int = 20,
+) -> str:
+    """List previously saved simulation runs (what-if, Monte Carlo, optimization).
+
+    Simulations produced by simulate_what_if, advanced_what_if,
+    test_hypothetical_position, optimize_portfolio and scenario_optimization are
+    persisted automatically. Use this to browse them, then get_simulation to
+    re-check a specific run's full output.
+
+    Args:
+        tool: Optional filter by tool name (e.g. "advanced_what_if").
+        only_current_portfolio: If True, only show runs for the loaded portfolio.
+        limit: Maximum number of runs to list (newest first).
+    """
+    portfolio_id = None
+    if only_current_portfolio and portfolio_manager.current_portfolio:
+        portfolio_id = portfolio_manager.current_portfolio.id
+
+    records = simulation_store.list(
+        portfolio_id=portfolio_id,
+        tool=(tool or None),
+        limit=limit,
+    )
+
+    if not records:
+        return "No saved simulations found."
+
+    lines = [f"💾 Saved Simulations ({len(records)}):", ""]
+    for rec in records:
+        seed = rec.get("random_seed")
+        seed_str = f" | seed={seed}" if seed is not None else ""
+        lines.append(
+            f"• {rec['id']}\n"
+            f"    {rec.get('created_at', '?')} | {rec.get('tool', '?')}"
+            f" | portfolio={rec.get('portfolio_name') or rec.get('portfolio_id') or '-'}{seed_str}"
+        )
+    lines.append("")
+    lines.append("Use get_simulation(<id>) to view a run's full result.")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def get_simulation(simulation_id: str) -> str:
+    """Retrieve a saved simulation run's inputs and full output by id.
+
+    Args:
+        simulation_id: The simulation id (e.g. "sim_20260901_120000_ab12cd"),
+            as reported by the tool that produced it or by list_simulations.
+    """
+    record = simulation_store.get(simulation_id)
+    if record is None:
+        return f"❌ No simulation found with id '{simulation_id}'."
+
+    inputs = record.get("inputs", {})
+    input_lines = (
+        "\n".join(f"    • {k}: {v}" for k, v in inputs.items()) or "    (none)"
+    )
+    seed = record.get("random_seed")
+
+    header = [
+        f"💾 Simulation {record.get('id')}",
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        f"• Tool: {record.get('tool')}",
+        f"• Created: {record.get('created_at')}",
+        f"• Portfolio: {record.get('portfolio_name') or record.get('portfolio_id') or '-'}",
+    ]
+    if seed is not None:
+        header.append(f"• Random seed: {seed} (reuse to reproduce)")
+    header.extend(
+        [
+            "",
+            "📥 Inputs:",
+            input_lines,
+            "",
+            "📤 Result:",
+            "",
+            record.get("output", "(no output stored)"),
+        ]
+    )
+    return "\n".join(header)
 
 
 # =====================================================================
@@ -1138,49 +1487,45 @@ def ingest_pdf(path: str) -> str:
 def main():
     """Run the MCP server.
 
-    Supports two transports:
+    Supports three transports:
       --stdio   : For Claude Desktop and other stdio-based clients (no auth needed)
-      --sse     : HTTP server with SSE (default), requires FINAI_API_KEY
+      --http    : Streamable HTTP server (recommended), requires FINAI_API_KEY
+      --sse     : Legacy SSE HTTP server (default), requires FINAI_API_KEY
     """
     if "--stdio" in sys.argv:
         mcp.run(transport="stdio")
+    elif "--http" in sys.argv:
+        _run_streamable_http()
     else:
         _run_sse()
 
 
-def _run_sse():
-    """Run the SSE (HTTP) server with API key auth."""
-    import uvicorn
-    from mcp.server.sse import SseServerTransport
-    from starlette.applications import Starlette
-    from starlette.middleware import Middleware
+def _require_api_key() -> str:
+    """Return the configured API key, exiting if it is not set.
+
+    There is deliberately no default: a missing/blank FINAI_API_KEY is a fatal
+    misconfiguration for the networked transports, not something to paper over
+    with a well-known key that would leave the server effectively unauthenticated.
+    """
+    api_key = os.environ.get("FINAI_API_KEY", "").strip()
+    if not api_key:
+        logger.error(
+            "FINAI_API_KEY environment variable is required for HTTP/SSE transports"
+        )
+        sys.exit(1)
+    return api_key
+
+
+def _build_auth_middleware_class(api_key: str):
+    """Build a Starlette middleware class enforcing Bearer token auth.
+
+    The class closes over ``api_key`` so it can be used both in a routes
+    ``Middleware(...)`` list and via ``app.add_middleware(...)``.
+    """
     from starlette.middleware.base import BaseHTTPMiddleware
     from starlette.requests import Request
     from starlette.responses import JSONResponse
-    from starlette.routing import Mount, Route
 
-    host = os.environ.get("HOST", "localhost")
-    port = int(os.environ.get("PORT", "8000"))
-    api_key = os.environ.get("FINAI_API_KEY", "finai-api-key")
-
-    if not api_key:
-        logger.error("FINAI_API_KEY environment variable is required")
-        sys.exit(1)
-
-    # SSE transport with /messages endpoint for client posts
-    sse = SseServerTransport("/messages/")
-
-    async def handle_sse(request: Request):
-        async with sse.connect_sse(
-            request.scope, request.receive, request._send
-        ) as (read_stream, write_stream):
-            await mcp._mcp_server.run(
-                read_stream,
-                write_stream,
-                mcp._mcp_server.create_initialization_options(),
-            )
-
-    # Auth middleware - validates Bearer token on all requests
     class APIKeyAuthMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request: Request, call_next):
             auth_header = request.headers.get("Authorization", "")
@@ -1191,12 +1536,67 @@ def _run_sse():
                 )
             return await call_next(request)
 
+    return APIKeyAuthMiddleware
+
+
+def _run_streamable_http():
+    """Run the Streamable HTTP server (modern MCP transport) with API key auth."""
+    import uvicorn
+
+    host = os.environ.get("HOST", "localhost")
+    port = int(os.environ.get("PORT", "8000"))
+    api_key = _require_api_key()
+
+    # FastMCP reads host/port from its settings when building/serving the app.
+    mcp.settings.host = host
+    mcp.settings.port = port
+
+    # Streamable HTTP app exposes a single /mcp endpoint (GET+POST) and carries
+    # its own lifespan (session manager); add auth on top of it.
+    app = mcp.streamable_http_app()
+    app.add_middleware(_build_auth_middleware_class(api_key))
+
+    logger.info(f"Starting FinAI MCP server (streamable HTTP) on {host}:{port}")
+    logger.info(
+        f"MCP endpoint: http://{host}:{port}{mcp.settings.streamable_http_path}"
+    )
+    logger.info("API key auth enabled")
+    uvicorn.run(app, host=host, port=port)
+
+
+def _run_sse():
+    """Run the SSE (HTTP) server with API key auth."""
+    import uvicorn
+    from mcp.server.sse import SseServerTransport
+    from starlette.applications import Starlette
+    from starlette.middleware import Middleware
+    from starlette.requests import Request
+    from starlette.routing import Mount, Route
+
+    host = os.environ.get("HOST", "localhost")
+    port = int(os.environ.get("PORT", "8000"))
+    api_key = _require_api_key()
+
+    # SSE transport with /messages endpoint for client posts
+    sse = SseServerTransport("/messages/")
+
+    async def handle_sse(request: Request):
+        async with sse.connect_sse(request.scope, request.receive, request._send) as (
+            read_stream,
+            write_stream,
+        ):
+            await mcp._mcp_server.run(
+                read_stream,
+                write_stream,
+                mcp._mcp_server.create_initialization_options(),
+            )
+
     app = Starlette(
         routes=[
             Route("/sse", endpoint=handle_sse),
             Mount("/messages/", app=sse.handle_post_message),
         ],
-        middleware=[Middleware(APIKeyAuthMiddleware)],
+        middleware=[Middleware(_build_auth_middleware_class(api_key))],
     )
 
     logger.info(f"Starting FinAI MCP server on {host}:{port}")
