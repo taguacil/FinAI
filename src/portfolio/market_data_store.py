@@ -729,6 +729,7 @@ class MarketDataStore:
         start_date: date,
         end_date: date,
         currency: Optional[Currency] = None,
+        overwrite: bool = False,
     ) -> int:
         """Interpolate missing prices between two dates using linear interpolation.
 
@@ -740,6 +741,10 @@ class MarketDataStore:
             start_date: Start of the date range to fill
             end_date: End of the date range to fill
             currency: Currency for the prices (auto-detected if not provided)
+            overwrite: If True, recompute and replace ALL dates between the
+                boundaries (including dates that already have prices). If False
+                (default), only genuinely-empty dates are filled. Use overwrite
+                to repair a range corrupted by stale interpolated rows.
 
         Returns:
             Number of prices interpolated and stored
@@ -794,8 +799,8 @@ class MarketDataStore:
 
             current = boundary_start_date + timedelta(days=1)
             while current < boundary_end_date:
-                # Check if price already exists
-                existing = self.get_price(symbol, current)
+                # Check if price already exists (unless overwriting the range)
+                existing = None if overwrite else self.get_price(symbol, current)
                 if existing is None:
                     days_from_start = (current - boundary_start_date).days
                     interpolated_price = start_price + (daily_change * Decimal(str(days_from_start)))
@@ -832,6 +837,7 @@ class MarketDataStore:
         symbols: List[str],
         start_date: date,
         end_date: date,
+        overwrite: bool = False,
     ) -> Dict[str, int]:
         """Interpolate missing prices for multiple symbols.
 
@@ -839,12 +845,14 @@ class MarketDataStore:
             symbols: List of trading symbols
             start_date: Start of the date range to fill
             end_date: End of the date range to fill
+            overwrite: If True, replace existing prices in the range (see
+                interpolate_prices).
 
         Returns:
             Dict mapping symbol to number of prices interpolated
         """
         results: Dict[str, int] = {}
         for symbol in symbols:
-            count = self.interpolate_prices(symbol, start_date, end_date)
+            count = self.interpolate_prices(symbol, start_date, end_date, overwrite=overwrite)
             results[symbol] = count
         return results

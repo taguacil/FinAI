@@ -1,12 +1,16 @@
 """
 MCP (Model Context Protocol) server exposing all portfolio agent tools.
 
-Supports two transports:
-  - SSE (HTTP, default): for Cursor and other HTTP-based MCP clients
+Supports three transports:
+  - Streamable HTTP (recommended for HTTP clients): modern MCP transport, /mcp endpoint
+  - SSE (HTTP, legacy/default): for older HTTP-based MCP clients, /sse endpoint
   - stdio: for Claude Desktop and other process-based MCP clients
 
 Usage:
-    # SSE mode (default) - starts HTTP server
+    # Streamable HTTP mode - modern HTTP transport with Bearer auth
+    uv run python -m src.mcp_server --http
+
+    # SSE mode (default) - legacy HTTP server
     uv run python -m src.mcp_server
 
     # stdio mode - for Claude Desktop
@@ -15,9 +19,9 @@ Usage:
 Environment variables:
     PORTFOLIO_NAME - Name of portfolio to load on startup (default: first available)
     DATA_DIR - Data directory path (default: "data")
-    FINAI_API_KEY - API key for Bearer token auth (required for SSE mode)
-    HOST - Server host (default: "localhost", SSE mode only)
-    PORT - Server port (default: 8000, SSE mode only)
+    FINAI_API_KEY - API key for Bearer token auth (required for HTTP/SSE modes)
+    HOST - Server host (default: "localhost", HTTP/SSE modes only)
+    PORT - Server port (default: 8000, HTTP/SSE modes only)
 """
 
 import logging
@@ -66,6 +70,7 @@ from src.agents.portfolio_tools import (
     SetDataProviderSymbolTool,
     SetPriceCurrencyTool,
     SetMarketPriceTool,
+    SetPriceSeriesTool,
     SimulateWhatIfTool,
     UpdateHistoricalMarketDataTool,
 )
@@ -127,6 +132,7 @@ _get_portfolio_metrics = GetPortfolioMetricsTool(portfolio_manager, metrics_calc
 _get_transaction_history = GetTransactionHistoryTool(portfolio_manager)
 _set_market_price = SetMarketPriceTool(portfolio_manager)
 _bulk_set_market_price = BulkSetMarketPriceTool(portfolio_manager)
+_set_price_series = SetPriceSeriesTool(portfolio_manager)
 _fetch_and_update_prices = FetchAndUpdatePricesTool(portfolio_manager, data_manager)
 _set_data_provider_symbol = SetDataProviderSymbolTool(portfolio_manager)
 _set_price_currency = SetPriceCurrencyTool(portfolio_manager)
@@ -905,6 +911,7 @@ def interpolate_prices(
     start_date: str,
     end_date: str,
     symbols: Optional[str] = None,
+    overwrite: bool = False,
 ) -> str:
     """Fill in missing market prices using linear interpolation between known values.
 
@@ -917,18 +924,73 @@ def interpolate_prices(
     - Finds the nearest available price before and after the date range
     - Calculates daily price change using linear interpolation
     - Fills in all missing dates between the boundary prices
-    - Skips dates that already have prices (won't overwrite existing data)
+    - By default skips dates that already have prices (won't overwrite existing data)
+    - With overwrite=True, recomputes and REPLACES every date in the range (use this
+      to repair a range corrupted by stale interpolated rows)
+
+    Note: For manual chart-based backfills of illiquid instruments, prefer
+    set_price_series, which builds a full daily curve from multiple anchor points and
+    always overwrites the range.
 
     Args:
         start_date: Start of date range to fill (YYYY-MM-DD)
         end_date: End of date range to fill (YYYY-MM-DD)
         symbols: Comma-separated list of symbols (e.g., "GLENCORE_2028,BAYER_2026").
                  If not provided, interpolates all current portfolio positions.
+        overwrite: If True, replace existing prices in the range instead of only
+                   filling empty dates. Default False.
     """
     return _interpolate_prices._run(
         start_date=start_date,
         end_date=end_date,
         symbols=symbols,
+        overwrite=overwrite,
+    )
+
+
+@mcp.tool()
+def set_price_series(
+    symbol: str,
+    anchors: str,
+    currency: Optional[str] = None,
+    as_percent_of_par: bool = False,
+) -> str:
+    """Build a complete daily price series for one instrument from a few anchor points.
+
+    Preferred tool for backfilling illiquid instruments (bonds, CLNs, structured notes,
+    reverse convertibles, funds, tracker certificates) whose prices you read off a chart.
+
+    How it works:
+    - You supply a handful of (date, value) anchors read from the chart.
+    - It linearly interpolates a value for EVERY calendar day between the first and last
+      anchor.
+    - It OVERWRITES any existing prices in that range, so it cannot leave stale rows
+      behind (avoids the corruption plain interpolate_prices can cause over old data).
+
+    IMPORTANT - Percent of par:
+    For bonds / CLNs / notes / reverse convertibles quoted as a percentage of par, pass
+    as_percent_of_par=True and give values like 97.43 (for 97.43%); they are divided by
+    100 before storage (→ 0.9743). For funds/certificates priced absolutely, leave it
+    False and pass the raw price.
+
+    Tips:
+    - The series spans exactly first-anchor → last-anchor. For a position bought after
+      the window start, make the buy date the first anchor at par (e.g.
+      "2026-04-24:100" with as_percent_of_par=True).
+    - To pin today's value to a statement, make it the last anchor.
+
+    Args:
+        symbol: The instrument symbol.
+        anchors: "YYYY-MM-DD:value,YYYY-MM-DD:value,..." (at least 2, any order).
+        currency: Currency of the values (converted to native if different).
+                  Defaults to the instrument's native currency.
+        as_percent_of_par: If True, divide values by 100 before storage.
+    """
+    return _set_price_series._run(
+        symbol=symbol,
+        anchors=anchors,
+        currency=currency,
+        as_percent_of_par=as_percent_of_par,
     )
 
 
@@ -1138,14 +1200,72 @@ def ingest_pdf(path: str) -> str:
 def main():
     """Run the MCP server.
 
-    Supports two transports:
+    Supports three transports:
       --stdio   : For Claude Desktop and other stdio-based clients (no auth needed)
-      --sse     : HTTP server with SSE (default), requires FINAI_API_KEY
+      --http    : Streamable HTTP server (recommended), requires FINAI_API_KEY
+      --sse     : Legacy SSE HTTP server (default), requires FINAI_API_KEY
     """
     if "--stdio" in sys.argv:
         mcp.run(transport="stdio")
+    elif "--http" in sys.argv:
+        _run_streamable_http()
     else:
         _run_sse()
+
+
+def _require_api_key() -> str:
+    """Return the configured API key, exiting if it is not set."""
+    api_key = os.environ.get("FINAI_API_KEY", "finai-api-key")
+    if not api_key:
+        logger.error("FINAI_API_KEY environment variable is required")
+        sys.exit(1)
+    return api_key
+
+
+def _build_auth_middleware_class(api_key: str):
+    """Build a Starlette middleware class enforcing Bearer token auth.
+
+    The class closes over ``api_key`` so it can be used both in a routes
+    ``Middleware(...)`` list and via ``app.add_middleware(...)``.
+    """
+    from starlette.middleware.base import BaseHTTPMiddleware
+    from starlette.requests import Request
+    from starlette.responses import JSONResponse
+
+    class APIKeyAuthMiddleware(BaseHTTPMiddleware):
+        async def dispatch(self, request: Request, call_next):
+            auth_header = request.headers.get("Authorization", "")
+            if not auth_header.startswith("Bearer ") or auth_header[7:] != api_key:
+                return JSONResponse(
+                    {"error": "Unauthorized - invalid or missing API key"},
+                    status_code=401,
+                )
+            return await call_next(request)
+
+    return APIKeyAuthMiddleware
+
+
+def _run_streamable_http():
+    """Run the Streamable HTTP server (modern MCP transport) with API key auth."""
+    import uvicorn
+
+    host = os.environ.get("HOST", "localhost")
+    port = int(os.environ.get("PORT", "8000"))
+    api_key = _require_api_key()
+
+    # FastMCP reads host/port from its settings when building/serving the app.
+    mcp.settings.host = host
+    mcp.settings.port = port
+
+    # Streamable HTTP app exposes a single /mcp endpoint (GET+POST) and carries
+    # its own lifespan (session manager); add auth on top of it.
+    app = mcp.streamable_http_app()
+    app.add_middleware(_build_auth_middleware_class(api_key))
+
+    logger.info(f"Starting FinAI MCP server (streamable HTTP) on {host}:{port}")
+    logger.info(f"MCP endpoint: http://{host}:{port}{mcp.settings.streamable_http_path}")
+    logger.info("API key auth enabled")
+    uvicorn.run(app, host=host, port=port)
 
 
 def _run_sse():
@@ -1154,18 +1274,12 @@ def _run_sse():
     from mcp.server.sse import SseServerTransport
     from starlette.applications import Starlette
     from starlette.middleware import Middleware
-    from starlette.middleware.base import BaseHTTPMiddleware
     from starlette.requests import Request
-    from starlette.responses import JSONResponse
     from starlette.routing import Mount, Route
 
     host = os.environ.get("HOST", "localhost")
     port = int(os.environ.get("PORT", "8000"))
-    api_key = os.environ.get("FINAI_API_KEY", "finai-api-key")
-
-    if not api_key:
-        logger.error("FINAI_API_KEY environment variable is required")
-        sys.exit(1)
+    api_key = _require_api_key()
 
     # SSE transport with /messages endpoint for client posts
     sse = SseServerTransport("/messages/")
@@ -1180,23 +1294,12 @@ def _run_sse():
                 mcp._mcp_server.create_initialization_options(),
             )
 
-    # Auth middleware - validates Bearer token on all requests
-    class APIKeyAuthMiddleware(BaseHTTPMiddleware):
-        async def dispatch(self, request: Request, call_next):
-            auth_header = request.headers.get("Authorization", "")
-            if not auth_header.startswith("Bearer ") or auth_header[7:] != api_key:
-                return JSONResponse(
-                    {"error": "Unauthorized - invalid or missing API key"},
-                    status_code=401,
-                )
-            return await call_next(request)
-
     app = Starlette(
         routes=[
             Route("/sse", endpoint=handle_sse),
             Mount("/messages/", app=sse.handle_post_message),
         ],
-        middleware=[Middleware(APIKeyAuthMiddleware)],
+        middleware=[Middleware(_build_auth_middleware_class(api_key))],
     )
 
     logger.info(f"Starting FinAI MCP server on {host}:{port}")

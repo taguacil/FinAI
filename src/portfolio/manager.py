@@ -451,6 +451,7 @@ class PortfolioManager:
         target_date: Optional[date] = None,
         update_current: bool = True,
         currency: Optional[Currency] = None,
+        source: str = "manual",
     ) -> bool:
         """Set a custom/manual price for a position on a specific date.
 
@@ -468,6 +469,8 @@ class PortfolioManager:
             currency: The currency of the price being set. If different from the
                      instrument's native currency, the price will be converted.
                      Defaults to the instrument's currency if not specified.
+            source: Origin tag stored with the price (e.g. "manual",
+                    "anchor_interpolated"). Defaults to "manual".
 
         Returns:
             True if successful, False otherwise
@@ -520,7 +523,7 @@ class PortfolioManager:
                 price_date=target_date,
                 price=final_price,
                 currency=instrument_currency,
-                source="manual",
+                source=source,
             )
 
             if not success:

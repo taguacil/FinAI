@@ -40,6 +40,7 @@ from .models import (
     SetDataProviderSymbolInput,
     SetMarketPriceInput,
     SetPriceCurrencyInput,
+    SetPriceSeriesInput,
     TransactionItem,
     UpdateHistoricalMarketDataInput,
 )
@@ -4309,13 +4310,16 @@ class InterpolatePricesTool(BaseTool):
     - Finds the nearest available price before and after the date range
     - Calculates daily price change using linear interpolation
     - Fills in all missing dates between the boundary prices
-    - Skips dates that already have prices (won't overwrite existing data)
+    - By default skips dates that already have prices (won't overwrite existing data)
+    - Set overwrite=True to recompute and REPLACE every date in the range (repairs
+      a range corrupted by stale interpolated rows)
 
     Parameters:
     - symbols: Comma-separated list of symbols (e.g., "GLENCORE_2028,BAYER_2026")
               If not provided, interpolates all current portfolio positions
     - start_date: Start of date range to fill (YYYY-MM-DD)
     - end_date: End of date range to fill (YYYY-MM-DD)
+    - overwrite: If True, replace existing prices in the range (default False)
 
     Example:
         interpolate_prices(symbols="GLENCORE_2028,BAYER_2026", start_date="2026-02-01", end_date="2026-02-20")
@@ -4332,6 +4336,7 @@ class InterpolatePricesTool(BaseTool):
         start_date: str,
         end_date: str,
         symbols: Optional[str] = None,
+        overwrite: bool = False,
     ) -> str:
         """Execute price interpolation."""
         from datetime import datetime as dt
@@ -4370,7 +4375,7 @@ class InterpolatePricesTool(BaseTool):
 
             for symbol in symbol_list:
                 try:
-                    count = market_data_store.interpolate_prices(symbol, start, end)
+                    count = market_data_store.interpolate_prices(symbol, start, end, overwrite=overwrite)
                     if count > 0:
                         results.append(f"  • {symbol}: {count} prices interpolated")
                         total_interpolated += count
@@ -4383,6 +4388,7 @@ class InterpolatePricesTool(BaseTool):
             lines = [
                 "📊 **Price Interpolation Results**",
                 f"📅 Date range: {start_date} to {end_date}",
+                f"♻️ Mode: {'overwrite (existing prices replaced)' if overwrite else 'fill-only (existing prices kept)'}",
                 f"🔢 Total interpolated: {total_interpolated} prices",
                 "",
             ]
@@ -4400,3 +4406,173 @@ class InterpolatePricesTool(BaseTool):
 
         except Exception as e:
             return f"❌ Error interpolating prices: {str(e)}"
+
+
+class SetPriceSeriesTool(BaseTool):
+    """Tool for building a full daily price series from a handful of anchor points."""
+
+    name: str = "set_price_series"
+    description: str = """Build a complete daily price series for one instrument from a few known anchor points.
+
+    This is the preferred tool for backfilling illiquid instruments (bonds, CLNs, structured
+    notes, reverse convertibles, funds, tracker certificates) whose prices you read off a chart.
+
+    How it works:
+    - You supply a handful of (date, value) anchors read from a chart.
+    - The tool linearly interpolates a value for EVERY calendar day between the first and last
+      anchor.
+    - It OVERWRITES any existing prices in that range (so it cannot leave stale rows behind — this
+      avoids the corruption that plain interpolate_prices can cause when old rows already exist).
+
+    Parameters:
+    - symbol: The instrument symbol.
+    - anchors: Known points as "YYYY-MM-DD:value,YYYY-MM-DD:value,..." (at least 2, any order).
+    - currency: Currency of the values (converted to native if different). Defaults to native.
+    - as_percent_of_par: If True, values are percent-of-par quotes and are divided by 100 before
+      storage (e.g. 97.43 → 0.9743). Use for bonds / CLNs / notes / reverse convertibles.
+
+    Notes:
+    - The series spans exactly first-anchor → last-anchor. For a position bought after the window
+      start, make the buy date the first anchor at par (e.g. "2026-04-24:100" with
+      as_percent_of_par=True). To pin today's value to a statement, make it the last anchor.
+
+    Examples:
+    - Bond from chart (percent of par):
+      set_price_series(symbol="PHILLIPS_2035", anchors="2026-03-16:99.5,2026-03-27:97.0,2026-09-01:97.43", currency="USD", as_percent_of_par=True)
+    - Fund in absolute price:
+      set_price_series(symbol="VTEQ_SWISS", anchors="2026-03-16:180,2026-07-05:197,2026-09-01:188.87", currency="CHF")
+    """
+    args_schema: type[BaseModel] = SetPriceSeriesInput
+    portfolio_manager: Optional[PortfolioManager] = None
+
+    def __init__(self, portfolio_manager: PortfolioManager):
+        super().__init__()
+        self.portfolio_manager = portfolio_manager
+
+    def _run(
+        self,
+        symbol: str,
+        anchors: str,
+        currency: Optional[str] = None,
+        as_percent_of_par: bool = False,
+    ) -> str:
+        """Build and store a daily price series from anchor points."""
+        from datetime import datetime as dt
+        from ...portfolio.models import Currency as CurrencyEnum
+
+        try:
+            if not self.portfolio_manager.current_portfolio:
+                return "❌ No portfolio loaded."
+
+            symbol = symbol.upper().strip()
+
+            # Parse currency if provided
+            price_currency = None
+            if currency:
+                try:
+                    price_currency = CurrencyEnum(currency.upper())
+                except ValueError:
+                    valid = [c.value for c in CurrencyEnum]
+                    return f"❌ Invalid currency '{currency}'. Valid options: {', '.join(valid)}"
+
+            # Parse anchors: "YYYY-MM-DD:value,..."
+            parsed: list[tuple[date, Decimal]] = []
+            errors: list[str] = []
+            divisor = Decimal("100") if as_percent_of_par else Decimal("1")
+
+            for raw in anchors.split(","):
+                raw = raw.strip()
+                if not raw:
+                    continue
+                if ":" not in raw:
+                    errors.append(f"Invalid anchor '{raw}' - expected 'YYYY-MM-DD:value'")
+                    continue
+                date_str, value_str = raw.split(":", 1)
+                try:
+                    anchor_date = dt.strptime(date_str.strip(), "%Y-%m-%d").date()
+                except ValueError:
+                    errors.append(f"Invalid date '{date_str.strip()}' - use YYYY-MM-DD")
+                    continue
+                try:
+                    value = Decimal(value_str.strip()) / divisor
+                    if value <= 0:
+                        errors.append(f"Invalid value '{value_str.strip()}' - must be positive")
+                        continue
+                except Exception:
+                    errors.append(f"Invalid value '{value_str.strip()}' - must be a number")
+                    continue
+                parsed.append((anchor_date, value))
+
+            if len(parsed) < 2:
+                msg = "❌ Need at least 2 valid anchor points to build a series."
+                if errors:
+                    msg += "\nErrors:\n" + "\n".join(f"• {e}" for e in errors)
+                return msg
+
+            # Sort by date and drop duplicate dates (last one wins)
+            anchor_map = {}
+            for anchor_date, value in parsed:
+                anchor_map[anchor_date] = value
+            anchors_sorted = sorted(anchor_map.items())
+
+            # Piecewise-linear daily fill between consecutive anchors (inclusive)
+            series: dict[date, Decimal] = {}
+            for (d0, v0), (d1, v1) in zip(anchors_sorted, anchors_sorted[1:]):
+                span = (d1 - d0).days
+                if span <= 0:
+                    continue
+                step = (v1 - v0) / Decimal(str(span))
+                for i in range(span + 1):
+                    series[d0 + timedelta(days=i)] = (v0 + step * Decimal(str(i))).quantize(Decimal("0.000001"))
+
+            if not series:
+                return "❌ Could not build a series (anchors did not span any days)."
+
+            # Store every day, overwriting existing rows, via the manager
+            # (handles FX conversion, cache invalidation and today's current_price).
+            position = self.portfolio_manager.current_portfolio.positions.get(symbol)
+            is_sold_instrument = position is None
+            success_count = 0
+            failed_dates: list[str] = []
+
+            for price_date in sorted(series):
+                ok = self.portfolio_manager.set_position_price(
+                    symbol=symbol,
+                    price=series[price_date],
+                    target_date=price_date,
+                    update_current=(price_date == date.today() and not is_sold_instrument),
+                    currency=price_currency,
+                    source="anchor_interpolated",
+                )
+                if ok:
+                    success_count += 1
+                else:
+                    failed_dates.append(str(price_date))
+
+            first_day = min(series)
+            last_day = max(series)
+            par_note = " (percent-of-par ÷100)" if as_percent_of_par else ""
+            currency_note = f" (currency: {price_currency.value})" if price_currency else ""
+            name = position.instrument.name if position else "sold instrument"
+            lines = [
+                f"✅ Built daily price series for {symbol} ({name}):",
+                f"• Anchors used: {len(anchors_sorted)}{par_note}",
+                f"• Days written: {success_count}{currency_note}",
+                f"• Date range: {first_day} to {last_day}",
+                "• Existing prices in range were overwritten (source: anchor_interpolated)",
+            ]
+            if is_sold_instrument:
+                lines.append("• Note: sold instrument - only historical market data entries were updated")
+            if failed_dates:
+                lines.append(f"• Failed dates ({len(failed_dates)}): {', '.join(failed_dates[:10])}"
+                             + (" ..." if len(failed_dates) > 10 else ""))
+            if errors:
+                lines.append("\n⚠️ Anchor parsing warnings:")
+                lines.extend(f"• {e}" for e in errors[:5])
+                if len(errors) > 5:
+                    lines.append(f"  ... and {len(errors) - 5} more")
+
+            return "\n".join(lines)
+
+        except Exception as e:
+            return f"❌ Error building price series: {str(e)}"
