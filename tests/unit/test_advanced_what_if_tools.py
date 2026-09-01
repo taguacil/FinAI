@@ -211,6 +211,56 @@ class TestAdvancedWhatIfTools(unittest.TestCase):
             mock_engine.run_scenario_simulation.assert_called_once()
 
     @patch('src.portfolio.scenarios.PortfolioScenarioEngine')
+    def test_advanced_what_if_threads_random_seed(self, mock_engine_class):
+        """The random_seed argument must be passed to the scenario engine."""
+        mock_engine = Mock()
+        mock_engine_class.return_value = mock_engine
+
+        mock_result = Mock()
+        mock_result.get_summary_stats.return_value = {
+            'mean_final_value': 150000.0,
+            'median_final_value': 145000.0,
+            'std_final_value': 25000.0,
+            'probability_of_loss': 0.15,
+            'probability_of_doubling': 0.25,
+            'mean_annualized_return': 0.08,
+            'mean_sharpe_ratio': 1.2,
+            'mean_max_drawdown': -0.12,
+            'var_95': 110000.0
+        }
+        mock_result.scenario_config.name = "Custom Likely Scenario"
+        mock_result.scenario_config.projection_years = 2.0
+        mock_result.scenario_config.monte_carlo_runs = 1000
+        mock_result.scenario_config.market_assumptions.expected_return = 0.08
+        mock_result.scenario_config.market_assumptions.volatility = 0.20
+        mock_engine.run_scenario_simulation.return_value = mock_result
+
+        with patch.object(self.portfolio_manager, 'create_current_snapshot') as mock_create_snapshot:
+            mock_create_snapshot.return_value = PortfolioSnapshot(
+                date=date.today(),
+                total_value=Decimal("125000.00"),
+                cash_balance=Decimal("10000.00"),
+                positions_value=Decimal("115000.00"),
+                base_currency=Currency.USD,
+                positions={},
+                cash_balances={Currency.USD: Decimal("10000.00")},
+                total_cost_basis=Decimal("120000.00"),
+                total_unrealized_pnl=Decimal("5000.00"),
+                total_unrealized_pnl_percent=Decimal("4.17")
+            )
+
+            # Custom (non-default) assumptions so the tool builds a custom config
+            # and instantiates the engine directly with our seed.
+            self.advanced_tool._run(
+                scenario_type="likely",
+                market_return=0.10,
+                market_volatility=0.18,
+                random_seed=99,
+            )
+
+            mock_engine_class.assert_called_once_with(random_seed=99)
+
+    @patch('src.portfolio.scenarios.PortfolioScenarioEngine')
     def test_advanced_what_if_with_new_positions(self, mock_engine_class):
         """Test advanced what-if with new position additions."""
         # Mock scenario engine

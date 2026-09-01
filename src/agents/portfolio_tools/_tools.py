@@ -906,6 +906,7 @@ class AdvancedWhatIfTool(BaseTool):
         market_volatility: float = 0.20,
         recurring_deposits: float = 0.0,
         stress_test: bool = False,
+        random_seed: int = 42,
     ) -> str:
         """Run advanced what-if analysis with portfolio modifications.
 
@@ -923,6 +924,9 @@ class AdvancedWhatIfTool(BaseTool):
             market_volatility: Market volatility (as decimal, e.g., 0.20 for 20%)
             recurring_deposits: Monthly recurring deposits in USD
             stress_test: Whether to apply stress testing conditions
+            random_seed: Seed for the Monte Carlo simulation. The same seed with the
+                same inputs reproduces identical results; use a different seed to draw
+                a fresh set of random paths.
         """
         try:
             from src.portfolio.scenarios import (
@@ -957,7 +961,7 @@ class AdvancedWhatIfTool(BaseTool):
             )
 
             # Run simulation
-            engine = PortfolioScenarioEngine(random_seed=42)
+            engine = PortfolioScenarioEngine(random_seed=random_seed)
             result = engine.run_scenario_simulation(modified_snapshot, scenario_config)
 
             # Format results
@@ -1328,6 +1332,7 @@ class HypotheticalPositionTool(BaseTool):
         investment_amount: str = "",
         scenario: str = "likely",
         time_horizon: float = 1.0,
+        random_seed: int = 42,
     ) -> str:
         """Test a hypothetical position in the portfolio.
 
@@ -1338,6 +1343,8 @@ class HypotheticalPositionTool(BaseTool):
             investment_amount: Alternative to quantity - dollar amount to invest (e.g., "$5000")
             scenario: Market scenario to test (optimistic, likely, pessimistic, stress)
             time_horizon: Years to project the investment (0.5 to 5.0)
+            random_seed: Seed for the Monte Carlo simulation; same seed + inputs
+                reproduces identical results.
         """
         try:
             if not self.portfolio_manager.current_portfolio:
@@ -1399,7 +1406,8 @@ class HypotheticalPositionTool(BaseTool):
                 monte_carlo_runs=1000,
                 add_positions=add_position_str,
                 market_return=params["market_return"],
-                market_volatility=params["market_volatility"]
+                market_volatility=params["market_volatility"],
+                random_seed=random_seed,
             )
 
             # Add hypothetical-specific formatting

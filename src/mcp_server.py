@@ -36,6 +36,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.data_providers.manager import DataProviderManager
 from src.portfolio.manager import PortfolioManager
+from src.portfolio.simulation_store import SimulationStore
 from src.portfolio.storage import FileBasedStorage
 from src.services.market_data_service import MarketDataService
 from src.utils.metrics import FinancialMetricsCalculator
@@ -98,6 +99,7 @@ data_manager = DataProviderManager()
 market_data_service = MarketDataService(data_manager)
 portfolio_manager = PortfolioManager(storage, market_data_service, data_dir=DATA_DIR)
 metrics_calculator = FinancialMetricsCalculator(data_manager)
+simulation_store = SimulationStore(DATA_DIR)
 
 # Load portfolio
 available = storage.list_portfolios()
@@ -999,6 +1001,36 @@ def set_price_series(
 # =====================================================================
 
 
+def _record_simulation(
+    tool: str,
+    inputs: dict,
+    output: str,
+    random_seed: Optional[int] = None,
+) -> str:
+    """Persist a simulation run and return a footer note to append to the output.
+
+    Successful runs are saved under data/simulations/ so they can be re-checked
+    later via list_simulations / get_simulation. Failed runs (error output) are
+    not persisted. Never raises: a storage failure just returns an empty footer.
+    """
+    if output.startswith("❌"):
+        return ""
+    try:
+        p = portfolio_manager.current_portfolio
+        sim_id = simulation_store.save(
+            tool=tool,
+            inputs=inputs,
+            output=output,
+            portfolio_id=p.id if p else None,
+            portfolio_name=(p.name if p else None),
+            random_seed=random_seed,
+        )
+        return f"\n\n💾 Saved as simulation `{sim_id}` — re-check later with get_simulation."
+    except Exception as e:  # pragma: no cover - best-effort persistence
+        logger.warning(f"Failed to save simulation ({tool}): {e}")
+        return ""
+
+
 @mcp.tool()
 def simulate_what_if(
     start: str,
@@ -1014,11 +1046,21 @@ def simulate_what_if(
         exclude_symbols: Comma-separated symbols to exclude (e.g., "AAPL,TSLA")
         exclude_txn_ids: Comma-separated transaction IDs to exclude
     """
-    return _simulate_what_if._run(
+    output = _simulate_what_if._run(
         start=start,
         end=end,
         exclude_symbols=exclude_symbols,
         exclude_txn_ids=exclude_txn_ids,
+    )
+    return output + _record_simulation(
+        "simulate_what_if",
+        {
+            "start": start,
+            "end": end,
+            "exclude_symbols": exclude_symbols,
+            "exclude_txn_ids": exclude_txn_ids,
+        },
+        output,
     )
 
 
@@ -1033,6 +1075,7 @@ def advanced_what_if(
     market_volatility: float = 0.20,
     recurring_deposits: float = 0.0,
     stress_test: bool = False,
+    random_seed: int = 42,
 ) -> str:
     """Run advanced what-if scenarios with Monte Carlo simulation.
 
@@ -1048,8 +1091,11 @@ def advanced_what_if(
         market_volatility: Expected annual market volatility (decimal, e.g. 0.20 for 20%)
         recurring_deposits: Monthly recurring deposit amount in USD
         stress_test: Whether to include stress testing conditions
+        random_seed: Seed for the Monte Carlo simulation. Reuse the seed reported by
+            a saved run (see get_simulation) to reproduce it exactly; change it to
+            draw fresh random paths.
     """
-    return _advanced_what_if._run(
+    output = _advanced_what_if._run(
         scenario_type=scenario_type,
         projection_years=projection_years,
         monte_carlo_runs=monte_carlo_runs,
@@ -1059,6 +1105,24 @@ def advanced_what_if(
         market_volatility=market_volatility,
         recurring_deposits=recurring_deposits,
         stress_test=stress_test,
+        random_seed=random_seed,
+    )
+    return output + _record_simulation(
+        "advanced_what_if",
+        {
+            "scenario_type": scenario_type,
+            "projection_years": projection_years,
+            "monte_carlo_runs": monte_carlo_runs,
+            "modify_positions": modify_positions,
+            "add_positions": add_positions,
+            "market_return": market_return,
+            "market_volatility": market_volatility,
+            "recurring_deposits": recurring_deposits,
+            "stress_test": stress_test,
+            "random_seed": random_seed,
+        },
+        output,
+        random_seed=random_seed,
     )
 
 
@@ -1070,6 +1134,7 @@ def test_hypothetical_position(
     investment_amount: str = "",
     scenario: str = "likely",
     time_horizon: float = 1.0,
+    random_seed: int = 42,
 ) -> str:
     """Test a hypothetical position to see projected outcomes before buying.
 
@@ -1085,17 +1150,34 @@ def test_hypothetical_position(
         investment_amount: Total investment amount (alternative to quantity), e.g. "$5000"
         scenario: Market scenario (optimistic, likely, pessimistic, stress)
         time_horizon: Projection period in years (0.5 to 5.0)
+        random_seed: Seed for the Monte Carlo simulation; same seed + inputs
+            reproduces identical projections.
 
     Example: test_hypothetical_position("AAPL", investment_amount="$5000") will
     auto-fetch current AAPL price and calculate shares accordingly.
     """
-    return _hypothetical_position._run(
+    output = _hypothetical_position._run(
         symbol=symbol,
         quantity=quantity,
         purchase_price=purchase_price,
         investment_amount=investment_amount,
         scenario=scenario,
         time_horizon=time_horizon,
+        random_seed=random_seed,
+    )
+    return output + _record_simulation(
+        "test_hypothetical_position",
+        {
+            "symbol": symbol,
+            "quantity": quantity,
+            "purchase_price": purchase_price,
+            "investment_amount": investment_amount,
+            "scenario": scenario,
+            "time_horizon": time_horizon,
+            "random_seed": random_seed,
+        },
+        output,
+        random_seed=random_seed,
     )
 
 
@@ -1125,7 +1207,7 @@ def optimize_portfolio(
         include_cash: Whether to include cash position in optimization
         risk_free_rate: Risk-free rate assumption (default 0.04 = 4%)
     """
-    return _optimize_portfolio._run(
+    output = _optimize_portfolio._run(
         locked_symbols=locked_symbols,
         method=method,
         compare=compare,
@@ -1134,6 +1216,20 @@ def optimize_portfolio(
         target_volatility=target_volatility,
         include_cash=include_cash,
         risk_free_rate=risk_free_rate,
+    )
+    return output + _record_simulation(
+        "optimize_portfolio",
+        {
+            "locked_symbols": locked_symbols,
+            "method": method,
+            "compare": compare,
+            "lookback_days": lookback_days,
+            "objective": objective,
+            "target_volatility": target_volatility,
+            "include_cash": include_cash,
+            "risk_free_rate": risk_free_rate,
+        },
+        output,
     )
 
 
@@ -1159,7 +1255,7 @@ def scenario_optimization(
         monte_carlo_runs: Number of Monte Carlo runs per scenario
         confidence_levels: Comma-separated confidence levels for projections
     """
-    return _scenario_optimization._run(
+    output = _scenario_optimization._run(
         scenarios=scenarios,
         objective=objective,
         include_cash=include_cash,
@@ -1167,6 +1263,100 @@ def scenario_optimization(
         monte_carlo_runs=monte_carlo_runs,
         confidence_levels=confidence_levels,
     )
+    return output + _record_simulation(
+        "scenario_optimization",
+        {
+            "scenarios": scenarios,
+            "objective": objective,
+            "include_cash": include_cash,
+            "projection_years": projection_years,
+            "monte_carlo_runs": monte_carlo_runs,
+            "confidence_levels": confidence_levels,
+        },
+        output,
+    )
+
+
+@mcp.tool()
+def list_simulations(
+    tool: str = "",
+    only_current_portfolio: bool = True,
+    limit: int = 20,
+) -> str:
+    """List previously saved simulation runs (what-if, Monte Carlo, optimization).
+
+    Simulations produced by simulate_what_if, advanced_what_if,
+    test_hypothetical_position, optimize_portfolio and scenario_optimization are
+    persisted automatically. Use this to browse them, then get_simulation to
+    re-check a specific run's full output.
+
+    Args:
+        tool: Optional filter by tool name (e.g. "advanced_what_if").
+        only_current_portfolio: If True, only show runs for the loaded portfolio.
+        limit: Maximum number of runs to list (newest first).
+    """
+    portfolio_id = None
+    if only_current_portfolio and portfolio_manager.current_portfolio:
+        portfolio_id = portfolio_manager.current_portfolio.id
+
+    records = simulation_store.list(
+        portfolio_id=portfolio_id,
+        tool=(tool or None),
+        limit=limit,
+    )
+
+    if not records:
+        return "No saved simulations found."
+
+    lines = [f"💾 Saved Simulations ({len(records)}):", ""]
+    for rec in records:
+        seed = rec.get("random_seed")
+        seed_str = f" | seed={seed}" if seed is not None else ""
+        lines.append(
+            f"• {rec['id']}\n"
+            f"    {rec.get('created_at', '?')} | {rec.get('tool', '?')}"
+            f" | portfolio={rec.get('portfolio_name') or rec.get('portfolio_id') or '-'}{seed_str}"
+        )
+    lines.append("")
+    lines.append("Use get_simulation(<id>) to view a run's full result.")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def get_simulation(simulation_id: str) -> str:
+    """Retrieve a saved simulation run's inputs and full output by id.
+
+    Args:
+        simulation_id: The simulation id (e.g. "sim_20260901_120000_ab12cd"),
+            as reported by the tool that produced it or by list_simulations.
+    """
+    record = simulation_store.get(simulation_id)
+    if record is None:
+        return f"❌ No simulation found with id '{simulation_id}'."
+
+    inputs = record.get("inputs", {})
+    input_lines = "\n".join(f"    • {k}: {v}" for k, v in inputs.items()) or "    (none)"
+    seed = record.get("random_seed")
+
+    header = [
+        f"💾 Simulation {record.get('id')}",
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        f"• Tool: {record.get('tool')}",
+        f"• Created: {record.get('created_at')}",
+        f"• Portfolio: {record.get('portfolio_name') or record.get('portfolio_id') or '-'}",
+    ]
+    if seed is not None:
+        header.append(f"• Random seed: {seed} (reuse to reproduce)")
+    header.extend([
+        "",
+        "📥 Inputs:",
+        input_lines,
+        "",
+        "📤 Result:",
+        "",
+        record.get("output", "(no output stored)"),
+    ])
+    return "\n".join(header)
 
 
 # =====================================================================
