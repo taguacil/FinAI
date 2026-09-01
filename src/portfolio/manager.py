@@ -551,13 +551,22 @@ class PortfolioManager:
     def set_positions_prices_batch(
         self,
         entries: List[Tuple[str, date, Decimal]],
+        source: str = "manual_batch",
     ) -> int:
         """Set prices for multiple positions/symbols in a single batch operation.
 
-        This is more efficient than calling set_position_price multiple times.
+        This is more efficient than calling set_position_price multiple times: it
+        writes all rows in one MarketDataStore transaction and invalidates the
+        portfolio-history cache once, rather than per row.
+
+        Prices are stored as-is in each symbol's native currency (no FX
+        conversion is applied here); pre-convert the values before calling if
+        they are quoted in a different currency.
 
         Args:
             entries: List of (symbol, date, price) tuples
+            source: Origin tag stored with each price (e.g. "manual_batch",
+                "anchor_interpolated").
 
         Returns:
             Number of prices successfully stored
@@ -593,7 +602,7 @@ class PortfolioManager:
                     date=price_date,
                     price=price,
                     currency=currency,
-                    source="manual_batch",
+                    source=source,
                 ))
 
             # Batch store prices in MarketDataStore
