@@ -1028,7 +1028,7 @@ class PortfolioTrackerUI:
 
             # Render by category using separate tables
             categories = [
-                "Short Term",
+                "Cash",
                 "Bonds",
                 "Equities",
                 "Alternatives",
@@ -1037,15 +1037,11 @@ class PortfolioTrackerUI:
 
             for cat in categories:
                 group = [e for e in enriched if e.get("category") == cat]
-                # Include cash under Short Term as its own items
+                # Include cash balances under the Cash category as their own items
                 cash_items = []
-                if cat == "Short Term" and portfolio.cash_balances:
+                if cat == "Cash" and portfolio.cash_balances:
                     for curr, amt in portfolio.cash_balances.items():
                         curr_code = getattr(curr, "value", str(curr))
-                        # FX summary for cash (compat with older cached manager)
-                        fx_summary = self._get_cash_fx_summary(portfolio_manager, allow_fetch=fetch_live).get(
-                            curr
-                        )
                         amt_base = self._convert_to_base(
                             portfolio_manager,
                             Decimal(str(amt)),
@@ -1053,40 +1049,11 @@ class PortfolioTrackerUI:
                             base_currency.value,
                             allow_fetch=fetch_live,
                         )
-                        # Compute FX P&L percent if base cost available (non-base currency only)
-                        is_base_cur = curr_code == base_currency.value
-                        fx_pnl_base = (
-                            (
-                                fx_summary.get("fx_unrealized_pnl_base")
-                                if fx_summary
-                                else None
-                            )
-                            if not is_base_cur
-                            else None
-                        )
-                        base_cost = fx_summary.get("base_cost") if fx_summary else None
-                        fx_pnl_pct = (
-                            (fx_pnl_base / base_cost * 100)
-                            if (not is_base_cur)
-                            and fx_summary
-                            and base_cost not in (None, Decimal("0"))
-                            else None
-                        )
-                        # Robust YTD FX using manager method (respects purchase dates)
-                        ytd_fx_base = None
-                        ytd_fx_pct = None
-                        try:
-                            if hasattr(portfolio_manager, "get_cash_ytd_fx_summary"):
-                                ysum = portfolio_manager.get_cash_ytd_fx_summary().get(
-                                    curr
-                                )
-                                if ysum:
-                                    ytd_fx_base = ysum.get("ytd_fx_pnl_base")
-                                    ytd_fx_pct = ysum.get("ytd_fx_percent")
-                        except Exception:
-                            ytd_fx_base = None
-                            ytd_fx_pct = None
-
+                        # Cash has no meaningful cost-basis P&L: the previous
+                        # "FX unrealized P&L" divided the whole-balance change by
+                        # net deposits (which excluded buys/sells and treated
+                        # FX-spot legs as capital flows), producing nonsense like
+                        # -160%. Show balance + base value only.
                         cash_items.append(
                             {
                                 "name": f"Cash ({curr_code})",
@@ -1097,10 +1064,8 @@ class PortfolioTrackerUI:
                                 "current_price": None,
                                 "market_value_base": amt_base,
                                 "market_value": Decimal(str(amt)),
-                                "unrealized_pnl_base": fx_pnl_base,
-                                "unrealized_pnl_percent": fx_pnl_pct,
-                                "ytd_fx_pnl_base": ytd_fx_base,
-                                "ytd_fx_percent": ytd_fx_pct,
+                                "unrealized_pnl_base": None,
+                                "unrealized_pnl_percent": None,
                                 "ytd_unrealized_pnl": None,
                                 "ytd_unrealized_pnl_percent": None,
                             }
@@ -1179,7 +1144,7 @@ class PortfolioTrackerUI:
             mv_base = pos.get("market_value_base") or Decimal("0")
             totals[category] = totals.get(category, 0.0) + float(mv_base)
 
-        # Include cash balances as part of Short Term
+        # Include cash balances as part of the Cash category
         cash_total_base = Decimal("0")
         portfolio = portfolio_manager.current_portfolio
         if portfolio and portfolio.cash_balances:
@@ -1193,7 +1158,7 @@ class PortfolioTrackerUI:
                     allow_fetch=allow_fetch,
                 )
         if cash_total_base > 0:
-            totals["Short Term"] = totals.get("Short Term", 0.0) + float(
+            totals["Cash"] = totals.get("Cash", 0.0) + float(
                 cash_total_base
             )
 
@@ -1452,9 +1417,9 @@ class PortfolioTrackerUI:
         name = (pos.get("name") or "").lower()
         symbol = (pos.get("symbol") or "").upper()
 
-        # Short-term: cash only
+        # Cash balances
         if itype == "cash":
-            return "Short Term"
+            return "Cash"
         if itype == "bond":
             # All bonds go to Bonds category, regardless of type
             return "Bonds"
@@ -2007,6 +1972,7 @@ class PortfolioTrackerUI:
             benchmark_symbol=benchmark,
             benchmark_prices_aligned=bench_prices_aligned,
             portfolio_returns_twr=portfolio_returns_twr,
+            external_cash_flows=cash_flows_float,
         )
 
 
@@ -2104,6 +2070,7 @@ class PortfolioTrackerUI:
         benchmark_symbol: Optional[str] = None,
         benchmark_prices_aligned: Optional[List[Optional[float]]] = None,
         portfolio_returns_twr: Optional[List[float]] = None,
+        external_cash_flows: Optional[Dict[date, float]] = None,
     ):
         """Plot portfolio value chart using PortfolioHistory DataFrame."""
         import plotly.graph_objects as go
@@ -2128,22 +2095,40 @@ class PortfolioTrackerUI:
             )
         )
 
-        # Add benchmark if available
+        # Add benchmark "what if the same cash flows went into the benchmark".
+        # Rather than rebasing the benchmark price once to the portfolio's first
+        # value (which mixes contributions with market returns and makes the two
+        # lines diverge for reasons unrelated to performance), we simulate buying
+        # the benchmark with the portfolio's starting value and then applying the
+        # SAME external deposits/withdrawals day by day. The resulting line is a
+        # like-for-like dollar comparison: any gap vs the Portfolio line is pure
+        # relative performance.
         if benchmark_symbol and benchmark_prices_aligned:
-            first_bench = next((p for p in benchmark_prices_aligned if p is not None), None)
-            if first_bench and portfolio_values:
-                scaled = []
-                for p in benchmark_prices_aligned:
-                    if p is None:
-                        scaled.append(None)
-                    else:
-                        scaled.append(portfolio_values[0] * (p / first_bench))
+            cash_flows = external_cash_flows or {}
+            equiv_values: List[Optional[float]] = []
+            units: Optional[float] = None  # benchmark units held
+            for i, day in enumerate(dates):
+                px = benchmark_prices_aligned[i]
+                if not px:  # None or 0 -> benchmark not yet priced
+                    equiv_values.append(None)
+                    continue
+                if units is None:
+                    # Anchor on the first priced day to the portfolio's value then
+                    # (its cash flow that day is already baked into that value).
+                    units = portfolio_values[i] / px
+                else:
+                    flow = float(cash_flows.get(day, 0.0))
+                    if flow:
+                        units += flow / px
+                equiv_values.append(units * px)
+
+            if any(v is not None for v in equiv_values):
                 fig.add_trace(
                     go.Scatter(
                         x=dates,
-                        y=scaled,
+                        y=equiv_values,
                         mode="lines",
-                        name=f"{benchmark_symbol} (scaled)",
+                        name=f"{benchmark_symbol}-equivalent (same cash flows)",
                         line=dict(color="#555", dash="dash"),
                     )
                 )
@@ -2175,13 +2160,34 @@ class PortfolioTrackerUI:
                     x=return_dates,
                     y=cumulative,
                     mode="lines",
-                    name="Portfolio Cumulative Return",
+                    name="Portfolio (TWR)",
                     line=dict(color="green", width=2),
                 )
             )
 
+            # Overlay the benchmark's cumulative return, rebased to 0% at the
+            # start. This is the cash-flow-neutral comparison: both series are
+            # pure returns, so the gap is genuine out/under-performance
+            # (unlike absolute value, which is distorted by deposits/withdrawals).
+            if benchmark_symbol and benchmark_prices_aligned:
+                base_px = next((p for p in benchmark_prices_aligned if p), None)
+                if base_px:
+                    bench_cum = [
+                        ((p / base_px) - 1.0) * 100.0 if p else None
+                        for p in benchmark_prices_aligned
+                    ]
+                    fig2.add_trace(
+                        go.Scatter(
+                            x=dates,
+                            y=bench_cum,
+                            mode="lines",
+                            name=f"{benchmark_symbol} (TWR)",
+                            line=dict(color="#555", width=2, dash="dash"),
+                        )
+                    )
+
             fig2.update_layout(
-                title="Cumulative Return (%)",
+                title="Cumulative Return (%) — Portfolio vs Benchmark",
                 xaxis_title="Date",
                 yaxis_title="Cumulative Return (%)",
                 height=350,
