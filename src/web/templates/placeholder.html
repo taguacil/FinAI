@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}{{ title }} · FinAI{% endblock %}
+{% block heading %}{{ title }}{% endblock %}
+
+{% block content %}
+<div class="card flex flex-col items-center justify-center text-center py-20">
+  <div class="h-12 w-12 rounded-xl2 bg-accent/10 border border-accent/30 flex items-center justify-center mb-4">
+    <i data-lucide="hammer" class="h-5 w-5 text-accent"></i>
+  </div>
+  <h2 class="text-lg font-semibold mb-1">{{ title }}</h2>
+  <p class="text-muted max-w-md">{{ blurb }}</p>
+  <p class="text-xs text-muted mt-4 opacity-70">This page is next up in the rewrite.</p>
+</div>
+<script>lucide.createIcons();</script>
+{% endblock %}

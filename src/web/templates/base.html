@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{% block title %}FinAI{% endblock %}</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            bg: '#0B0F1A',
+            surface: '#131A2A',
+            surfaceAlt: '#0F1626',
+            border: '#1E2A3D',
+            accent: '#2DD4BF',
+            accentDim: '#134E4A',
+            muted: '#8B98A5',
+            pos: '#22C55E',
+            neg: '#F87171',
+          },
+          fontFamily: {
+            sans: ['Inter', 'system-ui', 'sans-serif'],
+            mono: ['JetBrains Mono', 'ui-monospace', 'monospace'],
+          },
+          borderRadius: { xl2: '14px' },
+        },
+      },
+    };
+  </script>
+  <link rel="stylesheet" href="/static/finai.css" />
+  <script defer src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js"></script>
+  <script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
+  <script src="https://unpkg.com/lucide@latest"></script>
+</head>
+<body class="bg-bg text-slate-100 font-sans antialiased min-h-screen">
+  <div class="flex min-h-screen">
+    <!-- Sidebar -->
+    <aside class="hidden md:flex w-60 flex-col border-r border-border bg-surfaceAlt/70 backdrop-blur px-4 py-5 fixed inset-y-0">
+      <div class="flex items-center gap-2.5 px-2 mb-8">
+        <span class="h-3 w-3 rounded-full bg-accent shadow-[0_0_0_4px_rgba(45,212,191,0.15)]"></span>
+        <span class="text-lg font-extrabold tracking-tight">Fin<span class="text-accent">AI</span></span>
+      </div>
+      <nav class="flex flex-col gap-1">
+        {% for item in nav %}
+        <a href="{{ item.href }}?portfolio={{ active_portfolio_id or '' }}"
+           class="nav-link {{ 'nav-link-active' if active == item.key else '' }}">
+          <i data-lucide="{{ item.icon }}" class="h-4 w-4"></i>
+          <span>{{ item.label }}</span>
+        </a>
+        {% endfor %}
+      </nav>
+      <div class="mt-auto text-xs text-muted px-2">
+        <p class="opacity-70">FinAI · portfolio tracker</p>
+      </div>
+    </aside>
+
+    <!-- Main -->
+    <div class="flex-1 md:ml-60 flex flex-col">
+      <header class="sticky top-0 z-10 flex items-center justify-between gap-4 border-b border-border bg-bg/80 backdrop-blur px-6 py-3.5">
+        <div class="flex items-center gap-3">
+          <span class="md:hidden h-2.5 w-2.5 rounded-full bg-accent"></span>
+          <h1 class="text-base font-semibold tracking-tight">{% block heading %}{% endblock %}</h1>
+        </div>
+        {% if portfolios %}
+        <form method="get" action="{{ ('/' if active == 'dashboard' else '/' ~ active) }}" class="flex items-center gap-2">
+          <label class="text-xs text-muted hidden sm:block">Portfolio</label>
+          <select name="portfolio" onchange="this.form.submit()"
+                  class="bg-surface border border-border rounded-lg px-3 py-1.5 text-sm text-slate-100 focus:outline-none focus:border-accent">
+            {% for p in portfolios %}
+            <option value="{{ p.id }}" {{ 'selected' if p.id == active_portfolio_id else '' }}>{{ p.name }}</option>
+            {% endfor %}
+          </select>
+        </form>
+        {% endif %}
+      </header>
+
+      <main class="flex-1 px-6 py-6 max-w-[1400px] w-full">
+        {% block content %}{% endblock %}
+      </main>
+    </div>
+  </div>
+
+  <script>lucide.createIcons();</script>
+  <script src="/static/finai.js"></script>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

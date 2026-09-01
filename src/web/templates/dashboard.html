@@ -1,0 +1,120 @@
+{% extends "base.html" %}
+{% block title %}Dashboard · FinAI{% endblock %}
+{% block heading %}{{ active_portfolio_name or 'Dashboard' }}{% endblock %}
+
+{% block content %}
+{% if data.empty %}
+  <div class="card text-center py-16">
+    <p class="text-muted">No portfolio loaded. Create one in the desktop app or add transactions to get started.</p>
+  </div>
+{% else %}
+<div x-data="dashboard()" x-init="init()">
+  <!-- KPI row -->
+  <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-5">
+    <div class="card kpi">
+      <div class="kpi-label">Net Worth</div>
+      <div class="kpi-value mono" x-text="money(d.kpis.net_worth)"></div>
+      <div class="kpi-sub text-muted" x-text="'Cash ' + money(d.kpis.cash)"></div>
+    </div>
+    <div class="card kpi">
+      <div class="kpi-label">Invested</div>
+      <div class="kpi-value mono" x-text="money(d.kpis.invested)"></div>
+      <div class="kpi-sub text-muted" x-text="d.positions.length + ' positions'"></div>
+    </div>
+    <div class="card kpi">
+      <div class="kpi-label">Unrealized P&amp;L</div>
+      <div class="kpi-value mono" :class="cls(d.kpis.unrealized_pnl)" x-text="money(d.kpis.unrealized_pnl)"></div>
+      <div class="kpi-sub" :class="cls(d.kpis.total_return_pct)" x-text="pct(d.kpis.total_return_pct)"></div>
+    </div>
+    <div class="card kpi">
+      <div class="kpi-label">YTD Return</div>
+      <div class="kpi-value mono" :class="cls(d.kpis.ytd_pct)" x-text="d.kpis.ytd_pct === null ? '—' : pct(d.kpis.ytd_pct)"></div>
+      <div class="kpi-sub text-muted">Time-weighted</div>
+    </div>
+  </div>
+
+  <!-- Charts row -->
+  <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-5">
+    <div class="card lg:col-span-2">
+      <div class="flex items-center justify-between mb-2">
+        <span class="section-title">Portfolio value</span>
+        <span class="text-xs text-muted mono" x-text="money(d.kpis.net_worth)"></span>
+      </div>
+      <div id="equityChart" style="height: 300px;"></div>
+    </div>
+    <div class="card">
+      <div class="section-title mb-2">Allocation</div>
+      <div id="allocChart" style="height: 300px;"></div>
+    </div>
+  </div>
+
+  <!-- Positions + transactions -->
+  <div class="grid grid-cols-1 xl:grid-cols-3 gap-4">
+    <div class="card xl:col-span-2 overflow-hidden">
+      <div class="section-title mb-3">Positions</div>
+      <div class="overflow-x-auto">
+        <table class="tbl">
+          <thead><tr>
+            <th>Symbol</th><th>Qty</th><th class="num">Price</th>
+            <th class="num">Value</th><th class="num">P&amp;L</th><th class="num">%</th>
+          </tr></thead>
+          <tbody>
+            <template x-for="p in d.positions" :key="p.symbol">
+              <tr>
+                <td>
+                  <div class="font-semibold" x-text="p.symbol"></div>
+                  <div class="text-xs text-muted truncate max-w-[180px]" x-text="p.name"></div>
+                </td>
+                <td class="mono text-muted" x-text="num(p.quantity, 2)"></td>
+                <td class="num" x-text="p.has_price ? money(p.price) : '—'"></td>
+                <td class="num font-semibold" x-text="money(p.value)"></td>
+                <td class="num" :class="cls(p.pnl)" x-text="money(p.pnl)"></td>
+                <td class="num" :class="cls(p.pnl_pct)" x-text="pct(p.pnl_pct)"></td>
+              </tr>
+            </template>
+            <tr x-show="!d.positions.length"><td colspan="6" class="text-muted text-center py-6">No positions.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card overflow-hidden">
+      <div class="section-title mb-3">Recent activity</div>
+      <div class="overflow-x-auto">
+        <table class="tbl">
+          <thead><tr><th>Date</th><th>Symbol</th><th>Type</th><th class="num">Total</th></tr></thead>
+          <tbody>
+            <template x-for="(t, i) in d.transactions" :key="i">
+              <tr>
+                <td class="text-muted mono text-xs" x-text="t.date"></td>
+                <td class="font-semibold" x-text="t.symbol"></td>
+                <td><span class="chip" :class="{'chip-buy': t.type=='buy', 'chip-sell': t.type=='sell'}" x-text="t.type"></span></td>
+                <td class="num" x-text="money(t.total)"></td>
+              </tr>
+            </template>
+            <tr x-show="!d.transactions.length"><td colspan="4" class="text-muted text-center py-6">No transactions.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script id="dashboard-data" type="application/json">{{ data | tojson }}</script>
+<script>
+  function dashboard() {
+    return {
+      d: JSON.parse(document.getElementById('dashboard-data').textContent),
+      money(v) { return FINAI.fmtMoney(v, this.d.base_currency); },
+      num(v, dcml) { return FINAI.fmtNum(v, dcml); },
+      pct(v) { return FINAI.fmtPct(v); },
+      cls(v) { return FINAI.signClass(v); },
+      init() {
+        FINAI.equityCurve(document.getElementById('equityChart'), this.d.curve.dates, this.d.curve.values, this.d.base_currency);
+        FINAI.donut(document.getElementById('allocChart'), this.d.allocation.map(a => a.label), this.d.allocation.map(a => a.value));
+      },
+    };
+  }
+</script>
+{% endif %}
+{% endblock %}
