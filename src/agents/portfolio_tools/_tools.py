@@ -4536,26 +4536,51 @@ class SetPriceSeriesTool(BaseTool):
             if not series:
                 return "❌ Could not build a series (anchors did not span any days)."
 
-            # Store every day, overwriting existing rows, via the manager
-            # (handles FX conversion, cache invalidation and today's current_price).
+            # Resolve the instrument's native currency (matches the manager's rule).
             position = self.portfolio_manager.current_portfolio.positions.get(symbol)
             is_sold_instrument = position is None
-            success_count = 0
-            failed_dates: list[str] = []
+            if position is not None:
+                native_currency = position.instrument.currency
+            else:
+                native_currency = self.portfolio_manager.current_portfolio.base_currency
 
+            # Percent-of-par quotes are dimensionless ratios: FX conversion would
+            # corrupt them, so it is deliberately skipped. Absolute prices quoted
+            # in a non-native currency are converted per-day at that day's rate.
+            needs_fx = (
+                price_currency is not None
+                and price_currency != native_currency
+                and not as_percent_of_par
+            )
+            fx_skipped_for_par = (
+                as_percent_of_par
+                and price_currency is not None
+                and price_currency != native_currency
+            )
+
+            # Build the batch (values in native currency), converting where needed.
+            entries: list[tuple[str, date, Decimal]] = []
+            failed_dates: list[str] = []
             for price_date in sorted(series):
-                ok = self.portfolio_manager.set_position_price(
-                    symbol=symbol,
-                    price=series[price_date],
-                    target_date=price_date,
-                    update_current=(price_date == date.today() and not is_sold_instrument),
-                    currency=price_currency,
-                    source="anchor_interpolated",
-                )
-                if ok:
-                    success_count += 1
-                else:
-                    failed_dates.append(str(price_date))
+                value = series[price_date]
+                if needs_fx:
+                    fx_rate = self.portfolio_manager._get_exchange_rate_at_date(
+                        price_currency, native_currency, price_date
+                    )
+                    if fx_rate is None:
+                        fx_rate = self.portfolio_manager._get_exchange_rate(
+                            price_currency, native_currency
+                        )
+                    if fx_rate is None:
+                        failed_dates.append(str(price_date))
+                        continue
+                    value = value * fx_rate
+                entries.append((symbol, price_date, value))
+
+            # Single batched write + one cache invalidation (was O(days) before).
+            success_count = self.portfolio_manager.set_positions_prices_batch(
+                entries, source="anchor_interpolated"
+            )
 
             first_day = min(series)
             last_day = max(series)
@@ -4569,6 +4594,11 @@ class SetPriceSeriesTool(BaseTool):
                 f"• Date range: {first_day} to {last_day}",
                 "• Existing prices in range were overwritten (source: anchor_interpolated)",
             ]
+            if fx_skipped_for_par:
+                lines.append(
+                    f"• Note: '{price_currency.value}' ignored for FX — percent-of-par "
+                    "values are dimensionless ratios and stored without conversion"
+                )
             if is_sold_instrument:
                 lines.append("• Note: sold instrument - only historical market data entries were updated")
             if failed_dates:

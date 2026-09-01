@@ -34,13 +34,6 @@ from mcp.server.fastmcp import FastMCP
 # Add project root to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.data_providers.manager import DataProviderManager
-from src.portfolio.manager import PortfolioManager
-from src.portfolio.simulation_store import SimulationStore
-from src.portfolio.storage import FileBasedStorage
-from src.services.market_data_service import MarketDataService
-from src.utils.metrics import FinancialMetricsCalculator
-
 # Tool classes
 from src.agents.portfolio_tools import (
     AddTransactionTool,
@@ -57,9 +50,9 @@ from src.agents.portfolio_tools import (
     GetPortfolioMetricsTool,
     GetPortfolioSnapshotTool,
     GetPortfolioSummaryTool,
-    GetYTDPerformanceTool,
     GetTransactionHistoryTool,
     GetTransactionsTool,
+    GetYTDPerformanceTool,
     HypotheticalPositionTool,
     IngestPdfTool,
     InterpolatePricesTool,
@@ -70,8 +63,8 @@ from src.agents.portfolio_tools import (
     SearchCompanyTool,
     SearchInstrumentTool,
     SetDataProviderSymbolTool,
-    SetPriceCurrencyTool,
     SetMarketPriceTool,
+    SetPriceCurrencyTool,
     SetPriceSeriesTool,
     SimulateWhatIfTool,
     UpdateHistoricalMarketDataTool,
@@ -85,6 +78,12 @@ from src.agents.tools.market_data_tools import (
     GetPriceHistoryTool,
     RefreshDataTool,
 )
+from src.data_providers.manager import DataProviderManager
+from src.portfolio.manager import PortfolioManager
+from src.portfolio.simulation_store import SimulationStore
+from src.portfolio.storage import FileBasedStorage
+from src.services.market_data_service import MarketDataService
+from src.utils.metrics import FinancialMetricsCalculator
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -1033,8 +1032,14 @@ def _record_simulation(
     Successful runs are saved under data/simulations/ so they can be re-checked
     later via list_simulations / get_simulation. Failed runs (error output) are
     not persisted. Never raises: a storage failure just returns an empty footer.
+
+    Error outputs are detected by the leading ``❌`` marker that every tool uses
+    for failures (tolerating leading whitespace/newlines). Empty output is also
+    treated as a non-persistable failure.
     """
-    if output.startswith("❌"):
+    if not output or not output.strip():
+        return ""
+    if output.lstrip().startswith("❌"):
         return ""
     try:
         p = portfolio_manager.current_portfolio
@@ -1496,10 +1501,17 @@ def main():
 
 
 def _require_api_key() -> str:
-    """Return the configured API key, exiting if it is not set."""
-    api_key = os.environ.get("FINAI_API_KEY", "finai-api-key")
+    """Return the configured API key, exiting if it is not set.
+
+    There is deliberately no default: a missing/blank FINAI_API_KEY is a fatal
+    misconfiguration for the networked transports, not something to paper over
+    with a well-known key that would leave the server effectively unauthenticated.
+    """
+    api_key = os.environ.get("FINAI_API_KEY", "").strip()
     if not api_key:
-        logger.error("FINAI_API_KEY environment variable is required")
+        logger.error(
+            "FINAI_API_KEY environment variable is required for HTTP/SSE transports"
+        )
         sys.exit(1)
     return api_key
 

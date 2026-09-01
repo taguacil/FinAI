@@ -63,6 +63,24 @@ class BacktestPortfolioTool:
                 currencies[price_symbol] = inst.price_currency or inst.currency
         return symbols, currencies
 
+    def _currency_map_from_portfolio(self) -> Dict[str, Currency]:
+        """Map every known price symbol (from positions) → its price currency.
+
+        Includes zero-quantity positions so an explicitly-backtested symbol that
+        the user isn't currently holding can still be currency-resolved.
+        """
+        portfolio = self.portfolio_manager.current_portfolio
+        currencies: Dict[str, Currency] = {}
+        if not portfolio:
+            return currencies
+        for sym, pos in portfolio.positions.items():
+            inst = pos.instrument
+            price_symbol = (inst.data_provider_symbol or inst.symbol) if inst else sym
+            price_symbol = price_symbol.upper().strip()
+            if inst:
+                currencies[price_symbol] = inst.price_currency or inst.currency
+        return currencies
+
     # -- main entry ---------------------------------------------------------
 
     def _run(
@@ -90,8 +108,29 @@ class BacktestPortfolioTool:
 
         # Resolve universe: explicit symbols, else current portfolio positions.
         price_currencies: Dict[str, Currency] = {}
+        fx_warnings: List[str] = []
         if symbols:
             symbol_list = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+            # Try to resolve each explicit symbol's price currency from the
+            # current portfolio so FX conversion still applies. Symbols we can't
+            # map are assumed to already be in the base currency; warn so a
+            # foreign-listed instrument isn't silently treated as base.
+            known = self._currency_map_from_portfolio()
+            unresolved: List[str] = []
+            for sym in symbol_list:
+                if sym in known:
+                    price_currencies[sym] = known[sym]
+                elif sym == benchmark.upper().strip():
+                    continue  # benchmark handled separately
+                else:
+                    unresolved.append(sym)
+            if unresolved:
+                fx_warnings.append(
+                    "No currency info for "
+                    + ", ".join(unresolved)
+                    + f"; assuming prices are already in {base_currency.value} "
+                    "(FX conversion not applied)."
+                )
         else:
             symbol_list, price_currencies = self._universe_from_portfolio()
             if not symbol_list:
@@ -164,6 +203,9 @@ class BacktestPortfolioTool:
         except Exception as e:  # pragma: no cover - defensive
             logger.exception("Backtest failed")
             return f"❌ Backtest failed: {e}"
+
+        # Surface universe-resolution warnings (e.g. unresolved currencies).
+        result.warnings = list(fx_warnings) + list(result.warnings)
 
         return self._format(result)
 
