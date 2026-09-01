@@ -1,12 +1,13 @@
 /* FinAI web — shared client helpers: Plotly dark theme, formatters, charts. */
 
 const FINAI = (() => {
-  const ACCENT = '#2DD4BF';
-  const COLORWAY = ['#2DD4BF', '#6366F1', '#F59E0B', '#22C55E', '#F87171', '#38BDF8', '#A78BFA', '#FB7185', '#34D399', '#FBBF24'];
-  const BORDER = '#1E2A3D';
-  const GRID = 'rgba(30,42,61,0.5)';  /* lighter grid for a calmer, minimal look */
-  const TEXT = '#E6EDF3';
-  const MUTED = '#8B98A5';
+  const ACCENT = '#C3C9D0';  /* brushed silver */
+  /* Monochrome metallic ramp — reads as an institutional chart, not a rainbow. */
+  const COLORWAY = ['#C7CDD4', '#9AA4AF', '#74808C', '#B6AEA3', '#4C555F', '#8A8F98', '#A9B0B8', '#5E666F', '#D2D7DC', '#7A828B'];
+  const BORDER = '#262A30';
+  const GRID = 'rgba(38,42,48,0.5)';  /* lighter grid for a calmer, minimal look */
+  const TEXT = '#E6E8EB';
+  const MUTED = '#868D96';
 
   const baseLayout = (over = {}) => ({
     paper_bgcolor: 'rgba(0,0,0,0)',
@@ -17,7 +18,7 @@ const FINAI = (() => {
     xaxis: { gridcolor: GRID, zerolinecolor: GRID, linecolor: BORDER, tickcolor: BORDER },
     yaxis: { gridcolor: GRID, zerolinecolor: GRID, linecolor: BORDER, tickcolor: BORDER },
     legend: { bgcolor: 'rgba(0,0,0,0)', font: { color: MUTED } },
-    hoverlabel: { bgcolor: '#131A2A', bordercolor: BORDER, font: { color: TEXT } },
+    hoverlabel: { bgcolor: '#14161A', bordercolor: BORDER, font: { color: TEXT } },
     ...over,
   });
 
@@ -32,8 +33,8 @@ const FINAI = (() => {
 
   // Fixed, institutional colours per asset class for a consistent read across views.
   const ASSET_COLORS = {
-    Equities: '#2DD4BF', ETFs: '#38BDF8', Bonds: '#6366F1', Crypto: '#F59E0B',
-    Cash: '#64748B', 'Mutual Funds': '#A78BFA', Options: '#FB7185', Futures: '#34D399',
+    Equities: '#C7CDD4', Bonds: '#9AA4AF', ETFs: '#74808C', 'Mutual Funds': '#B6AEA3',
+    Cash: '#4C555F', Crypto: '#8A8F98', Options: '#A9B0B8', Futures: '#5E666F',
   };
 
   const fmtMoney = (v, ccy = 'USD') => {
@@ -53,7 +54,7 @@ const FINAI = (() => {
     const trace = {
       x: dates, y: values, type: 'scatter', mode: 'lines',
       line: { color: ACCENT, width: 1.6, shape: 'spline', smoothing: 0.4 },
-      fill: 'tozeroy', fillcolor: 'rgba(45,212,191,0.04)',
+      fill: 'tozeroy', fillcolor: 'rgba(195,201,208,0.05)',
       hovertemplate: `%{x}<br>${ccy} %{y:,.0f}<extra></extra>`,
     };
     const ymin = Math.min(...values), ymax = Math.max(...values);
@@ -70,7 +71,7 @@ const FINAI = (() => {
     const colors = labels.map((l, i) => ASSET_COLORS[l] || COLORWAY[i % COLORWAY.length]);
     const trace = {
       labels, values, type: 'pie', hole: 0.62, sort: true, direction: 'clockwise',
-      marker: { colors, line: { color: '#0B0F1A', width: 2 } },
+      marker: { colors, line: { color: '#0A0B0D', width: 2 } },
       textinfo: 'none',
       hovertemplate: '%{label}<br>%{value:,.0f} (%{percent})<extra></extra>',
     };
