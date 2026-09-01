@@ -27,7 +27,9 @@ class PortfolioInitializer:
         self.storage = FileBasedStorage(data_dir)
         self.data_manager = DataProviderManager()
         self.market_data_service = MarketDataService(self.data_manager)
-        self.portfolio_manager = PortfolioManager(self.storage, self.market_data_service)
+        self.portfolio_manager = PortfolioManager(
+            self.storage, self.market_data_service
+        )
         self.metrics_calculator = FinancialMetricsCalculator(self.data_manager)
 
         logging.info("Portfolio initializer started")
@@ -62,11 +64,11 @@ class PortfolioInitializer:
         # Load existing portfolios
         results["portfolios_loaded"] = self._load_existing_portfolios()
 
-        # Update portfolio prices if any portfolios exist
+        # Load portfolio data into the manager (no network fetch).
         results["prices_updated"] = self._update_all_portfolio_prices()
 
-        # Update market data for portfolios
-        results["market_data_updated"] = self._update_market_data()
+        # Note: market data / prices are NOT fetched automatically at startup.
+        # Use the UI 'Update Prices' button (or the MCP fetch tools) to refresh.
 
         logging.info(f"System initialization completed: {results}")
         return results
@@ -226,9 +228,7 @@ class PortfolioInitializer:
             try:
                 self.portfolio_manager.update_market_data(start_date, today)
                 results["market_data_updated"] = True
-                logging.info(
-                    f"Updated market data from {start_date} to {today}"
-                )
+                logging.info(f"Updated market data from {start_date} to {today}")
             except Exception as e:
                 logging.warning(f"Could not update market data: {e}")
 
@@ -420,9 +420,13 @@ class PortfolioInitializer:
                 "portfolio_name": portfolio.name,
                 "market_data_updated": True,
                 "price_update_results": price_results,
-                "current_value": float(self.portfolio_manager.get_portfolio_value() or 0),
+                "current_value": float(
+                    self.portfolio_manager.get_portfolio_value() or 0
+                ),
             }
 
         except Exception as e:
-            logging.error(f"Error updating market data for portfolio {portfolio_id}: {e}")
+            logging.error(
+                f"Error updating market data for portfolio {portfolio_id}: {e}"
+            )
             return {"error": str(e)}

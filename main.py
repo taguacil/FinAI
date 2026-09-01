@@ -157,17 +157,32 @@ def main():
             else:
                 print("❌ Failed to create sample portfolio")
 
-        # Start the UI
+        # Start the UI via Streamlit's own runtime. A Streamlit app must be
+        # launched with `streamlit run`; calling its main() directly leaves it
+        # without a ScriptRunContext (session state won't work).
         try:
-            from src.ui.streamlit_app import main as run_streamlit
+            import subprocess
+
+            streamlit_app = Path(__file__).parent / "src" / "ui" / "streamlit_app.py"
 
             print("🌐 Starting web interface...")
             print("   Open your browser to: http://localhost:8501")
             print("   Note: Use the 'Update Prices' button to fetch new data")
-            run_streamlit()
-        except ImportError as e:
+            subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "streamlit",
+                    "run",
+                    str(streamlit_app),
+                ],
+                check=True,
+            )
+        except FileNotFoundError as e:
             print(f"❌ Failed to start UI: {e}")
             print("   Make sure all dependencies are installed: uv sync")
+        except KeyboardInterrupt:
+            print("\n👋 UI stopped.")
         except Exception as e:
             print(f"❌ Error starting UI: {e}")
 
