@@ -1,0 +1,206 @@
+{% extends "base.html" %}
+{% block title %}Simulate · FinAI{% endblock %}
+{% block heading %}Simulate{% endblock %}
+
+{% block content %}
+{% set bt = backtest %}
+{% set mc = montecarlo %}
+{% if bt.empty %}
+  <div class="card text-center py-16"><p class="text-muted">No portfolio loaded.</p></div>
+{% else %}
+<div x-data="simulate()" x-init="init()">
+  <!-- Sub-tabs -->
+  <div class="flex items-center justify-between mb-5 flex-wrap gap-3">
+    <p class="page-sub">Strategy backtesting and Monte Carlo projections.</p>
+    <div class="seg">
+      <a href="/simulate?portfolio={{ active_portfolio_id or '' }}&tab=backtest"
+         class="seg-item {{ 'seg-item-active' if tab == 'backtest' else '' }}">Backtest</a>
+      <a href="/simulate?portfolio={{ active_portfolio_id or '' }}&tab=montecarlo"
+         class="seg-item {{ 'seg-item-active' if tab == 'montecarlo' else '' }}">Monte Carlo</a>
+    </div>
+  </div>
+
+  {% if tab == 'backtest' %}
+  <!-- ============ BACKTEST ============ -->
+  <form method="get" action="/simulate" class="card mb-5">
+    <input type="hidden" name="portfolio" value="{{ active_portfolio_id or '' }}" />
+    <input type="hidden" name="tab" value="backtest" />
+    <input type="hidden" name="bt_run" value="1" />
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+      <div>
+        <label class="label">Universe (symbols, comma-separated)</label>
+        <input type="text" name="symbols" value="{{ bt.params.symbols | join(', ') }}" class="input mono" placeholder="AAPL, MSFT, ..." />
+      </div>
+      <div>
+        <label class="label">Strategies (comma-separated)</label>
+        <input type="text" name="strategies" value="{{ bt.params.strategy_specs | join(', ') }}" class="input mono" />
+        <p class="hint mt-1 text-xs">hrp · max_sharpe · min_volatility · equal_weight · buy_and_hold</p>
+      </div>
+    </div>
+    <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-4 items-end">
+      <div><label class="label">Start</label><input type="date" name="start" value="{{ bt.params.start }}" class="input mono" /></div>
+      <div><label class="label">End</label><input type="date" name="end" value="{{ bt.params.end }}" class="input mono" /></div>
+      <div><label class="label">Capital</label><input type="number" name="initial_capital" min="1000" step="1000" value="{{ bt.params.initial_capital }}" class="input mono" /></div>
+      <div>
+        <label class="label">Rebalance</label>
+        <select name="rebalance" class="select">
+          {% for opt in ['monthly', 'quarterly', 'weekly', 'daily', 'none'] %}
+          <option value="{{ opt }}" {{ 'selected' if bt.params.rebalance_frequency == opt else '' }}>{{ opt|capitalize }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div><label class="label">Benchmark</label><input type="text" name="bt_benchmark" value="{{ bt.params.benchmark_symbol }}" class="input mono" /></div>
+      <div><label class="label">Lookback</label><input type="number" name="lookback_days" min="30" step="10" value="{{ bt.params.lookback_days }}" class="input mono" /></div>
+      <div class="flex items-end"><button type="submit" class="btn btn-accent w-full"><i data-lucide="play" class="h-4 w-4"></i> Run</button></div>
+    </div>
+  </form>
+
+  {% if not bt.ran %}
+    <div class="card text-center py-16"><p class="text-muted">Configure a universe and strategies, then run the backtest.</p></div>
+  {% elif bt.error %}
+    <div class="card"><p class="neg">{{ bt.error }}</p></div>
+  {% else %}
+    {% if bt.warnings %}
+    <div class="card card-tight mb-4">
+      {% for w in bt.warnings %}<p class="text-xs text-muted">⚠ {{ w }}</p>{% endfor %}
+    </div>
+    {% endif %}
+    <div class="card mb-4">
+      <div class="flex items-center justify-between mb-2">
+        <span class="section-title">Equity curves</span>
+        <span class="text-xs text-muted mono">{{ bt.window.start }} → {{ bt.window.end }}</span>
+      </div>
+      <div id="btEquity" style="height: 320px;"></div>
+    </div>
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+      <div class="card lg:col-span-2 overflow-hidden">
+        <div class="section-title mb-3">Metrics</div>
+        <div class="overflow-x-auto">
+          <table class="tbl">
+            <thead><tr><th>Strategy</th><th class="num">Final</th><th class="num">Return</th><th class="num">CAGR</th><th class="num">Vol</th><th class="num">Sharpe</th><th class="num">Sortino</th><th class="num">Max DD</th></tr></thead>
+            <tbody>
+              <template x-for="(m, i) in bt.metrics" :key="i">
+                <tr>
+                  <td class="font-semibold" x-text="m.name"></td>
+                  <td class="num" x-text="money(m.final_value)"></td>
+                  <td class="num" :class="cls(m.total_return)" x-text="pct(m.total_return)"></td>
+                  <td class="num" :class="cls(m.cagr)" x-text="pct(m.cagr)"></td>
+                  <td class="num" x-text="m.volatility === null ? '—' : num(m.volatility) + '%'"></td>
+                  <td class="num" x-text="num(m.sharpe)"></td>
+                  <td class="num" x-text="num(m.sortino)"></td>
+                  <td class="num neg" x-text="m.max_drawdown === null ? '—' : '-' + num(Math.abs(m.max_drawdown)) + '%'"></td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div class="card">
+        <div class="section-title mb-2">Drawdown</div>
+        <div id="btDrawdown" style="height: 240px;"></div>
+      </div>
+    </div>
+  {% endif %}
+
+  {% else %}
+  <!-- ============ MONTE CARLO ============ -->
+  <form method="get" action="/simulate" class="card mb-5">
+    <input type="hidden" name="portfolio" value="{{ active_portfolio_id or '' }}" />
+    <input type="hidden" name="tab" value="montecarlo" />
+    <input type="hidden" name="mc_run" value="1" />
+    <div class="grid grid-cols-2 md:grid-cols-5 gap-4 items-end">
+      <div>
+        <label class="label">Scenario</label>
+        <select name="scenario" class="select">
+          {% for opt in ['optimistic', 'likely', 'pessimistic', 'stress'] %}
+          <option value="{{ opt }}" {{ 'selected' if mc.params.scenario == opt else '' }}>{{ opt|capitalize }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div><label class="label">Years</label><input type="number" name="years" min="1" max="30" step="0.5" value="{{ mc.params.projection_years }}" class="input mono" /></div>
+      <div>
+        <label class="label">Runs</label>
+        <select name="runs" class="select">
+          {% for opt in [500, 1000, 2500, 5000] %}
+          <option value="{{ opt }}" {{ 'selected' if mc.params.monte_carlo_runs == opt else '' }}>{{ opt }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div><label class="label">Monthly deposit</label><input type="number" name="deposit" min="0" step="100" value="{{ mc.params.monthly_deposit }}" class="input mono" /></div>
+      <div class="flex items-end gap-2">
+        <div class="flex-1"><label class="label">Withdrawal</label><input type="number" name="withdrawal" min="0" step="100" value="{{ mc.params.monthly_withdrawal }}" class="input mono" /></div>
+        <button type="submit" class="btn btn-accent"><i data-lucide="play" class="h-4 w-4"></i></button>
+      </div>
+    </div>
+  </form>
+
+  {% if not mc.ran %}
+    <div class="card text-center py-16"><p class="text-muted">Pick a scenario and horizon, then run the Monte Carlo projection.</p></div>
+  {% elif mc.error %}
+    <div class="card"><p class="neg">{{ mc.error }}</p></div>
+  {% else %}
+    <div class="card mb-4">
+      <div class="flex items-center justify-between mb-2">
+        <span class="section-title">Projected value — {{ mc.params.scenario | capitalize }}</span>
+        <span class="text-xs text-muted">Median with 50% &amp; 90% bands · {{ mc.params.monte_carlo_runs }} runs</span>
+      </div>
+      <div id="mcFan" style="height: 320px;"></div>
+    </div>
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+      <div class="card lg:col-span-2">
+        <div class="section-title mb-3">Summary</div>
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <div class="metric"><span class="metric-label">Median final</span><span class="metric-value mono" x-text="money(mc.summary.median_final_value)"></span></div>
+          <div class="metric"><span class="metric-label">Mean final</span><span class="metric-value mono" x-text="money(mc.summary.mean_final_value)"></span></div>
+          <div class="metric"><span class="metric-label">VaR 95</span><span class="metric-value mono" x-text="money(mc.summary.var_95)"></span></div>
+          <div class="metric"><span class="metric-label">Ann. return</span><span class="metric-value mono" :class="cls(mc.summary.mean_annualized_return*100)" x-text="pct(mc.summary.mean_annualized_return*100)"></span></div>
+          <div class="metric"><span class="metric-label">P(loss)</span><span class="metric-value mono" x-text="pctRaw(mc.summary.probability_of_loss)"></span></div>
+          <div class="metric"><span class="metric-label">P(2×)</span><span class="metric-value mono" x-text="pctRaw(mc.summary.probability_of_doubling)"></span></div>
+          <div class="metric"><span class="metric-label">Max DD (avg)</span><span class="metric-value mono neg" x-text="pctRaw(mc.summary.mean_max_drawdown, true)"></span></div>
+          <div class="metric"><span class="metric-label">Start value</span><span class="metric-value mono" x-text="money(mc.start_value)"></span></div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="section-title mb-2">Final value distribution</div>
+        <div id="mcHist" style="height: 240px;"></div>
+      </div>
+    </div>
+  {% endif %}
+  {% endif %}
+</div>
+
+<script id="bt-data" type="application/json">{{ backtest | tojson }}</script>
+<script id="mc-data" type="application/json">{{ montecarlo | tojson }}</script>
+<script>
+  function simulate() {
+    return {
+      tab: {{ tab | tojson }},
+      bt: JSON.parse(document.getElementById('bt-data').textContent),
+      mc: JSON.parse(document.getElementById('mc-data').textContent),
+      num(v, dcml) { return FINAI.fmtNum(v, dcml ?? 2); },
+      pct(v) { return FINAI.fmtPct(v); },
+      pctRaw(v, neg) { if (v === null || v === undefined) return '—'; const p = v * 100; return (neg ? '-' : '') + FINAI.fmtNum(Math.abs(p), 1) + '%'; },
+      cls(v) { return FINAI.signClass(v); },
+      money(v) { return FINAI.fmtMoney(v, (this.bt && this.bt.base_currency) || (this.mc && this.mc.base_currency) || 'USD'); },
+      init() {
+        this.$nextTick(() => {
+          if (this.tab === 'backtest' && this.bt.ran && !this.bt.error) {
+            const e = this.bt.equity;
+            const series = e.series.map((s, i) => ({ name: s.name, y: s.values, color: FINAI.COLORWAY[i % FINAI.COLORWAY.length] }));
+            if (e.benchmark) series.push({ name: e.benchmark.name, y: e.benchmark.values, color: '#5E666F', dash: 'dot' });
+            FINAI.lineMulti(document.getElementById('btEquity'), e.dates, series, { hoverfmt: ',.0f' });
+            const dd = this.bt.drawdown;
+            const ddSeries = dd.series.map((s, i) => ({ name: s.name, y: s.values, color: FINAI.COLORWAY[i % FINAI.COLORWAY.length] }));
+            FINAI.lineMulti(document.getElementById('btDrawdown'), dd.dates, ddSeries, { ysuffix: '%', hoverfmt: '.1f' });
+          }
+          if (this.tab === 'montecarlo' && this.mc.ran && !this.mc.error) {
+            FINAI.fanChart(document.getElementById('mcFan'), this.mc.dates, this.mc.bands, this.mc.base_currency);
+            FINAI.histogram(document.getElementById('mcHist'), this.mc.final_values, { bins: 40 });
+          }
+        });
+      },
+    };
+  }
+</script>
+{% endif %}
+{% endblock %}

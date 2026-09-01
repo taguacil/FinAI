@@ -1,0 +1,137 @@
+{% extends "base.html" %}
+{% block title %}Data & Settings · FinAI{% endblock %}
+{% block heading %}Data &amp; Settings{% endblock %}
+
+{% block content %}
+{% if data.empty %}
+  <div class="card text-center py-16"><p class="text-muted">No portfolio loaded.</p></div>
+{% else %}
+<div x-data="dataPage()">
+  <!-- Flash -->
+  {% if flash.msg %}
+  <div class="card card-tight mb-4 flex items-center gap-2"><i data-lucide="check-circle" class="h-4 w-4 pos"></i><span class="text-sm">{{ flash.msg }}</span></div>
+  {% endif %}
+  {% if flash.err %}
+  <div class="card card-tight mb-4 flex items-center gap-2"><i data-lucide="alert-triangle" class="h-4 w-4 neg"></i><span class="text-sm neg">{{ flash.err }}</span></div>
+  {% endif %}
+
+  <div class="flex items-center justify-between mb-5 flex-wrap gap-3">
+    <p class="page-sub">Market data, pricing and portfolio settings.</p>
+    <span class="chip {{ 'chip-sell' if data.offline else 'chip-buy' }}">{{ 'Cache-only' if data.offline else 'Online' }}</span>
+  </div>
+
+  <!-- Overview stats -->
+  <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-5">
+    <div class="card card-tight metric"><span class="metric-label">Net worth</span>
+      <span class="metric-value mono">{{ '{:,.0f}'.format(data.stats.net_worth) }} {{ data.base_currency }}</span></div>
+    <div class="card card-tight metric"><span class="metric-label">Positions</span>
+      <span class="metric-value mono">{{ data.stats.positions }}</span></div>
+    <div class="card card-tight metric"><span class="metric-label">Prices stored</span>
+      <span class="metric-value mono">{{ data.stats.price_count }}</span></div>
+    <div class="card card-tight metric"><span class="metric-label">Freshness</span>
+      <span class="metric-value mono {{ 'neg' if data.stats.is_stale else '' }}">{{ data.stats.freshness or '—' }}</span></div>
+  </div>
+
+  <!-- Refresh actions -->
+  <div class="card mb-5">
+    <div class="flex items-center justify-between flex-wrap gap-3">
+      <div>
+        <div class="section-title mb-1">Fetch market data</div>
+        <p class="hint text-xs">Temporarily goes online to pull the latest prices, then returns to cache-only mode.</p>
+      </div>
+      <div class="flex items-center gap-2">
+        <form method="post" action="/data/refresh">
+          <input type="hidden" name="portfolio" value="{{ active_portfolio_id or '' }}" />
+          <input type="hidden" name="historical" value="0" />
+          <button type="submit" class="btn"><i data-lucide="refresh-cw" class="h-4 w-4"></i> Current prices</button>
+        </form>
+        <form method="post" action="/data/refresh">
+          <input type="hidden" name="portfolio" value="{{ active_portfolio_id or '' }}" />
+          <input type="hidden" name="historical" value="1" />
+          <button type="submit" class="btn"><i data-lucide="history" class="h-4 w-4"></i> Historical</button>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- Prices table + manual set -->
+  <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-5">
+    <div class="card lg:col-span-2 overflow-hidden">
+      <div class="section-title mb-3">Instrument prices</div>
+      <div class="overflow-x-auto" style="max-height: 520px;">
+        <table class="tbl">
+          <thead class="sticky-head"><tr>
+            <th>Symbol</th><th>Name</th><th class="num">Price (native)</th><th class="num">Price ({{ data.base_currency }})</th><th class="num">Updated</th>
+          </tr></thead>
+          <tbody>
+            {% for p in data.prices %}
+            <tr class="cursor-pointer hover:bg-white/[0.02]" @click="pick('{{ p.symbol }}', '{{ p.currency }}')">
+              <td class="font-semibold">{{ p.symbol }}</td>
+              <td class="text-muted truncate max-w-[220px]">{{ p.name or '—' }}</td>
+              <td class="num">
+                {% if p.has_price %}{{ '{:,.4f}'.format(p.price_local) }} <span class="text-muted text-xs">{{ p.currency }}</span>
+                {% else %}<span class="neg text-xs">no price</span>{% endif %}
+              </td>
+              <td class="num">{% if p.has_price and p.is_fx %}{{ '{:,.2f}'.format(p.price_base) }}{% elif p.has_price %}—{% else %}—{% endif %}</td>
+              <td class="num text-muted text-xs">{{ p.last_updated or '—' }}</td>
+            </tr>
+            {% endfor %}
+            {% if not data.prices %}
+            <tr><td colspan="5" class="text-muted text-center py-6">No instruments tracked.</td></tr>
+            {% endif %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="section-title mb-3">Set price manually</div>
+      <form method="post" action="/data/set-price" class="space-y-3">
+        <input type="hidden" name="portfolio" value="{{ active_portfolio_id or '' }}" />
+        <div>
+          <label class="label">Symbol</label>
+          <input type="text" name="symbol" x-model="sym" required class="input mono" placeholder="AAPL" list="symbol-list" />
+          <datalist id="symbol-list">
+            {% for p in data.prices %}<option value="{{ p.symbol }}"></option>{% endfor %}
+          </datalist>
+        </div>
+        <div>
+          <label class="label">Price</label>
+          <input type="number" name="price" step="any" min="0" required class="input mono" placeholder="0.00" />
+        </div>
+        <div>
+          <label class="label">Currency</label>
+          <select name="currency" x-model="ccy" class="select">
+            <option value="">Keep existing</option>
+            {% for c in data.currencies %}<option value="{{ c }}">{{ c }}</option>{% endfor %}
+          </select>
+        </div>
+        <button type="submit" class="btn btn-accent w-full"><i data-lucide="save" class="h-4 w-4"></i> Save price</button>
+        <p class="hint text-xs">Click a row on the left to prefill the symbol.</p>
+      </form>
+    </div>
+  </div>
+
+  <!-- Portfolio info -->
+  <div class="card">
+    <div class="section-title mb-3">Portfolio</div>
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div class="metric"><span class="metric-label">Name</span><span class="metric-value">{{ data.portfolio_name }}</span></div>
+      <div class="metric"><span class="metric-label">Base currency</span><span class="metric-value mono">{{ data.base_currency }}</span></div>
+      <div class="metric"><span class="metric-label">Symbols tracked</span><span class="metric-value mono">{{ data.stats.symbols_tracked }}</span></div>
+      <div class="metric"><span class="metric-label">Created</span><span class="metric-value mono text-sm">{{ data.created_at or '—' }}</span></div>
+    </div>
+    <p class="metric-label mt-4">ID <span class="mono">{{ data.portfolio_id }}</span></p>
+  </div>
+</div>
+
+<script>
+  function dataPage() {
+    return {
+      sym: '', ccy: '',
+      pick(symbol, currency) { this.sym = symbol; this.ccy = currency || ''; window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' }); },
+    };
+  }
+</script>
+{% endif %}
+{% endblock %}

@@ -82,5 +82,121 @@ const FINAI = (() => {
     }), config);
   }
 
-  return { baseLayout, config, fmtMoney, fmtNum, fmtPct, signClass, assetClassLabel, equityCurve, donut, COLORWAY, ACCENT };
+  const noData = (el, msg) => { el.innerHTML = `<p class="text-muted text-sm p-4">${msg || 'No data.'}</p>`; };
+
+  // Multi-line chart. series = [{ name, y, color?, dash?, width? }]; x shared.
+  function lineMulti(el, x, series, opts = {}) {
+    if (!x || !x.length || !series || !series.length) { noData(el, opts.empty); return; }
+    const traces = series.map((s, i) => ({
+      x, y: s.y, name: s.name, type: 'scatter', mode: 'lines',
+      line: { color: s.color || COLORWAY[i % COLORWAY.length], width: s.width || 1.6, dash: s.dash || 'solid', shape: 'spline', smoothing: 0.3 },
+      hovertemplate: `%{x}<br>${s.name}: %{y:${opts.hoverfmt || ',.2f'}}<extra></extra>`,
+    }));
+    Plotly.newPlot(el, traces, baseLayout({
+      showlegend: series.length > 1,
+      legend: { orientation: 'h', y: 1.12, x: 0, font: { color: MUTED, size: 11 } },
+      xaxis: { gridcolor: 'rgba(0,0,0,0)', linecolor: BORDER },
+      yaxis: { gridcolor: GRID, zerolinecolor: GRID, ticksuffix: opts.ysuffix || '' },
+      margin: { t: 24, r: 12, b: 36, l: 52 },
+    }), config);
+  }
+
+  // Filled drawdown area (values are <= 0, e.g. percent below peak).
+  function drawdown(el, x, values, opts = {}) {
+    if (!x || !x.length) { noData(el, opts.empty); return; }
+    const trace = {
+      x, y: values, type: 'scatter', mode: 'lines',
+      line: { color: '#D07B6B', width: 1.2 },
+      fill: 'tozeroy', fillcolor: 'rgba(208,123,107,0.12)',
+      hovertemplate: `%{x}<br>%{y:.2f}%<extra></extra>`,
+    };
+    Plotly.newPlot(el, [trace], baseLayout({
+      xaxis: { gridcolor: 'rgba(0,0,0,0)', linecolor: BORDER },
+      yaxis: { gridcolor: GRID, zerolinecolor: GRID, ticksuffix: '%' },
+    }), config);
+  }
+
+  // Histogram (returns distribution).
+  function histogram(el, values, opts = {}) {
+    if (!values || !values.length) { noData(el, opts.empty); return; }
+    const trace = {
+      x: values, type: 'histogram', marker: { color: ACCENT, line: { color: '#0A0B0D', width: 1 } },
+      opacity: 0.85, nbinsx: opts.bins || 40,
+      hovertemplate: `%{x}<br>%{y} periods<extra></extra>`,
+    };
+    Plotly.newPlot(el, [trace], baseLayout({
+      bargap: 0.02,
+      xaxis: { gridcolor: 'rgba(0,0,0,0)', linecolor: BORDER, ticksuffix: opts.xsuffix || '' },
+      yaxis: { gridcolor: GRID, zerolinecolor: GRID },
+    }), config);
+  }
+
+  // Horizontal bars (e.g. optimizer target weights). rows = [{label, value}].
+  function barsH(el, rows, opts = {}) {
+    if (!rows || !rows.length) { noData(el, opts.empty); return; }
+    const labels = rows.map(r => r.label), values = rows.map(r => r.value);
+    const trace = {
+      x: values, y: labels, type: 'bar', orientation: 'h',
+      marker: { color: ACCENT }, hovertemplate: `%{y}: %{x:${opts.hoverfmt || '.2f'}}${opts.suffix || ''}<extra></extra>`,
+    };
+    Plotly.newPlot(el, [trace], baseLayout({
+      margin: { t: 8, r: 12, b: 32, l: Math.max(80, opts.leftMargin || 0) },
+      xaxis: { gridcolor: GRID, zerolinecolor: GRID, ticksuffix: opts.suffix || '' },
+      yaxis: { gridcolor: 'rgba(0,0,0,0)', autorange: 'reversed' },
+    }), config);
+  }
+
+  // Scatter (e.g. efficient frontier: points of {x: risk, y: return}), optional highlight.
+  function scatter(el, pts, opts = {}) {
+    if (!pts || !pts.length) { noData(el, opts.empty); return; }
+    const traces = [{
+      x: pts.map(p => p.x), y: pts.map(p => p.y), type: 'scatter', mode: 'lines+markers',
+      line: { color: ACCENT, width: 1.4 }, marker: { color: ACCENT, size: 5 },
+      name: opts.name || 'Frontier',
+      hovertemplate: `Risk %{x:.2f}${opts.suffix || ''}<br>Return %{y:.2f}${opts.suffix || ''}<extra></extra>`,
+    }];
+    if (opts.highlight) {
+      traces.push({
+        x: [opts.highlight.x], y: [opts.highlight.y], type: 'scatter', mode: 'markers',
+        marker: { color: '#5CB27F', size: 11, symbol: 'star' }, name: opts.highlight.name || 'Selected',
+        hovertemplate: `%{fullData.name}<br>Risk %{x:.2f}${opts.suffix || ''}<br>Return %{y:.2f}${opts.suffix || ''}<extra></extra>`,
+      });
+    }
+    Plotly.newPlot(el, traces, baseLayout({
+      showlegend: !!opts.highlight,
+      legend: { orientation: 'h', y: 1.12, x: 0, font: { color: MUTED, size: 11 } },
+      xaxis: { title: { text: opts.xtitle || 'Risk', font: { color: MUTED, size: 11 } }, gridcolor: GRID, zerolinecolor: GRID, ticksuffix: opts.suffix || '' },
+      yaxis: { title: { text: opts.ytitle || 'Return', font: { color: MUTED, size: 11 } }, gridcolor: GRID, zerolinecolor: GRID, ticksuffix: opts.suffix || '' },
+      margin: { t: 24, r: 12, b: 44, l: 56 },
+    }), config);
+  }
+
+  // Percentile fan chart (Monte Carlo). bands = {p5,p25,p50,p75,p95} arrays over x.
+  function fanChart(el, x, bands, ccy, opts = {}) {
+    if (!x || !x.length || !bands || !bands.p50) { noData(el, opts.empty); return; }
+    const band = (lo, hi, color) => ([
+      { x, y: hi, type: 'scatter', mode: 'lines', line: { width: 0 }, hoverinfo: 'skip', showlegend: false },
+      { x, y: lo, type: 'scatter', mode: 'lines', line: { width: 0 }, fill: 'tonexty', fillcolor: color, hoverinfo: 'skip', showlegend: false },
+    ]);
+    const traces = [];
+    if (bands.p5 && bands.p95) traces.push(...band(bands.p5, bands.p95, 'rgba(195,201,208,0.08)'));
+    if (bands.p25 && bands.p75) traces.push(...band(bands.p25, bands.p75, 'rgba(195,201,208,0.16)'));
+    traces.push({
+      x, y: bands.p50, type: 'scatter', mode: 'lines', name: 'Median',
+      line: { color: ACCENT, width: 1.8 },
+      hovertemplate: `%{x}<br>${ccy || ''} %{y:,.0f}<extra></extra>`,
+    });
+    Plotly.newPlot(el, traces, baseLayout({
+      showlegend: false,
+      xaxis: { gridcolor: 'rgba(0,0,0,0)', linecolor: BORDER, title: { text: opts.xtitle || '', font: { color: MUTED, size: 11 } } },
+      yaxis: { gridcolor: GRID, zerolinecolor: GRID },
+      margin: { t: 12, r: 12, b: 40, l: 60 },
+    }), config);
+  }
+
+  return {
+    baseLayout, config, fmtMoney, fmtNum, fmtPct, signClass, assetClassLabel,
+    equityCurve, donut, lineMulti, drawdown, histogram, barsH, scatter, fanChart,
+    COLORWAY, ACCENT,
+  };
 })();
