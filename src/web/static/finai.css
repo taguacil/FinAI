@@ -17,31 +17,35 @@ html, body { background: var(--bg); }
 .nav-link {
   display: flex; align-items: center; gap: 0.65rem;
   padding: 0.55rem 0.75rem; border-radius: 10px;
-  color: var(--muted); font-weight: 600; font-size: 0.9rem;
+  color: var(--muted); font-weight: 500; font-size: 0.9rem;
   transition: background 0.15s ease, color 0.15s ease;
 }
-.nav-link:hover { color: #E6EDF3; background: rgba(255,255,255,0.04); }
-.nav-link-active { color: #04231F; background: var(--accent); }
-.nav-link-active:hover { color: #04231F; background: var(--accent); }
+.nav-link:hover { color: #E6EDF3; background: rgba(255,255,255,0.03); }
+/* Minimal active state: hairline accent marker, not a filled block */
+.nav-link-active {
+  color: #E6EDF3; background: transparent;
+  box-shadow: inset 2px 0 0 var(--accent);
+  border-radius: 0 10px 10px 0;
+}
+.nav-link-active i { color: var(--accent); }
+.nav-link-active:hover { background: rgba(255,255,255,0.03); }
 
-/* Cards */
+/* Cards — flat, hairline border, no shadow */
 .card {
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 14px;
-  padding: 1.15rem 1.25rem;
+  border-radius: 12px;
+  padding: 1.25rem 1.35rem;
 }
 .card-tight { padding: 0.9rem 1rem; }
 
-/* KPI tiles */
-.kpi { transition: border-color 0.15s ease, transform 0.15s ease; }
-.kpi:hover { border-color: rgba(45,212,191,0.5); transform: translateY(-1px); }
+/* KPI tiles — static and calm (no hover motion) */
 .kpi-label {
-  color: var(--muted); font-size: 0.72rem; font-weight: 600;
-  text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--muted); font-size: 0.72rem; font-weight: 500;
+  text-transform: uppercase; letter-spacing: 0.05em;
 }
-.kpi-value { font-size: 1.65rem; font-weight: 700; line-height: 1.1; margin-top: 0.35rem; }
-.kpi-sub { font-size: 0.8rem; margin-top: 0.3rem; }
+.kpi-value { font-size: 1.6rem; font-weight: 600; line-height: 1.1; margin-top: 0.45rem; }
+.kpi-sub { font-size: 0.8rem; margin-top: 0.35rem; }
 
 .pos { color: var(--pos); }
 .neg { color: var(--neg); }
@@ -50,7 +54,7 @@ html, body { background: var(--bg); }
 /* Tables */
 .tbl { width: 100%; border-collapse: collapse; font-size: 0.875rem; }
 .tbl thead th {
-  text-align: left; color: var(--muted); font-weight: 600; font-size: 0.72rem;
+  text-align: left; color: var(--muted); font-weight: 500; font-size: 0.72rem;
   text-transform: uppercase; letter-spacing: 0.05em;
   padding: 0.6rem 0.75rem; border-bottom: 1px solid var(--border);
 }
@@ -62,14 +66,14 @@ html, body { background: var(--bg); }
 /* Chips / badges */
 .chip {
   display: inline-flex; align-items: center; gap: 0.3rem;
-  padding: 0.12rem 0.5rem; border-radius: 999px;
-  font-size: 0.72rem; font-weight: 600; text-transform: capitalize;
+  padding: 0.1rem 0.45rem; border-radius: 6px;
+  font-size: 0.72rem; font-weight: 500; text-transform: capitalize;
   border: 1px solid var(--border); color: var(--muted);
 }
-.chip-buy { color: var(--pos); border-color: rgba(34,197,94,0.4); background: rgba(34,197,94,0.08); }
-.chip-sell { color: var(--neg); border-color: rgba(248,113,113,0.4); background: rgba(248,113,113,0.08); }
+.chip-buy { color: var(--pos); border-color: rgba(34,197,94,0.25); }
+.chip-sell { color: var(--neg); border-color: rgba(248,113,113,0.25); }
 
-.section-title { font-size: 0.95rem; font-weight: 600; letter-spacing: -0.01em; }
+.section-title { font-size: 0.9rem; font-weight: 600; letter-spacing: -0.01em; color: #C7D2DE; }
 
 /* Scrollbar */
 ::-webkit-scrollbar { width: 10px; height: 10px; }

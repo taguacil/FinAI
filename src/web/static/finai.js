@@ -4,6 +4,7 @@ const FINAI = (() => {
   const ACCENT = '#2DD4BF';
   const COLORWAY = ['#2DD4BF', '#6366F1', '#F59E0B', '#22C55E', '#F87171', '#38BDF8', '#A78BFA', '#FB7185', '#34D399', '#FBBF24'];
   const BORDER = '#1E2A3D';
+  const GRID = 'rgba(30,42,61,0.5)';  /* lighter grid for a calmer, minimal look */
   const TEXT = '#E6EDF3';
   const MUTED = '#8B98A5';
 
@@ -13,8 +14,8 @@ const FINAI = (() => {
     font: { color: TEXT, family: 'Inter, sans-serif', size: 12 },
     colorway: COLORWAY,
     margin: { t: 10, r: 12, b: 36, l: 52 },
-    xaxis: { gridcolor: BORDER, zerolinecolor: BORDER, linecolor: BORDER, tickcolor: BORDER },
-    yaxis: { gridcolor: BORDER, zerolinecolor: BORDER, linecolor: BORDER, tickcolor: BORDER },
+    xaxis: { gridcolor: GRID, zerolinecolor: GRID, linecolor: BORDER, tickcolor: BORDER },
+    yaxis: { gridcolor: GRID, zerolinecolor: GRID, linecolor: BORDER, tickcolor: BORDER },
     legend: { bgcolor: 'rgba(0,0,0,0)', font: { color: MUTED } },
     hoverlabel: { bgcolor: '#131A2A', bordercolor: BORDER, font: { color: TEXT } },
     ...over,
@@ -38,14 +39,14 @@ const FINAI = (() => {
     if (!dates || !dates.length) { el.innerHTML = '<p class="text-muted text-sm p-4">No history yet.</p>'; return; }
     const trace = {
       x: dates, y: values, type: 'scatter', mode: 'lines',
-      line: { color: ACCENT, width: 2 },
-      fill: 'tozeroy', fillcolor: 'rgba(45,212,191,0.08)',
+      line: { color: ACCENT, width: 1.6, shape: 'spline', smoothing: 0.4 },
+      fill: 'tozeroy', fillcolor: 'rgba(45,212,191,0.04)',
       hovertemplate: `%{x}<br>${ccy} %{y:,.0f}<extra></extra>`,
     };
     const ymin = Math.min(...values), ymax = Math.max(...values);
     const pad = (ymax - ymin) * 0.08 || ymax * 0.05;
     Plotly.newPlot(el, [trace], baseLayout({
-      yaxis: { gridcolor: BORDER, zerolinecolor: BORDER, range: [ymin - pad, ymax + pad], tickprefix: '' },
+      yaxis: { gridcolor: GRID, zerolinecolor: GRID, range: [ymin - pad, ymax + pad], tickprefix: '' },
       xaxis: { gridcolor: 'rgba(0,0,0,0)', linecolor: BORDER },
     }), config);
   }
