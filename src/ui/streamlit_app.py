@@ -125,8 +125,8 @@ class PortfolioTrackerUI:
         self.render_sidebar(portfolio_manager, market_data_service)
 
         # Main content tabs
-        tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(
-            ["💬 AI Chat", "📊 Portfolio", "📈 Analytics", "⚖️ Optimize", "🔮 Scenarios", "🗄️ Market Data", "⚙️ Settings"]
+        tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs(
+            ["💬 AI Chat", "📊 Portfolio", "📈 Analytics", "⚖️ Optimize", "🔁 Backtest", "🔮 Scenarios", "🗄️ Market Data", "⚙️ Settings"]
         )
 
         with tab1:
@@ -142,12 +142,15 @@ class PortfolioTrackerUI:
             self.render_optimization(portfolio_manager, market_data_service)
 
         with tab5:
-            self.render_scenarios(portfolio_manager, metrics_calculator)
+            self.render_backtest(portfolio_manager, metrics_calculator)
 
         with tab6:
-            render_market_data_page(_DATA_DIR)
+            self.render_scenarios(portfolio_manager, metrics_calculator)
 
         with tab7:
+            render_market_data_page(_DATA_DIR)
+
+        with tab8:
             self.render_settings()
 
     def init_session_state(self):
@@ -2790,6 +2793,237 @@ class PortfolioTrackerUI:
             st.info(f"💱 Multi-currency rebalancing: {', '.join(sorted(currencies))}. Values shown in both base ({base_currency}) and native currency.")
 
         st.caption("⚠️ These are suggestions only. Consider transaction costs, taxes, FX rates, and market conditions before trading.")
+
+    def render_backtest(self, portfolio_manager, metrics_calculator):
+        """Render the strategy backtesting tab."""
+        from datetime import timedelta
+
+        from src.portfolio.backtester import Backtester, BacktestConfig
+        from src.portfolio.strategies import build_strategies
+
+        st.header("🔁 Strategy Backtest")
+        st.markdown(
+            "Simulate investing an initial capital and rebalancing on a schedule. "
+            "Compare multiple walk-forward strategies against a benchmark. "
+            "*(Point-in-time — no look-ahead.)*"
+        )
+
+        if not st.session_state.portfolio_loaded or not portfolio_manager.current_portfolio:
+            st.warning("Please load a portfolio, or enter symbols manually below.")
+
+        portfolio = portfolio_manager.current_portfolio
+        base_currency = portfolio.base_currency if portfolio else Currency.USD
+
+        # Default universe from portfolio positions.
+        default_symbols = ""
+        price_currencies: Dict[str, Currency] = {}
+        if portfolio:
+            syms = []
+            for sym, pos in portfolio.positions.items():
+                if pos.quantity <= 0:
+                    continue
+                inst = pos.instrument
+                price_symbol = (inst.data_provider_symbol or inst.symbol) if inst else sym
+                price_symbol = price_symbol.upper().strip()
+                syms.append(price_symbol)
+                if inst:
+                    price_currencies[price_symbol] = inst.price_currency or inst.currency
+            default_symbols = ", ".join(syms)
+
+        with st.form("backtest_form"):
+            col1, col2 = st.columns(2)
+            with col1:
+                symbols_str = st.text_input(
+                    "Universe (comma-separated symbols)", value=default_symbols
+                )
+                start = st.date_input(
+                    "Start date", value=date.today() - timedelta(days=730)
+                )
+                initial_capital = st.number_input(
+                    "Initial capital", min_value=1000.0, value=100_000.0, step=1000.0
+                )
+                rebalance_frequency = st.selectbox(
+                    "Rebalance frequency",
+                    ["monthly", "quarterly", "weekly", "daily", "none"],
+                )
+            with col2:
+                strategy_options = {
+                    "HRP": "hrp",
+                    "Markowitz (max Sharpe)": "max_sharpe",
+                    "Markowitz (min volatility)": "min_volatility",
+                    "Equal weight": "equal_weight",
+                    "Buy & hold": "buy_and_hold",
+                }
+                chosen = st.multiselect(
+                    "Strategies",
+                    list(strategy_options.keys()),
+                    default=["HRP", "Equal weight", "Buy & hold"],
+                )
+                end = st.date_input("End date", value=date.today())
+                benchmark = st.text_input("Benchmark symbol", value="SPY")
+                lookback_days = st.number_input(
+                    "Optimizer lookback (days)", min_value=30, value=252, step=10
+                )
+
+            cola, colb = st.columns(2)
+            with cola:
+                transaction_cost_bps = st.number_input(
+                    "Transaction cost (bps)", min_value=0.0, value=0.0, step=1.0
+                )
+            with colb:
+                risk_free_rate = st.number_input(
+                    "Risk-free rate", min_value=0.0, max_value=0.5, value=0.04, step=0.01
+                )
+            ensure_data = st.checkbox(
+                "Fetch/refresh market data for the window first", value=True
+            )
+
+            submitted = st.form_submit_button("▶️ Run Backtest")
+
+        if not submitted:
+            return
+
+        symbol_list = [s.strip().upper() for s in symbols_str.split(",") if s.strip()]
+        if not symbol_list:
+            st.error("Please provide at least one symbol.")
+            return
+        strategy_specs = [strategy_options[c] for c in chosen]
+        if not strategy_specs:
+            st.error("Please select at least one strategy.")
+            return
+
+        if ensure_data:
+            with st.spinner("Fetching market data..."):
+                try:
+                    portfolio_manager.update_market_data(
+                        start - timedelta(days=int(lookback_days) + 10), end
+                    )
+                    portfolio_manager.market_data_store.clear_cache()
+                except Exception as e:
+                    st.warning(f"Could not refresh market data: {e}")
+
+        # FX conversion only when the universe has non-base currencies.
+        fx_rate_on = None
+        relevant_ccy = {price_currencies.get(s, base_currency) for s in symbol_list}
+        if any(c != base_currency for c in relevant_ccy):
+            def fx_rate_on(d, frm, to):
+                try:
+                    rate = portfolio_manager.data_manager.get_historical_fx_rate_on(d, frm, to)
+                    return float(rate) if rate else None
+                except Exception:
+                    return None
+
+        try:
+            config = BacktestConfig(
+                symbols=symbol_list,
+                start_date=start,
+                end_date=end,
+                initial_capital=float(initial_capital),
+                rebalance_frequency=rebalance_frequency,
+                transaction_cost_bps=float(transaction_cost_bps),
+                benchmark_symbol=benchmark.strip().upper(),
+                base_currency=base_currency,
+                risk_free_rate=float(risk_free_rate),
+                lookback_days=int(lookback_days),
+            )
+            strategies = build_strategies(
+                strategy_specs,
+                lookback_days=int(lookback_days),
+                risk_free_rate=float(risk_free_rate),
+            )
+            backtester = Backtester(
+                market_data_store=portfolio_manager.market_data_store,
+                metrics_calculator=metrics_calculator,
+                fx_rate_on=fx_rate_on,
+                price_currencies=price_currencies,
+            )
+            with st.spinner("Running backtest..."):
+                result = backtester.run(config, strategies)
+        except ValueError as e:
+            st.error(str(e))
+            return
+        except Exception as e:
+            st.error(f"Backtest failed: {e}")
+            return
+
+        self._render_backtest_results(result)
+
+    def _render_backtest_results(self, result):
+        """Render equity curves, drawdown, metrics and trades for a backtest."""
+        for w in result.warnings:
+            st.warning(w)
+
+        st.caption(f"Window: {result.price_start} → {result.price_end}")
+
+        # --- Equity curves ---
+        fig = go.Figure()
+        for s in result.strategies:
+            curve = s.equity_curve["total_value"]
+            fig.add_trace(go.Scatter(x=curve.index, y=curve.values, name=s.name, mode="lines"))
+        if result.benchmark_curve is not None and not result.benchmark_curve.empty:
+            bc = result.benchmark_curve["total_value"]
+            fig.add_trace(go.Scatter(
+                x=bc.index, y=bc.values,
+                name=f"Benchmark ({result.config.benchmark_symbol})",
+                mode="lines", line=dict(dash="dash", color="gray"),
+            ))
+        fig.update_layout(
+            title="Equity Curve", xaxis_title="Date",
+            yaxis_title=f"Value ({result.config.base_currency.value})", height=450,
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+        # --- Metrics table ---
+        rows = []
+        for s in result.strategies:
+            m = s.metrics or {}
+            rows.append({
+                "Strategy": s.name,
+                "Final Value": f"{s.final_value:,.0f}",
+                "Total Return": self._fmt_pct(m.get("total_return")),
+                "CAGR": self._fmt_pct(m.get("annualized_return")),
+                "Volatility": self._fmt_pct(m.get("volatility")),
+                "Sharpe": self._fmt_num(m.get("sharpe_ratio")),
+                "Sortino": self._fmt_num(m.get("sortino_ratio")),
+                "Max Drawdown": self._fmt_pct(m.get("max_drawdown")),
+            })
+        st.subheader("📊 Performance Metrics")
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+        # --- Drawdown chart ---
+        dd_fig = go.Figure()
+        for s in result.strategies:
+            curve = s.equity_curve["total_value"]
+            running_max = curve.cummax()
+            drawdown = (curve - running_max) / running_max * 100
+            dd_fig.add_trace(go.Scatter(x=drawdown.index, y=drawdown.values, name=s.name, mode="lines"))
+        dd_fig.update_layout(title="Drawdown (%)", xaxis_title="Date", yaxis_title="Drawdown %", height=350)
+        st.plotly_chart(dd_fig, use_container_width=True)
+
+        # --- Per-strategy detail ---
+        st.subheader("🔍 Strategy Details")
+        tabs = st.tabs([s.name for s in result.strategies])
+        for tab, s in zip(tabs, result.strategies):
+            with tab:
+                if s.weights_history:
+                    st.markdown("**Target weights over time**")
+                    wdf = pd.DataFrame([
+                        {"date": w["date"], **w["weights"]} for w in s.weights_history
+                    ]).set_index("date").fillna(0.0)
+                    st.area_chart(wdf)
+                if s.trades:
+                    st.markdown(f"**Trades** ({len(s.trades)})")
+                    st.dataframe(pd.DataFrame(s.trades), use_container_width=True, hide_index=True)
+                else:
+                    st.info("No trades recorded.")
+
+    @staticmethod
+    def _fmt_pct(x):
+        return f"{x*100:.2f}%" if isinstance(x, (int, float)) else "n/a"
+
+    @staticmethod
+    def _fmt_num(x):
+        return f"{x:.2f}" if isinstance(x, (int, float)) else "n/a"
 
     def render_scenarios(self, portfolio_manager, metrics_calculator):
         """Render portfolio scenarios and what-if analysis."""

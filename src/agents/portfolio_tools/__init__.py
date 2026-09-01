@@ -32,6 +32,7 @@ from .models import (
     TransactionItem,
     UpdateHistoricalMarketDataInput,
 )
+from .backtest_tool import BacktestPortfolioTool
 from ._tools import (
     AddTransactionTool,
     AdvancedWhatIfTool,
@@ -98,6 +99,7 @@ __all__ = [
     # Tools
     "AddTransactionTool",
     "AdvancedWhatIfTool",
+    "BacktestPortfolioTool",
     "BulkAddTransactionsTool",
     "BulkSetMarketPriceTool",
     "CalculatorTool",

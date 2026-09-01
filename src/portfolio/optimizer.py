@@ -177,9 +177,13 @@ class PortfolioOptimizer:
 
         # Separate locked and unlocked positions
         locked_weight_sum = sum(
-            current_weights.get(sym, 0) for sym in locked_symbols if sym in current_weights
+            current_weights.get(sym, 0)
+            for sym in locked_symbols
+            if sym in current_weights
         )
-        unlocked_symbols = [sym for sym in active_positions.keys() if sym not in locked_symbols]
+        unlocked_symbols = [
+            sym for sym in active_positions.keys() if sym not in locked_symbols
+        ]
 
         if not unlocked_symbols:
             raise ValueError("All positions are locked - nothing to optimize")
@@ -192,14 +196,18 @@ class PortfolioOptimizer:
         # Determine optimization currency
         opt_currency = optimization_currency or self.base_currency
         if opt_currency != self.base_currency:
-            self.logger.info(f"Optimizing in {opt_currency.value} (portfolio base: {self.base_currency.value})")
+            self.logger.info(
+                f"Optimizing in {opt_currency.value} (portfolio base: {self.base_currency.value})"
+            )
             warnings.append(
                 f"Optimizing in {opt_currency.value}. Returns and volatility are measured "
                 f"from a {opt_currency.value} investor's perspective."
             )
 
         # Fetch historical prices
-        prices_df, price_warnings = self._fetch_prices(list(active_positions.keys()), lookback_days)
+        prices_df, price_warnings = self._fetch_prices(
+            list(active_positions.keys()), lookback_days
+        )
         warnings.extend(price_warnings)
 
         if prices_df.empty:
@@ -233,8 +241,12 @@ class PortfolioOptimizer:
         # The optimizer returns weights that sum to 1.0 for the unlocked/risky portion
         unlocked_prices = prices_df[unlocked_symbols]
 
-        self.logger.info(f"Running {method.value} optimization on {len(unlocked_symbols)} assets")
-        self.logger.info(f"Price data: {len(unlocked_prices)} days, columns: {list(unlocked_prices.columns)}")
+        self.logger.info(
+            f"Running {method.value} optimization on {len(unlocked_symbols)} assets"
+        )
+        self.logger.info(
+            f"Price data: {len(unlocked_prices)} days, columns: {list(unlocked_prices.columns)}"
+        )
 
         if method == OptimizationMethod.HRP:
             raw_weights = self._run_hrp(unlocked_prices)
@@ -243,7 +255,9 @@ class PortfolioOptimizer:
                 unlocked_prices, risk_free_rate, objective, return_adjustment
             )
 
-        self.logger.info(f"Raw weights from optimizer (sum={sum(raw_weights.values()):.4f}): {raw_weights}")
+        self.logger.info(
+            f"Raw weights from optimizer (sum={sum(raw_weights.values()):.4f}): {raw_weights}"
+        )
 
         # Calculate metrics for the pure risky portfolio (weights sum to 1.0)
         # This is before any cash blending or locked position adjustments
@@ -253,7 +267,8 @@ class PortfolioOptimizer:
 
         self.logger.info(
             f"Risky portfolio metrics: Return={risky_return:.2%}, Vol={risky_volatility:.2%}, Sharpe={risky_sharpe:.3f}"
-            if risky_return and risky_volatility else "Could not calculate risky portfolio metrics"
+            if risky_return and risky_volatility
+            else "Could not calculate risky portfolio metrics"
         )
 
         # Step 1: Build full risky portfolio weights (locked + optimized)
@@ -278,11 +293,17 @@ class PortfolioOptimizer:
         full_risky_volatility = None
 
         if full_risky_weight > 0:
-            normalized_full = {sym: w / full_risky_weight for sym, w in target_weights.items()}
+            normalized_full = {
+                sym: w / full_risky_weight for sym, w in target_weights.items()
+            }
             _, full_risky_volatility, _ = self._calculate_metrics(
                 prices_df, normalized_full, risk_free_rate
             )
-            self.logger.info(f"Full risky portfolio volatility: {full_risky_volatility:.2%}" if full_risky_volatility else "")
+            self.logger.info(
+                f"Full risky portfolio volatility: {full_risky_volatility:.2%}"
+                if full_risky_volatility
+                else ""
+            )
 
         # Step 3: Determine cash allocation based on target volatility
         risky_fraction = 1.0
@@ -320,7 +341,9 @@ class PortfolioOptimizer:
         # Step 4: Scale ALL positions (including locked) by risky_fraction
         # This ensures consistent volatility reduction across the portfolio
         if risky_fraction < 1.0:
-            target_weights = {sym: w * risky_fraction for sym, w in target_weights.items()}
+            target_weights = {
+                sym: w * risky_fraction for sym, w in target_weights.items()
+            }
             target_cash_total = 1.0 - sum(target_weights.values())
 
             if locked_symbols:
@@ -331,8 +354,12 @@ class PortfolioOptimizer:
         else:
             target_cash_total = 0.0
 
-        allocated_to_risky = sum(w for sym, w in target_weights.items() if sym not in locked_symbols)
-        final_locked_weight = sum(w for sym, w in target_weights.items() if sym in locked_symbols)
+        allocated_to_risky = sum(
+            w for sym, w in target_weights.items() if sym not in locked_symbols
+        )
+        final_locked_weight = sum(
+            w for sym, w in target_weights.items() if sym in locked_symbols
+        )
 
         self.logger.info(
             f"Weight allocation: locked={final_locked_weight:.2%}, "
@@ -346,7 +373,9 @@ class PortfolioOptimizer:
 
         if all_risky_weight > 0:
             # Normalize weights to sum to 1.0 for metrics calculation
-            normalized_weights = {sym: w / all_risky_weight for sym, w in target_weights.items()}
+            normalized_weights = {
+                sym: w / all_risky_weight for sym, w in target_weights.items()
+            }
 
             # Calculate metrics on the normalized risky portfolio
             portfolio_return, portfolio_volatility, _ = self._calculate_metrics(
@@ -356,7 +385,8 @@ class PortfolioOptimizer:
             if portfolio_return is not None and portfolio_volatility is not None:
                 # Scale by actual risky exposure and add cash component
                 expected_return = (
-                    all_risky_weight * portfolio_return + target_cash_total * risk_free_rate
+                    all_risky_weight * portfolio_return
+                    + target_cash_total * risk_free_rate
                 )
                 volatility = all_risky_weight * portfolio_volatility
 
@@ -368,8 +398,9 @@ class PortfolioOptimizer:
 
                 self.logger.info(
                     f"Final portfolio: Return={expected_return:.2%}, Vol={volatility:.2%}, "
-                    f"Sharpe={sharpe:.3f}" if sharpe is not None else
-                    f"Final portfolio: Return={expected_return:.2%}, Vol={volatility:.2%}, Sharpe=N/A"
+                    f"Sharpe={sharpe:.3f}"
+                    if sharpe is not None
+                    else f"Final portfolio: Return={expected_return:.2%}, Vol={volatility:.2%}, Sharpe=N/A"
                 )
             else:
                 expected_return, volatility, sharpe = None, 0.0, None
@@ -493,9 +524,7 @@ class PortfolioOptimizer:
 
         return results
 
-    def _convert_cash_to_base(
-        self, cash_balances: Dict[Currency, Decimal]
-    ) -> Decimal:
+    def _convert_cash_to_base(self, cash_balances: Dict[Currency, Decimal]) -> Decimal:
         """Convert all cash balances to base currency."""
         total_base = Decimal("0")
 
@@ -509,9 +538,7 @@ class PortfolioOptimizer:
 
         return total_base
 
-    def _get_fx_rate(
-        self, from_currency: Currency, to_currency: Currency
-    ) -> Decimal:
+    def _get_fx_rate(self, from_currency: Currency, to_currency: Currency) -> Decimal:
         """Get FX rate for currency conversion.
 
         For optimization purposes, uses 1.0 as a fallback since weights are relative.
@@ -544,7 +571,9 @@ class PortfolioOptimizer:
             return Decimal("0")
 
         # Convert to base currency
-        pos_currency = position.instrument.currency if position.instrument else self.base_currency
+        pos_currency = (
+            position.instrument.currency if position.instrument else self.base_currency
+        )
         if pos_currency != self.base_currency:
             fx_rate = self._get_fx_rate(pos_currency, self.base_currency)
             value = value * fx_rate
@@ -569,7 +598,9 @@ class PortfolioOptimizer:
         weights = {
             sym: float(val / total_value) for sym, val in position_values.items()
         }
-        cash_weight = float(cash_value_base / total_value) if cash_value_base > 0 else 0.0
+        cash_weight = (
+            float(cash_value_base / total_value) if cash_value_base > 0 else 0.0
+        )
 
         return weights, cash_weight
 
@@ -620,7 +651,9 @@ class PortfolioOptimizer:
         end_date = date.today()
         start_date = end_date - timedelta(days=lookback_days + 30)  # Extra buffer
 
-        prices_df, gap_warnings = self._fetch_prices_from_market_data(symbols, start_date, end_date)
+        prices_df, gap_warnings = self._fetch_prices_from_market_data(
+            symbols, start_date, end_date
+        )
         warnings.extend(gap_warnings)
 
         if prices_df.empty:
@@ -675,7 +708,9 @@ class PortfolioOptimizer:
         warnings: List[str] = []
         try:
             # Use MarketDataStore to get price matrix
-            prices_df = self.market_data_store.get_price_matrix(symbols, start_date, end_date)
+            prices_df = self.market_data_store.get_price_matrix(
+                symbols, start_date, end_date
+            )
 
             if prices_df.empty:
                 return pd.DataFrame(), warnings
@@ -759,7 +794,9 @@ class PortfolioOptimizer:
 
                 # Get FX rate for this date (with caching)
                 if dt not in fx_cache:
-                    fx_rate = self._get_historical_fx_rate(dt, asset_currency, target_currency)
+                    fx_rate = self._get_historical_fx_rate(
+                        dt, asset_currency, target_currency
+                    )
                     fx_cache[dt] = fx_rate
 
                 fx_rate = fx_cache[dt]
@@ -769,7 +806,9 @@ class PortfolioOptimizer:
             if converted_series:
                 converted_prices[symbol] = pd.Series(converted_series)
             else:
-                self.logger.warning(f"Could not convert {symbol} prices to {target_currency.value}")
+                self.logger.warning(
+                    f"Could not convert {symbol} prices to {target_currency.value}"
+                )
 
         if not converted_prices:
             return pd.DataFrame()
@@ -796,7 +835,9 @@ class PortfolioOptimizer:
 
         try:
             # Try to get historical rate from data provider
-            rate = self.data_provider.get_historical_fx_rate_on(dt, from_currency, to_currency)
+            rate = self.data_provider.get_historical_fx_rate_on(
+                dt, from_currency, to_currency
+            )
             if rate and rate > 0:
                 return rate
         except Exception as e:
@@ -811,6 +852,76 @@ class PortfolioOptimizer:
             self.logger.debug(f"Could not get current FX rate: {e}")
 
         return None
+
+    @staticmethod
+    def optimize_weights_from_prices(
+        prices: pd.DataFrame,
+        method: OptimizationMethod = OptimizationMethod.HRP,
+        objective: OptimizationObjective = OptimizationObjective.MAX_SHARPE,
+        risk_free_rate: float = 0.04,
+        return_adjustment: float = 0.0,
+    ) -> Dict[str, float]:
+        """Compute target weights from an explicit point-in-time price matrix.
+
+        Unlike ``optimize()`` (which fetches a window ending at *today*), this takes
+        the price window as an argument and returns raw weights that sum to ~1.0 over
+        the given columns. It is the point-in-time entry used by the backtester: the
+        caller passes only data up to the rebalance date, so there is no look-ahead.
+
+        Falls back to equal weights when there is insufficient data or the optimizer
+        fails, so a single bad window never aborts a backtest.
+
+        Args:
+            prices: Date-indexed price matrix (one column per symbol).
+            method: HRP or Markowitz.
+            objective: Markowitz objective (max_sharpe / min_volatility). HRP ignores it.
+            risk_free_rate: Annual risk-free rate for Sharpe maximization.
+            return_adjustment: Additive shift applied to expected returns (scenarios).
+
+        Returns:
+            Dict of symbol -> weight over the columns present in ``prices``.
+        """
+        prices = prices.dropna(axis=1, how="all")
+        cols = list(prices.columns)
+        if not cols:
+            return {}
+        if len(cols) == 1:
+            return {cols[0]: 1.0}
+
+        equal = {c: 1.0 / len(cols) for c in cols}
+
+        try:
+            if method == OptimizationMethod.HRP:
+                returns = prices.pct_change().dropna()
+                if len(returns) < 2:
+                    return equal
+                weights = HRPOpt(returns).optimize()
+                result = {k: float(v) for k, v in dict(weights).items()}
+            else:
+                if len(prices.dropna()) < 2:
+                    return equal
+                mu = expected_returns.mean_historical_return(prices)
+                if return_adjustment:
+                    mu = mu + return_adjustment
+                cov = risk_models.sample_cov(prices)
+                ef = EfficientFrontier(mu, cov)
+                if objective == OptimizationObjective.MIN_VOLATILITY:
+                    ef.min_volatility()
+                else:
+                    ef.max_sharpe(risk_free_rate=risk_free_rate)
+                result = {k: float(v) for k, v in dict(ef.clean_weights()).items()}
+        except Exception as e:
+            logging.getLogger(__name__).warning(
+                f"Point-in-time optimization failed ({method.value}): {e}. Using equal weights."
+            )
+            return equal
+
+        # Drop negligible/negative weights and renormalize.
+        result = {s: w for s, w in result.items() if w > 1e-6}
+        total = sum(result.values())
+        if total <= 0:
+            return equal
+        return {s: w / total for s, w in result.items()}
 
     def _run_hrp(self, prices: pd.DataFrame) -> Dict[str, float]:
         """Run Hierarchical Risk Parity optimization using pypfopt."""
@@ -864,12 +975,16 @@ class PortfolioOptimizer:
                 ef.max_sharpe(risk_free_rate=risk_free_rate)
 
         except Exception as e:
-            self.logger.warning(f"Optimization failed ({objective.value}): {e}. Trying min_volatility.")
+            self.logger.warning(
+                f"Optimization failed ({objective.value}): {e}. Trying min_volatility."
+            )
             ef = EfficientFrontier(mu, cov)
             try:
                 ef.min_volatility()
             except Exception as e2:
-                self.logger.error(f"All optimization attempts failed: {e2}. Using equal weights.")
+                self.logger.error(
+                    f"All optimization attempts failed: {e2}. Using equal weights."
+                )
                 n = len(prices.columns)
                 return {sym: 1.0 / n for sym in prices.columns}
 
@@ -899,7 +1014,10 @@ class PortfolioOptimizer:
         cov = risk_models.sample_cov(prices)
 
         # For EFFICIENT_RISK with low target volatility, we may need to include cash
-        if objective == OptimizationObjective.EFFICIENT_RISK and target_volatility is not None:
+        if (
+            objective == OptimizationObjective.EFFICIENT_RISK
+            and target_volatility is not None
+        ):
             # Calculate minimum achievable volatility with current assets
             try:
                 ef_test = EfficientFrontier(mu, cov)
@@ -907,9 +1025,13 @@ class PortfolioOptimizer:
                 min_vol_weights = ef_test.clean_weights()
 
                 # Calculate the minimum volatility
-                weight_arr = np.array([min_vol_weights.get(s, 0) for s in prices.columns])
+                weight_arr = np.array(
+                    [min_vol_weights.get(s, 0) for s in prices.columns]
+                )
                 cov_matrix = cov.values
-                min_vol = float(np.sqrt(np.dot(weight_arr.T, np.dot(cov_matrix, weight_arr))))
+                min_vol = float(
+                    np.sqrt(np.dot(weight_arr.T, np.dot(cov_matrix, weight_arr)))
+                )
 
                 if target_volatility < min_vol:
                     # Target is below minimum - need to include cash
@@ -933,7 +1055,9 @@ class PortfolioOptimizer:
             elif objective == OptimizationObjective.EFFICIENT_RISK:
                 if target_volatility is None:
                     target_volatility = 0.15
-                    self.logger.info(f"No target volatility specified, using {target_volatility:.1%}")
+                    self.logger.info(
+                        f"No target volatility specified, using {target_volatility:.1%}"
+                    )
 
                 try:
                     ef.efficient_risk(target_volatility)
@@ -946,9 +1070,13 @@ class PortfolioOptimizer:
                     ef_min = EfficientFrontier(mu, cov)
                     ef_min.min_volatility()
                     min_vol_weights = ef_min.clean_weights()
-                    weight_arr = np.array([min_vol_weights.get(s, 0) for s in prices.columns])
+                    weight_arr = np.array(
+                        [min_vol_weights.get(s, 0) for s in prices.columns]
+                    )
                     cov_matrix = cov.values
-                    min_vol = float(np.sqrt(np.dot(weight_arr.T, np.dot(cov_matrix, weight_arr))))
+                    min_vol = float(
+                        np.sqrt(np.dot(weight_arr.T, np.dot(cov_matrix, weight_arr)))
+                    )
 
                     return self._run_markowitz_with_cash(
                         prices, risk_free_rate, target_volatility, min_vol
@@ -958,12 +1086,16 @@ class PortfolioOptimizer:
                 ef.max_sharpe(risk_free_rate=risk_free_rate)
 
         except Exception as e:
-            self.logger.warning(f"Optimization failed ({objective.value}): {e}. Trying min_volatility.")
+            self.logger.warning(
+                f"Optimization failed ({objective.value}): {e}. Trying min_volatility."
+            )
             ef = EfficientFrontier(mu, cov)
             try:
                 ef.min_volatility()
             except Exception as e2:
-                self.logger.error(f"All optimization attempts failed: {e2}. Using equal weights.")
+                self.logger.error(
+                    f"All optimization attempts failed: {e2}. Using equal weights."
+                )
                 n = len(prices.columns)
                 return {sym: 1.0 / n for sym in prices.columns}
 
@@ -1100,7 +1232,9 @@ class PortfolioOptimizer:
         # Blend returns: risky portion earns risky_return, cash earns risk_free_rate
         # Total portfolio return = risky_weight * risky_return + cash_weight * risk_free_rate
         total_weight = risky_weight + cash_weight
-        blended_return = (risky_weight * risky_return + cash_weight * risk_free_rate) / total_weight
+        blended_return = (
+            risky_weight * risky_return + cash_weight * risk_free_rate
+        ) / total_weight
 
         # Blend volatility: cash has 0 volatility, uncorrelated with risky assets
         # Portfolio vol = risky_weight * risky_vol (simplified - cash adds no vol)
@@ -1180,7 +1314,9 @@ class PortfolioOptimizer:
                     estimated_value_native=abs(value_change_native),  # Native currency
                     current_weight=current_weight,
                     target_weight=target_weight,
-                    currency=pos_currency.value if pos_currency else self.base_currency.value,
+                    currency=(
+                        pos_currency.value if pos_currency else self.base_currency.value
+                    ),
                 )
             )
 
