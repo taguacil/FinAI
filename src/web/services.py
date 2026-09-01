@@ -24,6 +24,18 @@ from src.utils.metrics import FinancialMetricsCalculator
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _DATA_DIR = os.environ.get("FINAI_DATA_DIR") or os.path.join(_PROJECT_ROOT, "data")
 
+# Human-friendly labels for InstrumentType values, used for asset-class allocation.
+_ASSET_CLASS_LABELS = {
+    "stock": "Equities",
+    "etf": "ETFs",
+    "bond": "Bonds",
+    "crypto": "Crypto",
+    "cash": "Cash",
+    "mutual_fund": "Mutual Funds",
+    "option": "Options",
+    "future": "Futures",
+}
+
 
 def _f(value: Any) -> Optional[float]:
     """Coerce Decimal/int/float to float; None stays None."""
@@ -126,34 +138,64 @@ class AppContext:
             curve["dates"] = [d.strftime("%Y-%m-%d") for d in hist.index]
             curve["values"] = [float(v) for v in hist["total_value"].tolist()]
 
-        # positions (JSON-safe), sorted by value desc
-        pos_rows = sorted(
-            (
+        # instrument type (asset class) per symbol, from the live position objects
+        type_by_symbol = {
+            sym: pos.instrument.instrument_type.value
+            for sym, pos in portfolio.positions.items()
+        }
+
+        # positions (JSON-safe), sorted by value desc.
+        # We surface BOTH the instrument's original currency (price/value as
+        # traded) and the base-currency equivalent via the current FX rate.
+        pos_rows = []
+        for p in positions:
+            fx = _f(p["fx_rate"]) or 1.0
+            price_base = _f(p["current_price"])
+            value_base = _f(p["market_value"])
+            pos_rows.append(
                 {
                     "symbol": p["symbol"],
                     "name": p["name"],
+                    "asset_class": type_by_symbol.get(p["symbol"], "other"),
                     "quantity": _f(p["quantity"]),
                     "avg_cost": _f(p["average_cost"]),
-                    "price": _f(p["current_price"]),
-                    "value": _f(p["market_value"]),
+                    # base-currency (portfolio) figures
+                    "price": price_base,
+                    "value": value_base,
                     "pnl": _f(p["unrealized_pnl"]),
                     "pnl_pct": _f(p["unrealized_pnl_percent"]),
+                    # original-currency figures (as traded)
                     "currency": p["original_currency"],
+                    "price_local": (price_base / fx) if price_base is not None and fx else price_base,
+                    "value_local": (value_base / fx) if value_base is not None and fx else value_base,
+                    "fx_rate": fx,
+                    "is_fx": p["original_currency"] != base_ccy,
                     "has_price": p["has_current_price"],
                 }
-                for p in positions
-            ),
-            key=lambda r: r["value"] or 0,
+            )
+        pos_rows.sort(key=lambda r: r["value"] or 0, reverse=True)
+
+        # allocation by asset class (base currency), + residual cash
+        class_totals: Dict[str, float] = {}
+        for r in pos_rows:
+            v = r["value"] or 0
+            if v > 0:
+                class_totals[r["asset_class"]] = class_totals.get(r["asset_class"], 0.0) + v
+        if cash and cash > 0:
+            class_totals["cash"] = class_totals.get("cash", 0.0) + float(cash)
+        alloc_by_class = sorted(
+            ({"label": _ASSET_CLASS_LABELS.get(k, k.title()), "value": v} for k, v in class_totals.items()),
+            key=lambda a: a["value"],
             reverse=True,
         )
 
-        # allocation (positions + cash)
+        # allocation by holding (base currency), + residual cash
         alloc = [{"label": r["symbol"], "value": r["value"] or 0} for r in pos_rows if (r["value"] or 0) > 0]
         if cash and cash > 0:
             alloc.append({"label": "Cash", "value": float(cash)})
 
-        # recent transactions
-        txns = pm.get_transaction_history()[:12]
+        # recent transactions (longer list; the panel scrolls)
+        txns = pm.get_transaction_history()[:40]
         tx_rows = [
             {
                 "date": t["timestamp"].strftime("%Y-%m-%d"),
@@ -181,6 +223,7 @@ class AppContext:
             "curve": curve,
             "positions": pos_rows,
             "allocation": alloc,
+            "allocation_by_class": alloc_by_class,
             "transactions": tx_rows,
         }
 

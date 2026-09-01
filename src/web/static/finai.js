@@ -23,6 +23,19 @@ const FINAI = (() => {
 
   const config = { displayModeBar: false, responsive: true };
 
+  // Raw InstrumentType key -> display label (mirrors the backend map, used for chips).
+  const ASSET_CLASS_LABELS = {
+    stock: 'Equities', etf: 'ETFs', bond: 'Bonds', crypto: 'Crypto',
+    cash: 'Cash', mutual_fund: 'Mutual Funds', option: 'Options', future: 'Futures',
+  };
+  const assetClassLabel = (k) => ASSET_CLASS_LABELS[k] || (k ? k.charAt(0).toUpperCase() + k.slice(1) : '—');
+
+  // Fixed, institutional colours per asset class for a consistent read across views.
+  const ASSET_COLORS = {
+    Equities: '#2DD4BF', ETFs: '#38BDF8', Bonds: '#6366F1', Crypto: '#F59E0B',
+    Cash: '#64748B', 'Mutual Funds': '#A78BFA', Options: '#FB7185', Futures: '#34D399',
+  };
+
   const fmtMoney = (v, ccy = 'USD') => {
     if (v === null || v === undefined || isNaN(v)) return '—';
     try {
@@ -53,9 +66,11 @@ const FINAI = (() => {
 
   function donut(el, labels, values) {
     if (!labels || !labels.length) { el.innerHTML = '<p class="text-muted text-sm p-4">No positions.</p>'; return; }
+    // Prefer fixed asset-class colours when labels are known classes; else fall back.
+    const colors = labels.map((l, i) => ASSET_COLORS[l] || COLORWAY[i % COLORWAY.length]);
     const trace = {
       labels, values, type: 'pie', hole: 0.62, sort: true, direction: 'clockwise',
-      marker: { colors: COLORWAY, line: { color: '#0B0F1A', width: 2 } },
+      marker: { colors, line: { color: '#0B0F1A', width: 2 } },
       textinfo: 'none',
       hovertemplate: '%{label}<br>%{value:,.0f} (%{percent})<extra></extra>',
     };
@@ -66,5 +81,5 @@ const FINAI = (() => {
     }), config);
   }
 
-  return { baseLayout, config, fmtMoney, fmtNum, fmtPct, signClass, equityCurve, donut, COLORWAY, ACCENT };
+  return { baseLayout, config, fmtMoney, fmtNum, fmtPct, signClass, assetClassLabel, equityCurve, donut, COLORWAY, ACCENT };
 })();

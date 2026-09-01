@@ -43,7 +43,10 @@
       <div id="equityChart" style="height: 300px;"></div>
     </div>
     <div class="card">
-      <div class="section-title mb-2">Allocation</div>
+      <div class="flex items-center justify-between mb-2">
+        <span class="section-title">Asset allocation</span>
+        <span class="text-xs text-muted" x-text="d.allocation_by_class.length + ' classes'"></span>
+      </div>
       <div id="allocChart" style="height: 300px;"></div>
     </div>
   </div>
@@ -51,23 +54,38 @@
   <!-- Positions + transactions -->
   <div class="grid grid-cols-1 xl:grid-cols-3 gap-4">
     <div class="card xl:col-span-2 overflow-hidden">
-      <div class="section-title mb-3">Positions</div>
+      <div class="flex items-center justify-between mb-3">
+        <span class="section-title">Positions</span>
+        <span class="text-xs text-muted">Local &amp; <span x-text="d.base_currency"></span></span>
+      </div>
       <div class="overflow-x-auto">
         <table class="tbl">
           <thead><tr>
-            <th>Symbol</th><th>Qty</th><th class="num">Price</th>
-            <th class="num">Value</th><th class="num">P&amp;L</th><th class="num">%</th>
+            <th>Instrument</th><th class="num">Qty</th>
+            <th class="num">Price</th><th class="num">Value</th>
+            <th class="num">P&amp;L (<span x-text="d.base_currency"></span>)</th><th class="num">%</th>
           </tr></thead>
           <tbody>
             <template x-for="p in d.positions" :key="p.symbol">
               <tr>
                 <td>
-                  <div class="font-semibold" x-text="p.symbol"></div>
-                  <div class="text-xs text-muted truncate max-w-[180px]" x-text="p.name"></div>
+                  <div class="flex items-center gap-2">
+                    <span class="font-semibold" x-text="p.symbol"></span>
+                    <span class="chip chip-class" x-text="assetLabel(p.asset_class)"></span>
+                  </div>
+                  <div class="text-xs text-muted truncate max-w-[200px]" x-text="p.name"></div>
                 </td>
-                <td class="mono text-muted" x-text="num(p.quantity, 2)"></td>
-                <td class="num" x-text="p.has_price ? money(p.price) : '—'"></td>
-                <td class="num font-semibold" x-text="money(p.value)"></td>
+                <td class="num text-muted" x-text="num(p.quantity, 2)"></td>
+                <!-- Price: original currency, base equivalent underneath when it differs -->
+                <td class="num">
+                  <div x-text="p.has_price ? moneyIn(p.price_local, p.currency) : '—'"></div>
+                  <div class="text-xs text-muted" x-show="p.is_fx && p.has_price" x-text="money(p.price)"></div>
+                </td>
+                <!-- Value: original currency, base equivalent underneath when it differs -->
+                <td class="num">
+                  <div class="font-semibold" x-text="moneyIn(p.value_local, p.currency)"></div>
+                  <div class="text-xs text-muted" x-show="p.is_fx" x-text="money(p.value)"></div>
+                </td>
                 <td class="num" :class="cls(p.pnl)" x-text="money(p.pnl)"></td>
                 <td class="num" :class="cls(p.pnl_pct)" x-text="pct(p.pnl_pct)"></td>
               </tr>
@@ -79,17 +97,22 @@
     </div>
 
     <div class="card overflow-hidden">
-      <div class="section-title mb-3">Recent activity</div>
-      <div class="overflow-x-auto">
+      <div class="flex items-center justify-between mb-3">
+        <span class="section-title">Recent activity</span>
+        <span class="text-xs text-muted" x-text="d.transactions.length + ' transactions'"></span>
+      </div>
+      <div class="overflow-y-auto pr-1" style="max-height: 520px;">
         <table class="tbl">
-          <thead><tr><th>Date</th><th>Symbol</th><th>Type</th><th class="num">Total</th></tr></thead>
+          <thead class="sticky-head"><tr>
+            <th>Date</th><th>Symbol</th><th>Type</th><th class="num">Total</th>
+          </tr></thead>
           <tbody>
             <template x-for="(t, i) in d.transactions" :key="i">
               <tr>
-                <td class="text-muted mono text-xs" x-text="t.date"></td>
+                <td class="text-muted mono text-xs whitespace-nowrap" x-text="t.date"></td>
                 <td class="font-semibold" x-text="t.symbol"></td>
                 <td><span class="chip" :class="{'chip-buy': t.type=='buy', 'chip-sell': t.type=='sell'}" x-text="t.type"></span></td>
-                <td class="num" x-text="money(t.total)"></td>
+                <td class="num whitespace-nowrap" x-text="moneyIn(t.total, t.currency)"></td>
               </tr>
             </template>
             <tr x-show="!d.transactions.length"><td colspan="4" class="text-muted text-center py-6">No transactions.</td></tr>
@@ -106,12 +129,15 @@
     return {
       d: JSON.parse(document.getElementById('dashboard-data').textContent),
       money(v) { return FINAI.fmtMoney(v, this.d.base_currency); },
+      moneyIn(v, ccy) { return FINAI.fmtMoney(v, ccy || this.d.base_currency); },
       num(v, dcml) { return FINAI.fmtNum(v, dcml); },
       pct(v) { return FINAI.fmtPct(v); },
       cls(v) { return FINAI.signClass(v); },
+      assetLabel(k) { return FINAI.assetClassLabel(k); },
       init() {
         FINAI.equityCurve(document.getElementById('equityChart'), this.d.curve.dates, this.d.curve.values, this.d.base_currency);
-        FINAI.donut(document.getElementById('allocChart'), this.d.allocation.map(a => a.label), this.d.allocation.map(a => a.value));
+        const alloc = this.d.allocation_by_class;
+        FINAI.donut(document.getElementById('allocChart'), alloc.map(a => a.label), alloc.map(a => a.value));
       },
     };
   }
