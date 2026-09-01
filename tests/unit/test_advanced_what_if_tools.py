@@ -171,8 +171,8 @@ class TestAdvancedWhatIfTools(unittest.TestCase):
 
         mock_engine.run_scenario_simulation.return_value = mock_result
 
-        # Mock create_snapshot to return test data
-        with patch.object(self.portfolio_manager, 'create_snapshot') as mock_create_snapshot:
+        # Mock create_current_snapshot to return test data
+        with patch.object(self.portfolio_manager, 'create_current_snapshot') as mock_create_snapshot:
             test_snapshot = PortfolioSnapshot(
                 date=date.today(),
                 total_value=Decimal("125000.00"),
@@ -187,22 +187,25 @@ class TestAdvancedWhatIfTools(unittest.TestCase):
             )
             mock_create_snapshot.return_value = test_snapshot
 
-            # Run the advanced what-if analysis
+            # Run the advanced what-if analysis. Non-default market assumptions are used so
+            # the tool builds a custom scenario config (rather than a predefined one that
+            # would call the real engine); the asserted return/volatility below come from
+            # the mocked simulation result, not these inputs.
             result = self.advanced_tool._run(
                 scenario_type="likely",
                 projection_years=2.0,
                 monte_carlo_runs=1000,
                 modify_positions="AAPL:+50%",
-                market_return=0.08,
-                market_volatility=0.20
+                market_return=0.10,
+                market_volatility=0.18
             )
 
             # Verify execution
             self.assertIn("Advanced What-If Analysis", result)
             self.assertIn("AAPL:+50%", result)
-            self.assertIn("$150,000", result)
-            self.assertIn("8.0%", result)  # Market return
-            self.assertIn("20.0%", result)  # Volatility
+            self.assertIn("150,000", result)  # Mean final value (formatted with USD, not $)
+            self.assertIn("8.0%", result)  # Market return (from mocked result config)
+            self.assertIn("20.0%", result)  # Volatility (from mocked result config)
 
             # Verify engine was called
             mock_engine.run_scenario_simulation.assert_called_once()
@@ -234,8 +237,8 @@ class TestAdvancedWhatIfTools(unittest.TestCase):
 
         mock_engine.run_scenario_simulation.return_value = mock_result
 
-        # Mock create_snapshot
-        with patch.object(self.portfolio_manager, 'create_snapshot') as mock_create_snapshot:
+        # Mock create_current_snapshot
+        with patch.object(self.portfolio_manager, 'create_current_snapshot') as mock_create_snapshot:
             test_snapshot = PortfolioSnapshot(
                 date=date.today(),
                 total_value=Decimal("125000.00"),
@@ -263,10 +266,12 @@ class TestAdvancedWhatIfTools(unittest.TestCase):
             # Verify results
             self.assertIn("Advanced What-If Analysis", result)
             self.assertIn("NVDA:10@$800,TSLA:20@$250", result)
-            self.assertIn("$175,000", result)
-            self.assertIn("12.0%", result)  # Market return
+            self.assertIn("175,000", result)  # Mean final value (formatted with USD, not $)
+            self.assertIn("12.0%", result)  # Market return (from mocked result config)
 
-    @patch('src.agents.tools.AdvancedWhatIfTool')
+    # HypotheticalPositionTool instantiates AdvancedWhatIfTool by its name in the module
+    # where it is defined, so that is the correct patch target.
+    @patch('src.agents.portfolio_tools._tools.AdvancedWhatIfTool')
     def test_hypothetical_position_tool(self, mock_advanced_tool_class):
         """Test hypothetical position tool functionality."""
         # Mock the advanced tool
@@ -285,8 +290,8 @@ class TestAdvancedWhatIfTools(unittest.TestCase):
            • Mean Final Value: $165,000.00
         """
 
-        # Mock create_snapshot
-        with patch.object(self.portfolio_manager, 'create_snapshot') as mock_create_snapshot:
+        # Mock create_current_snapshot
+        with patch.object(self.portfolio_manager, 'create_current_snapshot') as mock_create_snapshot:
             test_snapshot = PortfolioSnapshot(
                 date=date.today(),
                 total_value=Decimal("125000.00"),
@@ -313,16 +318,16 @@ class TestAdvancedWhatIfTools(unittest.TestCase):
             # Verify execution
             self.assertIn("Hypothetical Position Analysis", result)
             self.assertIn("AAPL", result)
-            self.assertIn("100 shares", result)
-            self.assertIn("$150.00", result)
+            self.assertIn("100.00 shares", result)
+            self.assertIn("150.00", result)  # Purchase price (formatted with USD, not $)
 
             # Verify advanced tool was called
             mock_advanced_tool._run.assert_called_once()
 
     def test_hypothetical_position_with_investment_amount(self):
         """Test hypothetical position tool with investment amount instead of quantity."""
-        # Mock create_snapshot
-        with patch.object(self.portfolio_manager, 'create_snapshot') as mock_create_snapshot:
+        # Mock create_current_snapshot so the tool has a portfolio value to work with.
+        with patch.object(self.portfolio_manager, 'create_current_snapshot') as mock_create_snapshot:
             test_snapshot = PortfolioSnapshot(
                 date=date.today(),
                 total_value=Decimal("125000.00"),
@@ -337,29 +342,26 @@ class TestAdvancedWhatIfTools(unittest.TestCase):
             )
             mock_create_snapshot.return_value = test_snapshot
 
-            # Mock the advanced tool
-            with patch.object(self.hypothetical_tool, 'portfolio_manager') as mock_pm:
-                mock_pm.current_portfolio = self.test_portfolio
+            # Patch AdvancedWhatIfTool where HypotheticalPositionTool references it.
+            with patch('src.agents.portfolio_tools._tools.AdvancedWhatIfTool') as mock_advanced_class:
+                mock_advanced_tool = Mock()
+                mock_advanced_class.return_value = mock_advanced_tool
+                mock_advanced_tool._run.return_value = "Mock result"
 
-                # Test with investment amount
-                with patch('src.agents.tools.AdvancedWhatIfTool') as mock_advanced_class:
-                    mock_advanced_tool = Mock()
-                    mock_advanced_class.return_value = mock_advanced_tool
-                    mock_advanced_tool._run.return_value = "Mock result"
+                result = self.hypothetical_tool._run(
+                    symbol="TSLA",
+                    quantity=0,  # Should be ignored when investment_amount is provided
+                    purchase_price=250.0,
+                    investment_amount="$5000",
+                    scenario="optimistic"
+                )
 
-                    result = self.hypothetical_tool._run(
-                        symbol="TSLA",
-                        quantity=0,  # Should be ignored when investment_amount is provided
-                        purchase_price=250.0,
-                        investment_amount="$5000",
-                        scenario="optimistic"
-                    )
-
-                    # Verify the call was made with correct calculated quantity
-                    call_args = mock_advanced_tool._run.call_args
-                    self.assertIn("add_positions", call_args[1])
-                    # 5000 / 250 = 20 shares
-                    self.assertIn("TSLA:20.0@$250.0", call_args[1]["add_positions"])
+                # Verify the call was made with correct calculated quantity.
+                call_args = mock_advanced_tool._run.call_args
+                self.assertIsNotNone(call_args)
+                self.assertIn("add_positions", call_args[1])
+                # 5000 / 250 = 20 shares; the tool formats without a "$" prefix.
+                self.assertIn("TSLA:20.0@250.0", call_args[1]["add_positions"])
 
     def test_error_handling_no_portfolio(self):
         """Test error handling when no portfolio is loaded."""
@@ -383,7 +385,7 @@ class TestAdvancedWhatIfTools(unittest.TestCase):
 
     def test_parameter_validation(self):
         """Test parameter validation in advanced what-if tool."""
-        with patch.object(self.portfolio_manager, 'create_snapshot') as mock_create_snapshot:
+        with patch.object(self.portfolio_manager, 'create_current_snapshot') as mock_create_snapshot:
             test_snapshot = PortfolioSnapshot(
                 date=date.today(),
                 total_value=Decimal("125000.00"),
@@ -435,7 +437,7 @@ class TestAdvancedWhatIfTools(unittest.TestCase):
 
     def test_stress_test_parameter_adjustment(self):
         """Test that stress test parameters are properly adjusted."""
-        with patch.object(self.portfolio_manager, 'create_snapshot') as mock_create_snapshot:
+        with patch.object(self.portfolio_manager, 'create_current_snapshot') as mock_create_snapshot:
             test_snapshot = PortfolioSnapshot(
                 date=date.today(),
                 total_value=Decimal("125000.00"),

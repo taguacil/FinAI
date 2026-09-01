@@ -406,14 +406,14 @@ class TestFinancialInstrument:
 
     def test_financial_instrument_validation(self):
         """Test financial instrument validation."""
-        # Test that symbol cannot be empty
-        with pytest.raises(ValueError):
-            FinancialInstrument(
-                symbol="",
-                name="Test",
-                instrument_type=InstrumentType.STOCK,
-                currency=Currency.USD,
-            )
+        # An empty symbol is allowed: bonds may be identified by ISIN only.
+        instrument = FinancialInstrument(
+            symbol="",
+            name="Test",
+            instrument_type=InstrumentType.STOCK,
+            currency=Currency.USD,
+        )
+        assert instrument.symbol == ""
 
         # Test that name cannot be empty
         with pytest.raises(ValueError):

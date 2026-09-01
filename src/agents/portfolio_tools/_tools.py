@@ -143,7 +143,7 @@ class AddTransactionTool(BaseTool):
                     missing_fields.append("amount (the monetary value)")
                 if not currency:
                     missing_fields.append("currency (USD, EUR, GBP, etc.)")
-                if not date:
+                if not date and not days_ago:
                     missing_fields.append("date (when did this occur)")
 
                 if missing_fields:
@@ -162,7 +162,7 @@ class AddTransactionTool(BaseTool):
                     missing_fields.append("symbol (which stock paid the dividend)")
                 if amount <= 0:
                     missing_fields.append("amount (the dividend amount)")
-                if not date:
+                if not date and not days_ago:
                     missing_fields.append("date (when was it paid)")
 
                 if missing_fields:
@@ -181,7 +181,7 @@ class AddTransactionTool(BaseTool):
                     missing_fields.append("quantity (how many shares/units)")
                 if price <= 0:
                     missing_fields.append("price (price per share/unit)")
-                if not date:
+                if not date and not days_ago:
                     missing_fields.append("date (when did this transaction occur)")
 
                 if missing_fields:

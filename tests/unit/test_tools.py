@@ -6,6 +6,7 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from unittest.mock import MagicMock, Mock, patch
 
+import pandas as pd
 import pytest
 
 from src.agents.tools import (
@@ -51,10 +52,15 @@ class TestAddTransactionTool:
     def test_add_buy_transaction(self, tool, mock_portfolio_manager):
         """Test adding a buy transaction."""
         result = tool._run(
-            symbol="AAPL", transaction_type="buy", quantity=100, price=150.00
+            symbol="AAPL",
+            transaction_type="buy",
+            quantity=100,
+            price=150.00,
+            date="2024-01-15",
         )
 
-        assert "✅ Added buy transaction" in result
+        assert "✅ BUY:" in result
+        assert "AAPL" in result
         mock_portfolio_manager.add_transaction.assert_called_once()
         call_args = mock_portfolio_manager.add_transaction.call_args
         assert call_args[1]["symbol"] == "AAPL"
@@ -65,28 +71,41 @@ class TestAddTransactionTool:
     def test_add_sell_transaction(self, tool, mock_portfolio_manager):
         """Test adding a sell transaction."""
         result = tool._run(
-            symbol="TSLA", transaction_type="sell", quantity=50, price=200.00
+            symbol="TSLA",
+            transaction_type="sell",
+            quantity=50,
+            price=200.00,
+            date="2024-01-15",
         )
 
-        assert "✅ Added sell transaction" in result
+        assert "✅ SELL:" in result
         mock_portfolio_manager.add_transaction.assert_called_once()
 
     def test_add_dividend_transaction(self, tool, mock_portfolio_manager):
         """Test adding a dividend transaction."""
         result = tool._run(
-            symbol="AAPL", transaction_type="dividend", quantity=1, price=0.50
+            symbol="AAPL",
+            transaction_type="dividend",
+            quantity=1,
+            price=0.50,
+            date="2024-01-15",
         )
 
-        assert "✅ Added dividend transaction" in result
+        assert "✅ Recorded dividend of 0.50 USD from AAPL" in result
         mock_portfolio_manager.add_transaction.assert_called_once()
 
     def test_add_cash_deposit(self, tool, mock_portfolio_manager):
         """Test adding a cash deposit."""
         result = tool._run(
-            symbol="CASH", transaction_type="deposit", quantity=5000, price=0
+            symbol="CASH",
+            transaction_type="deposit",
+            quantity=5000,
+            price=0,
+            currency="USD",
+            date="2024-01-15",
         )
 
-        assert "✅ Added deposit transaction" in result
+        assert "✅ Deposited 5,000.00 USD" in result
         call_args = mock_portfolio_manager.add_transaction.call_args
         assert call_args[1]["quantity"] == Decimal("1.0")
         assert call_args[1]["price"] == Decimal("5000")
@@ -94,10 +113,15 @@ class TestAddTransactionTool:
     def test_add_cash_withdrawal(self, tool, mock_portfolio_manager):
         """Test adding a cash withdrawal."""
         result = tool._run(
-            symbol="CASH", transaction_type="withdrawal", quantity=1000, price=0
+            symbol="CASH",
+            transaction_type="withdrawal",
+            quantity=1000,
+            price=0,
+            currency="USD",
+            date="2024-01-15",
         )
 
-        assert "✅ Added withdrawal transaction" in result
+        assert "✅ Withdrew 1,000.00 USD" in result
 
     def test_invalid_transaction_type(self, tool):
         """Test handling invalid transaction type."""
@@ -109,9 +133,12 @@ class TestAddTransactionTool:
 
     def test_missing_symbol_and_isin(self, tool):
         """Test handling missing symbol and ISIN."""
-        result = tool._run(transaction_type="buy", quantity=100, price=150.00)
+        result = tool._run(
+            transaction_type="buy", quantity=100, price=150.00, date="2024-01-15"
+        )
 
-        assert "Please provide either a symbol" in result and "ISIN" in result
+        assert "Missing required information" in result
+        assert "symbol or ISIN" in result
 
     def test_invalid_date_format(self, tool):
         """Test handling invalid date format."""
@@ -133,6 +160,7 @@ class TestAddTransactionTool:
             quantity=100,
             price=150.00,
             currency="INVALID",
+            date="2024-01-15",
         )
 
         assert "Invalid currency" in result
@@ -142,7 +170,11 @@ class TestAddTransactionTool:
         mock_portfolio_manager.add_transaction.return_value = False
 
         result = tool._run(
-            symbol="AAPL", transaction_type="buy", quantity=100, price=150.00
+            symbol="AAPL",
+            transaction_type="buy",
+            quantity=100,
+            price=150.00,
+            date="2024-01-15",
         )
 
         assert "❌ Failed to add transaction" in result
@@ -150,16 +182,20 @@ class TestAddTransactionTool:
     def test_use_isin_instead_of_symbol(self, tool, mock_portfolio_manager):
         """Test using ISIN instead of symbol."""
         result = tool._run(
-            isin="US0378331005", transaction_type="buy", quantity=100, price=150.00
+            isin="US0378331005",
+            transaction_type="buy",
+            quantity=100,
+            price=150.00,
+            date="2024-01-15",
         )
 
-        assert "✅ Added buy transaction" in result
+        assert "✅ BUY:" in result
         call_args = mock_portfolio_manager.add_transaction.call_args
         assert call_args[1]["isin"] == "US0378331005"
 
     def test_days_ago_parameter(self, tool, mock_portfolio_manager):
         """Test using days_ago parameter."""
-        with patch("src.agents.tools.datetime") as mock_datetime:
+        with patch("src.agents.portfolio_tools._tools.datetime") as mock_datetime:
             mock_datetime.now.return_value = datetime(2024, 1, 15, 12, 0, 0)
             mock_datetime.strptime = datetime.strptime
 
@@ -171,7 +207,7 @@ class TestAddTransactionTool:
                 days_ago=2,
             )
 
-            assert "✅ Added buy transaction" in result
+            assert "✅ BUY:" in result
 
 
 class TestGetPortfolioSummaryTool:
@@ -187,7 +223,7 @@ class TestGetPortfolioSummaryTool:
         portfolio.base_currency = Currency.USD
         portfolio.cash_balances = {Currency.USD: Decimal("1000.00")}
         manager.current_portfolio = portfolio
-        manager.get_position_summary.return_value = [
+        manager.get_positions_with_prices.return_value = [
             {
                 "symbol": "AAPL",
                 "name": "Apple Inc.",
@@ -195,6 +231,8 @@ class TestGetPortfolioSummaryTool:
                 "current_price": 150.00,
                 "unrealized_pnl": 500.00,
                 "unrealized_pnl_percent": 3.33,
+                "instrument_type": "stock",
+                "currency": "USD",
             }
         ]
         manager.get_portfolio_value.return_value = 16000.00
@@ -220,21 +258,21 @@ class TestGetPortfolioSummaryTool:
 
         result = tool._run(include_metrics=True)
 
-        assert "📊 **Portfolio Summary: Test Portfolio**" in result
-        assert "💰 **Total Value**: $16,000.00 USD" in result
-        assert "💵 **Cash Balances:**" in result
+        assert "Portfolio: Test Portfolio" in result
+        assert "Total Value: 16,000.00 USD" in result
+        assert "Cash Balances:" in result
         assert "USD: 1,000.00" in result
-        assert "📈 **Current Positions:**" in result
-        assert "**AAPL** (Apple Inc.)" in result
-        assert "📊 **Performance Metrics:**" in result
+        assert "Current Positions:" in result
+        assert "AAPL (Apple Inc.)" in result
+        assert "Performance Metrics:" in result
         assert "Total Return: 15.50%" in result
 
     def test_get_portfolio_summary_without_metrics(self, tool):
         """Test getting portfolio summary without metrics."""
         result = tool._run(include_metrics=False)
 
-        assert "📊 **Portfolio Summary: Test Portfolio**" in result
-        assert "📊 Performance Metrics:" not in result
+        assert "Portfolio: Test Portfolio" in result
+        assert "Performance Metrics:" not in result
 
     def test_no_portfolio_loaded(self, tool, mock_portfolio_manager):
         """Test handling when no portfolio is loaded."""
@@ -242,16 +280,16 @@ class TestGetPortfolioSummaryTool:
 
         result = tool._run()
 
-        assert "❌ No portfolio loaded" in result
+        assert "No portfolio loaded" in result
 
     def test_empty_positions(self, tool, mock_portfolio_manager):
         """Test handling empty positions."""
-        mock_portfolio_manager.get_position_summary.return_value = []
+        mock_portfolio_manager.get_positions_with_prices.return_value = []
 
         result = tool._run()
 
-        assert "📊 **Portfolio Summary: Test Portfolio**" in result
-        assert "📈 Current Positions:" not in result
+        assert "Portfolio: Test Portfolio" in result
+        assert "Current Positions:" not in result
 
     def test_empty_cash_balances(self, tool, mock_portfolio_manager):
         """Test handling empty cash balances."""
@@ -259,8 +297,8 @@ class TestGetPortfolioSummaryTool:
 
         result = tool._run()
 
-        assert "📊 **Portfolio Summary: Test Portfolio**" in result
-        assert "💵 Cash Balances:" not in result
+        assert "Portfolio: Test Portfolio" in result
+        assert "Cash Balances:" not in result
 
 
 class TestGetTransactionsTool:
@@ -351,20 +389,13 @@ class TestSimulateWhatIfTool:
         portfolio = Mock()
         manager.current_portfolio = portfolio
 
-        # Mock snapshots
-        baseline_snaps = [
-            Mock(total_value=Decimal("10000.00")),
-            Mock(total_value=Decimal("11000.00")),
-        ]
+        # simulate_portfolio_history returns a DataFrame with a total_value column
+        baseline_df = pd.DataFrame({"total_value": [10000.00, 11000.00]})
+        whatif_df = pd.DataFrame({"total_value": [10000.00, 10500.00]})
 
-        whatif_snaps = [
-            Mock(total_value=Decimal("10000.00")),
-            Mock(total_value=Decimal("10500.00")),
-        ]
-
-        manager.simulate_snapshots_for_range.side_effect = [
-            baseline_snaps,  # First call (baseline)
-            whatif_snaps,  # Second call (what-if)
+        manager.simulate_portfolio_history.side_effect = [
+            baseline_df,  # First call (baseline)
+            whatif_df,  # Second call (what-if)
         ]
 
         return manager
@@ -386,8 +417,8 @@ class TestSimulateWhatIfTool:
         assert "📈 What-if Simulation (2024-01-01 → 2024-01-31)" in result
         assert "Excluded symbols: ['AAPL', 'TSLA']" in result
         assert "Excluded txn ids: ['txn1', 'txn2']" in result
-        assert "Start value: $10,000.00" in result
-        assert "End value: $10,500.00" in result
+        assert "Start value: 10,000.00 USD" in result
+        assert "End value: 10,500.00 USD" in result
         assert "Total return: 5.00%" in result
 
     def test_no_portfolio_loaded(self, tool, mock_portfolio_manager):
@@ -406,12 +437,15 @@ class TestSimulateWhatIfTool:
 
     def test_no_snapshots_generated(self, tool, mock_portfolio_manager):
         """Test handling when no snapshots are generated."""
-        # Mock to return empty for both baseline and what-if scenarios
-        mock_portfolio_manager.simulate_snapshots_for_range.side_effect = [[], []]
+        # Mock to return empty DataFrames for both baseline and what-if scenarios
+        mock_portfolio_manager.simulate_portfolio_history.side_effect = [
+            pd.DataFrame(),
+            pd.DataFrame(),
+        ]
 
         result = tool._run(start="2024-01-01", end="2024-01-31")
 
-        assert "No snapshots generated for the specified range" in result
+        assert "No data generated for the specified range" in result
 
 
 class TestSearchInstrumentTool:
@@ -520,7 +554,7 @@ class TestGetCurrentPriceTool:
 
         result = tool._run("AAPL")
 
-        assert "💰 **AAPL** (Apple Inc.): $150.00" in result
+        assert "💰 **AAPL** (Apple Inc.): 150.00 USD" in result
 
     def test_price_not_found(self, tool, mock_data_manager):
         """Test handling when price is not found."""
@@ -537,7 +571,7 @@ class TestGetCurrentPriceTool:
 
         result = tool._run("AAPL")
 
-        assert "💰 **AAPL** (AAPL): $150.00" in result  # Uses symbol as fallback
+        assert "💰 **AAPL** (AAPL): 150.00 USD" in result  # Uses symbol as fallback
 
     def test_get_price_error(self, tool, mock_data_manager):
         """Test handling get price errors."""
@@ -574,9 +608,11 @@ class TestGetPortfolioMetricsTool:
         self, tool, mock_portfolio_manager, mock_metrics_calculator
     ):
         """Test getting portfolio metrics."""
-        # Mock snapshots
-        mock_snapshots = [Mock(), Mock()]
-        mock_portfolio_manager.storage.load_snapshots.return_value = mock_snapshots
+        # Mock portfolio history (needs >= 2 data points)
+        mock_portfolio_manager.get_portfolio_history.return_value = pd.DataFrame(
+            {"total_value": [10000.0, 11000.0]}
+        )
+        mock_portfolio_manager.get_external_cash_flows_by_day.return_value = {}
 
         # Mock metrics
         mock_metrics = {
@@ -594,11 +630,13 @@ class TestGetPortfolioMetricsTool:
             "information_ratio": 0.8,
             "benchmark_return": 0.13,
         }
-        mock_metrics_calculator.calculate_portfolio_metrics.return_value = mock_metrics
+        mock_metrics_calculator.calculate_metrics_from_df.return_value = mock_metrics
 
-        result = tool._run(days=365, benchmark="SPY")
+        result = tool._run(
+            start_date="2024-01-01", end_date="2024-12-31", benchmark="SPY"
+        )
 
-        assert "📊 **Portfolio Metrics** (365 days vs SPY)" in result
+        assert "📊 **Portfolio Metrics** (2024-01-01 → 2024-12-31 vs SPY)" in result
         assert "Total Return: 15.00%" in result
         assert "Annualized Return: 12.00%" in result
         assert "Volatility: 18.00%" in result
@@ -627,9 +665,11 @@ class TestGetPortfolioMetricsTool:
         self, tool, mock_portfolio_manager, mock_metrics_calculator
     ):
         """Test handling metrics calculation errors."""
-        mock_snapshots = [Mock(), Mock()]
-        mock_portfolio_manager.storage.load_snapshots.return_value = mock_snapshots
-        mock_metrics_calculator.calculate_portfolio_metrics.return_value = {
+        mock_portfolio_manager.get_portfolio_history.return_value = pd.DataFrame(
+            {"total_value": [10000.0, 11000.0]}
+        )
+        mock_portfolio_manager.get_external_cash_flows_by_day.return_value = {}
+        mock_metrics_calculator.calculate_metrics_from_df.return_value = {
             "error": "Calculation failed"
         }
 
@@ -641,8 +681,10 @@ class TestGetPortfolioMetricsTool:
         self, tool, mock_portfolio_manager, mock_metrics_calculator
     ):
         """Test metrics without benchmark comparison."""
-        mock_snapshots = [Mock(), Mock()]
-        mock_portfolio_manager.storage.load_snapshots.return_value = mock_snapshots
+        mock_portfolio_manager.get_portfolio_history.return_value = pd.DataFrame(
+            {"total_value": [10000.0, 11000.0]}
+        )
+        mock_portfolio_manager.get_external_cash_flows_by_day.return_value = {}
 
         mock_metrics = {
             "total_return": 0.15,
@@ -655,11 +697,11 @@ class TestGetPortfolioMetricsTool:
             "calmar_ratio": 1.8,
             "benchmark_available": False,
         }
-        mock_metrics_calculator.calculate_portfolio_metrics.return_value = mock_metrics
+        mock_metrics_calculator.calculate_metrics_from_df.return_value = mock_metrics
 
-        result = tool._run()
+        result = tool._run(start_date="2024-01-01", end_date="2024-12-31")
 
-        assert "📊 **Portfolio Metrics** (365 days vs SPY)" in result
+        assert "📊 **Portfolio Metrics** (2024-01-01 → 2024-12-31 vs SPY)" in result
         assert "Total Return: 15.00%" in result
         assert "vs SPY:" not in result  # Should not show benchmark comparison
 
@@ -705,8 +747,8 @@ class TestGetTransactionHistoryTool:
         result = tool._run(days=30)
 
         assert "📝 **Transaction History** (Last 30 days)" in result
-        assert "2024-01-15: BUY 100 AAPL @ $150.0 (Total: $15000.0)" in result
-        assert "2024-01-20: SELL 50 TSLA @ $200.0 (Total: $10000.0)" in result
+        assert "2024-01-15: BUY 100 AAPL @ 150.0 (Total: 15000.0)" in result
+        assert "2024-01-20: SELL 50 TSLA @ 200.0 (Total: 10000.0)" in result
 
     def test_no_portfolio_loaded(self, tool, mock_portfolio_manager):
         """Test handling when no portfolio is loaded."""
@@ -809,7 +851,7 @@ class TestIngestPdfTool:
         """Create the tool instance."""
         return IngestPdfTool()
 
-    @patch("src.agents.tools.PdfReader")
+    @patch("src.agents.portfolio_tools._tools.PdfReader")
     def test_ingest_pdf_success(self, mock_pdf_reader, tool):
         """Test successful PDF ingestion."""
         # Mock PDF pages
@@ -829,7 +871,7 @@ class TestIngestPdfTool:
         assert "Page 1 content" in result
         assert "Page 2 content" in result
 
-    @patch("src.agents.tools.PdfReader")
+    @patch("src.agents.portfolio_tools._tools.PdfReader")
     def test_ingest_pdf_no_text(self, mock_pdf_reader, tool):
         """Test PDF with no extractable text."""
         mock_page = Mock()
@@ -843,7 +885,7 @@ class TestIngestPdfTool:
 
         assert "❌ No text extracted from PDF" in result
 
-    @patch("src.agents.tools.PdfReader")
+    @patch("src.agents.portfolio_tools._tools.PdfReader")
     def test_ingest_pdf_page_error(self, mock_pdf_reader, tool):
         """Test handling page extraction errors."""
         mock_page1 = Mock()
@@ -867,7 +909,7 @@ class TestIngestPdfTool:
 
         assert "❌ File not found: /nonexistent/file.pdf" in result
 
-    @patch("src.agents.tools.PdfReader")
+    @patch("src.agents.portfolio_tools._tools.PdfReader")
     def test_ingest_pdf_general_error(self, mock_pdf_reader, tool):
         """Test handling general PDF reading errors."""
         mock_pdf_reader.side_effect = Exception("PDF reading error")
@@ -876,7 +918,7 @@ class TestIngestPdfTool:
 
         assert "❌ Error reading PDF" in result
 
-    @patch("src.agents.tools.PdfReader")
+    @patch("src.agents.portfolio_tools._tools.PdfReader")
     def test_ingest_pdf_content_truncation(self, mock_pdf_reader, tool):
         """Test PDF content truncation for very long content."""
         # Create very long content
@@ -925,6 +967,9 @@ class TestCreatePortfolioTools:
         tool_names = [tool.name for tool in tools]
         expected_tools = [
             "add_transaction",
+            "bulk_add_transactions",
+            "modify_transaction",
+            "delete_transaction",
             "get_portfolio_summary",
             "get_transactions",
             "simulate_what_if",
