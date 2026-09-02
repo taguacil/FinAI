@@ -34,34 +34,33 @@
     <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
       <div>
         <div class="flex items-center justify-between mb-1">
-          <label class="label mb-0">Universe</label>
+          <label class="label mb-0">Universe <span class="text-muted font-normal" x-text="'· ' + uni.length + ' selected'"></span></label>
           <div class="flex gap-2">
-            <button type="button" class="text-xs text-muted hover:text-white" @click="uni = allUni.map(a => a.symbol)">All</button>
+            <button type="button" class="text-xs text-muted hover:text-white" @click="showAllVisible()">All</button>
             <button type="button" class="text-xs text-muted hover:text-white" @click="uni = []">None</button>
           </div>
         </div>
+        <input type="text" x-model="search" class="input input-sm mono w-full mb-2" placeholder="Search symbols…" />
         <div class="pick-grid">
-          <template x-for="a in allUni" :key="a.symbol">
+          <template x-for="a in filteredUni()" :key="a.symbol">
             <label class="pick" :class="uni.includes(a.symbol) ? 'pick-on' : ''" :title="a.name">
               <input type="checkbox" class="hidden" :checked="uni.includes(a.symbol)" @change="toggle(uni, a.symbol)" />
               <span class="mono" x-text="a.symbol"></span>
             </label>
           </template>
-        </div>
-        <div class="flex gap-2 mt-2">
-          <input type="text" x-model="customSym" @keydown.enter.prevent="addCustom()" class="input input-sm mono flex-1" placeholder="Add symbol (e.g. AAPL)" />
-          <button type="button" class="btn btn-sm" @click="addCustom()">Add</button>
+          <template x-if="!filteredUni().length"><span class="text-xs text-muted">No holdings match.</span></template>
         </div>
         <template x-if="allCandidates.length">
           <div class="mt-3">
             <label class="label mb-1">Add from stored universe (not held)</label>
             <div class="pick-grid">
-              <template x-for="s in allCandidates" :key="s">
+              <template x-for="s in filteredCandidates()" :key="s">
                 <label class="pick" :class="uni.includes(s) ? 'pick-on' : ''">
                   <input type="checkbox" class="hidden" :checked="uni.includes(s)" @change="toggle(uni, s)" />
                   <span class="mono" x-text="s"></span>
                 </label>
               </template>
+              <template x-if="!filteredCandidates().length"><span class="text-xs text-muted">No candidates match.</span></template>
             </div>
           </div>
         </template>
@@ -328,12 +327,21 @@
       mc: JSON.parse(document.getElementById('mc-data').textContent),
       detail: JSON.parse(document.getElementById('sim-detail-data').textContent),
       detailKind: {{ (sim_detail.kind if sim_detail else '') | tojson }},
-      uni: [], allUni: [], allCandidates: [], strat: [], allStrat: [], customSym: '',
+      uni: [], allUni: [], allCandidates: [], strat: [], allStrat: [], search: '',
       toggle(arr, v) { const i = arr.indexOf(v); if (i === -1) arr.push(v); else arr.splice(i, 1); },
-      addCustom() {
-        const s = (this.customSym || '').trim().toUpperCase();
-        if (s && !this.uni.includes(s)) this.uni.push(s);
-        this.customSym = '';
+      filteredUni() {
+        const q = this.search.trim().toUpperCase();
+        if (!q) return this.allUni;
+        return this.allUni.filter(a => a.symbol.toUpperCase().includes(q) || (a.name || '').toUpperCase().includes(q));
+      },
+      filteredCandidates() {
+        const q = this.search.trim().toUpperCase();
+        if (!q) return this.allCandidates;
+        return this.allCandidates.filter(s => s.toUpperCase().includes(q));
+      },
+      showAllVisible() {
+        const vis = [...this.filteredUni().map(a => a.symbol), ...this.filteredCandidates()];
+        this.uni = [...new Set([...this.uni, ...vis])];
       },
       num(v, dcml) { return FINAI.fmtNum(v, dcml ?? 2); },
       pct(v) { return FINAI.fmtPct(v); },
