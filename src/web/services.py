@@ -50,13 +50,18 @@ _ASSET_CLASS_LABELS = {
     "structured_product": "Structured Products",
 }
 
-# Asset-class view modes shared by the Dashboard and Analytics selectors.
-ASSET_CLASS_VIEWS = [
-    ("all", "All"),
-    ("equities_only", "Equities"),
-    ("fixed_income_only", "Fixed Income"),
-    ("structured_only", "Structured"),
-    ("other_only", "Other"),
+# The web asset-class selectors are built per instrument type by
+# AppContext._available_class_views so they mirror the asset-allocation
+# breakdown. The manager still accepts the legacy category aliases
+# ("equities_only", ...) via asset_classes.category_for_view_mode for
+# backwards compatibility.
+#
+# Preferred display order for the per-type asset-class filters. Instrument types
+# not listed here are appended alphabetically; cash is never a filter (it has no
+# performance history) though it still appears in the allocation breakdown.
+_CLASS_VIEW_ORDER = [
+    "stock", "etf", "bond", "structured_product",
+    "mutual_fund", "crypto", "option", "future",
 ]
 
 # view_mode -> instrument category and instrument_type -> category both come
@@ -270,6 +275,41 @@ class AppContext:
         except Exception:
             return None
 
+    def _available_class_views(self, relabel_all: bool = False) -> List[tuple]:
+        """Asset-class filter options for the current portfolio.
+
+        Returns ``[("all", label)]`` followed by one entry per instrument type
+        actually held (market value > 0), ordered by ``_CLASS_VIEW_ORDER`` so the
+        selector mirrors the asset-allocation breakdown. Cash is excluded — it has
+        no performance history to chart. ``relabel_all`` renames the "all" entry
+        for the analytics selector.
+        """
+        views: List[tuple] = [("all", "All assets" if relabel_all else "All")]
+        portfolio = self.manager.current_portfolio
+        if not portfolio:
+            return views
+        summary = {p["symbol"]: p for p in self.manager.get_position_summary()}
+        type_value: Dict[str, float] = {}
+        for sym, pos in portfolio.positions.items():
+            if pos.quantity == 0:
+                continue
+            itype = pos.instrument.instrument_type.value
+            if itype == "cash":
+                continue
+            mv = _f(summary.get(sym, {}).get("market_value")) or 0.0
+            if mv > 0:
+                type_value[itype] = type_value.get(itype, 0.0) + mv
+
+        def order_key(t: str) -> tuple:
+            try:
+                return (_CLASS_VIEW_ORDER.index(t), "")
+            except ValueError:
+                return (len(_CLASS_VIEW_ORDER), t)
+
+        for t in sorted(type_value, key=order_key):
+            views.append((t, _ASSET_CLASS_LABELS.get(t, t.title())))
+        return views
+
     def dashboard(self, view_mode: str = "all") -> Dict[str, Any]:
         """Everything the dashboard page needs.
 
@@ -283,10 +323,11 @@ class AppContext:
         if not portfolio:
             return {"empty": True}
 
-        if view_mode not in {k for k, _ in ASSET_CLASS_VIEWS}:
+        class_views = self._available_class_views()
+        if view_mode not in {k for k, _ in class_views}:
             view_mode = "all"
-        category = _CATEGORY_BY_VIEW_MODE.get(view_mode)
-        views = [{"key": k, "label": lbl} for k, lbl in ASSET_CLASS_VIEWS]
+        is_class = view_mode != "all"
+        views = [{"key": k, "label": lbl} for k, lbl in class_views]
 
         base_ccy = portfolio.base_currency.value
         positions = pm.get_position_summary()
@@ -401,9 +442,8 @@ class AppContext:
         # When a single class is selected, the KPIs, equity curve, holdings
         # table, by-holding allocation and transactions narrow to that class;
         # cash is only shown in the "all" view (it isn't attributed to a class).
-        if category is not None:
-            view_rows = [r for r in pos_rows
-                         if _instrument_category(r["asset_class"]) == category]
+        if is_class:
+            view_rows = [r for r in pos_rows if r["asset_class"] == view_mode]
             invested_v = sum((r["value"] or 0) for r in view_rows)
             unrealized_v = sum((r["pnl"] or 0) for r in view_rows)
             cost_v = invested_v - unrealized_v
@@ -421,21 +461,19 @@ class AppContext:
             if isinstance(cdf, pd.DataFrame) and not cdf.empty and "total_value" in cdf:
                 curve_out["dates"] = [d.strftime("%Y-%m-%d") for d in cdf.index]
                 curve_out["values"] = [float(v) for v in cdf["total_value"].tolist()]
-            # Category per symbol for filtering transactions. Transaction records
-            # can carry an inconsistent instrument_type for the same symbol (e.g.
-            # a dividend booked as "stock" on a bond), so the live position's type
-            # is authoritative; fall back to transactions only for sold-out names.
-            cat_by_symbol = {
-                t.instrument.symbol: _instrument_category(
+            # Instrument type per symbol for filtering transactions. Transaction
+            # records can carry an inconsistent instrument_type for the same symbol
+            # (e.g. a dividend booked as "stock" on a bond), so the live position's
+            # type is authoritative; fall back to transactions for sold-out names.
+            type_by_sym_full = {
+                t.instrument.symbol: (
                     t.instrument.instrument_type.value
                     if hasattr(t.instrument.instrument_type, "value")
                     else str(t.instrument.instrument_type))
                 for t in portfolio.transactions
             }
-            cat_by_symbol.update(
-                {sym: _instrument_category(itype) for sym, itype in type_by_symbol.items()}
-            )
-            tx_filter = lambda sym: cat_by_symbol.get(sym) == category
+            type_by_sym_full.update(type_by_symbol)
+            tx_filter = lambda sym: type_by_sym_full.get(sym) == view_mode
         else:
             view_rows = pos_rows
             kpis = {
@@ -452,7 +490,7 @@ class AppContext:
         # allocation by holding (base currency), + residual cash (all view only)
         alloc = [{"label": r["symbol"], "value": r["value"] or 0}
                  for r in view_rows if (r["value"] or 0) > 0]
-        if category is None and cash and cash > 0:
+        if not is_class and cash and cash > 0:
             alloc.append({"label": "Cash", "value": float(cash)})
 
         # recent transactions (longer list; the panel scrolls)
@@ -486,12 +524,6 @@ class AppContext:
         }
 
     # -- analytics -----------------------------------------------------------
-
-    # Asset-class views for the analytics selector; each maps to a
-    # get_portfolio_history_filtered view_mode. "All assets" reads nicer here
-    # than the shared "All" label.
-    ANALYTICS_VIEWS = [(k, "All assets" if k == "all" else lbl)
-                       for k, lbl in ASSET_CLASS_VIEWS]
 
     def analytics(self, days: int = 365, benchmark: str = "SPY",
                   start_date: Optional[date] = None, end_date: Optional[date] = None,
@@ -528,10 +560,10 @@ class AppContext:
             start = self._history_start()
 
         all_currencies = [c.value for c in Currency]
-        valid_view_modes = {m for m, _ in self.ANALYTICS_VIEWS}
-        if view_mode not in valid_view_modes:
+        class_views = self._available_class_views(relabel_all=True)
+        if view_mode not in {k for k, _ in class_views}:
             view_mode = "all"
-        views = [{"key": k, "label": lbl} for k, lbl in self.ANALYTICS_VIEWS]
+        views = [{"key": k, "label": lbl} for k, lbl in class_views]
 
         try:
             df = pm.get_portfolio_history_filtered(

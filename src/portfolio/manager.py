@@ -921,9 +921,6 @@ class PortfolioManager:
         if not history:
             return pd.DataFrame()
 
-        # Map view mode -> attribution category (None = all assets, all cash).
-        category = asset_classes.category_for_view_mode(view_mode)
-
         if view_mode == "all":
             # Standard behavior - all assets with all cash
             return history.get_value_history(
@@ -932,24 +929,27 @@ class PortfolioManager:
                 include_cash=True,
                 target_currency=target_currency,
             )
-        elif category is not None:
-            # Single asset class: market value of just that class's positions.
-            # Returns are made currency- and flow-aware by the caller via
-            # get_category_cash_flows_by_day (buys/sells are external flows).
+
+        # A view_mode is either a legacy category alias ("equities_only", which
+        # merges stocks + ETFs) or a concrete instrument type ("stock", "etf",
+        # "bond", ...). Per-type views mirror the asset-allocation breakdown.
+        # Either way the series is the market value of just that class's
+        # positions (no cash); returns are made currency- and flow-aware by the
+        # caller via get_category_cash_flows_by_day (buys/sells are external).
+        category = asset_classes.category_for_view_mode(view_mode)
+        if category is not None:
             return history.get_category_value_history(
                 start_date, end_date,
                 category=category,
                 target_currency=target_currency,
             )
-        else:
-            # Unknown mode, fall back to all
-            logging.warning(f"Unknown view_mode '{view_mode}', falling back to 'all'")
-            return history.get_value_history(
-                start_date, end_date,
-                instrument_types=None,
-                include_cash=True,
-                target_currency=target_currency,
-            )
+        # Concrete instrument type: positions of that type only, no cash.
+        return history.get_value_history(
+            start_date, end_date,
+            instrument_types=[view_mode],
+            include_cash=False,
+            target_currency=target_currency,
+        )
 
     def get_category_cash_flows_by_day(
         self,
@@ -964,14 +964,22 @@ class PortfolioManager:
         reflect performance rather than capital deployment. Returns an empty dict
         for the "all" view mode (which uses external deposit/withdrawal flows).
         """
-        category = asset_classes.category_for_view_mode(view_mode)
-        if not category or not self.current_portfolio:
+        if view_mode == "all" or not self.current_portfolio:
             return {}
         history = self._get_portfolio_history()
         if not history:
             return {}
+        # A view_mode is either a legacy category alias ("equities_only") or a
+        # concrete instrument type ("stock", "etf", "bond", ...). The latter
+        # gives per-type filters that mirror the asset-allocation breakdown.
+        category = asset_classes.category_for_view_mode(view_mode)
+        if category is not None:
+            return history.get_category_cash_flows_by_day(
+                start_date, end_date, category=category, target_currency=target_currency
+            )
         return history.get_category_cash_flows_by_day(
-            start_date, end_date, category=category, target_currency=target_currency
+            start_date, end_date, target_currency=target_currency,
+            instrument_type=view_mode,
         )
 
     def _fetch_and_store_prices(

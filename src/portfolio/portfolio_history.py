@@ -763,13 +763,14 @@ class PortfolioHistory:
         """Map instrument type to category."""
         return asset_classes.category_for_instrument_type(instrument_type)
 
-    def _category_by_symbol(self) -> Dict[str, str]:
-        """One authoritative category per symbol, matching the replayed position.
+    def _type_by_symbol(self) -> Dict[str, str]:
+        """One authoritative instrument type per symbol, matching the replay.
 
         A position takes its instrument type from the first BUY that opens it, so
-        we categorise each symbol by that same transaction. This keeps flow
-        attribution consistent with get_category_value_history even when a
-        symbol's transactions carry inconsistent instrument types.
+        we resolve each symbol by that same transaction. This keeps flow
+        attribution consistent with the value history even when a symbol's
+        transactions carry inconsistent instrument types (e.g. a dividend booked
+        as "stock" on a bond).
         """
         first_type: Dict[str, str] = {}   # earliest transaction type per symbol
         buy_type: Dict[str, str] = {}      # earliest BUY type per symbol
@@ -781,8 +782,12 @@ class PortfolioHistory:
                 first_type[sym] = itype
             if txn.transaction_type == TransactionType.BUY and sym not in buy_type:
                 buy_type[sym] = itype
-        return {sym: self._get_instrument_category(buy_type.get(sym, first_type[sym]))
-                for sym in first_type}
+        return {sym: buy_type.get(sym, first_type[sym]) for sym in first_type}
+
+    def _category_by_symbol(self) -> Dict[str, str]:
+        """One authoritative category per symbol, matching the replayed position."""
+        return {sym: self._get_instrument_category(itype)
+                for sym, itype in self._type_by_symbol().items()}
 
     def get_category_value_history(
         self,
@@ -869,14 +874,19 @@ class PortfolioHistory:
         end_date: date,
         category: str = "equity",
         target_currency: Optional[Currency] = None,
+        instrument_type: Optional[str] = None,
     ) -> Dict[date, Decimal]:
         """Net capital flows into a class's positions, per day, in target currency.
 
         A BUY adds to the class's market value without being a return, so it is a
         positive external flow; a SELL removes market value, so it is a negative
         flow. These are the flows to subtract when computing a time-weighted
-        return from :meth:`get_category_value_history`. Income (dividends /
-        coupons) does not change positions market value and is not included here.
+        return from the matching value history. Income (dividends / coupons) does
+        not change positions market value and is not included here.
+
+        When ``instrument_type`` is given, flows are attributed to that exact
+        instrument type (e.g. only ETFs); otherwise they are attributed to the
+        broader ``category`` (e.g. all equities).
 
         Sign convention matches ``calculate_returns_from_df``: daily return =
         (value_t - value_{t-1} - flow_t) / value_{t-1}.
@@ -884,11 +894,16 @@ class PortfolioHistory:
         base = target_currency or self.portfolio.base_currency
         flows: Dict[date, Decimal] = {}
 
-        # A symbol's category must match how get_category_value_history sees it:
-        # the replayed position takes its type from the first BUY, and transaction
-        # records for the same symbol can be inconsistently typed. So resolve one
-        # category per symbol (from its earliest buy) and use it for every flow.
-        category_by_symbol = self._category_by_symbol()
+        # A symbol's class must match how the value history sees it: the replayed
+        # position takes its type from the first BUY, and transaction records for
+        # the same symbol can be inconsistently typed. So resolve one class per
+        # symbol (from its earliest buy) and use it for every flow.
+        if instrument_type is not None:
+            class_by_symbol = self._type_by_symbol()
+            target_class = instrument_type
+        else:
+            class_by_symbol = self._category_by_symbol()
+            target_class = category
         warned_fx: set = set()
 
         for txn in self.portfolio.transactions:
@@ -898,7 +913,7 @@ class PortfolioHistory:
             if txn.transaction_type not in (TransactionType.BUY, TransactionType.SELL):
                 continue
 
-            if category_by_symbol.get(txn.instrument.symbol) != category:
+            if class_by_symbol.get(txn.instrument.symbol) != target_class:
                 continue
 
             amount = txn.total_value
