@@ -43,6 +43,7 @@ _ASSET_CLASS_LABELS = {
     "mutual_fund": "Mutual Funds",
     "option": "Options",
     "future": "Futures",
+    "structured_product": "Structured Products",
 }
 
 

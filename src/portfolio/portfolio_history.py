@@ -128,6 +128,9 @@ class PortfolioHistory:
     # Instrument type categories for filtering
     EQUITY_TYPES = {"stock", "etf"}
     FIXED_INCOME_TYPES = {"bond"}
+    # Structured products are their own class — kept distinct from plain bonds
+    # so fixed-income analytics aren't polluted by equity-linked risk.
+    STRUCTURED_TYPES = {"structured_product"}
 
     def __init__(
         self,
@@ -710,6 +713,8 @@ class PortfolioHistory:
             return "equity"
         elif instrument_type in self.FIXED_INCOME_TYPES:
             return "fixed_income"
+        elif instrument_type in self.STRUCTURED_TYPES:
+            return "structured"
         return "other"
 
     def get_value_history_with_attribution(

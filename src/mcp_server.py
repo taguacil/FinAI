@@ -220,7 +220,8 @@ b) Enter a custom price
 c) Leave it unavailable
 
 RULES:
-- Respect user-specified instrument_type (bond, stock, etf) and currency exactly
+- Respect user-specified instrument_type (bond, structured_product, stock, etf) and currency exactly
+- Reverse convertibles, credit-linked notes (CLNs) and autocallables are structured_product, not bond
 - For bonds with ISINs, always use the ISIN parameter
 - Confirm before modifying or deleting transactions
 - Use get_transactions or get_transaction_history to find transaction IDs"""
@@ -349,7 +350,7 @@ def add_transaction(
         quantity: Number of shares (default 1.0, only needed for buy/sell)
         symbol: Stock symbol (e.g., AAPL, TSLA) - not needed for deposit/withdrawal
         isin: ISIN identifier (e.g., US0378331005)
-        instrument_type: Type: stock, etf, bond, crypto, cash, mutual_fund, option, future
+        instrument_type: Type: stock, etf, bond, structured_product, crypto, cash, mutual_fund, option, future
         currency: Currency code (e.g., USD, EUR) - REQUIRED for deposit/withdrawal
         date: Trade date in YYYY-MM-DD format - REQUIRED
         days_ago: Fallback: how many days ago (0 for today)
@@ -426,7 +427,7 @@ def modify_transaction(
         price: New price (leave None to keep current)
         date: New date in YYYY-MM-DD format (leave None to keep current)
         notes: New notes (leave None to keep current)
-        instrument_type: New instrument type: stock, etf, bond, crypto, cash, mutual_fund, option, future (leave None to keep current)
+        instrument_type: New instrument type: stock, etf, bond, structured_product, crypto, cash, mutual_fund, option, future (leave None to keep current)
     """
     return _modify_transaction._run(
         transaction_id=transaction_id,

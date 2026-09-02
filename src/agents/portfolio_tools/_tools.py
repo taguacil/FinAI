@@ -528,6 +528,8 @@ class GetPortfolioSummaryTool(BaseTool):
                     instrument_type = pos.get("instrument_type", "stock")
                     if instrument_type == "bond":
                         unit_label = "bonds"
+                    elif instrument_type == "structured_product":
+                        unit_label = "notes"
                     elif instrument_type == "etf":
                         unit_label = "shares"
                     elif instrument_type == "crypto":
@@ -2188,7 +2190,7 @@ class ModifyTransactionTool(BaseTool):
     - price: New price per share/unit
     - date: New transaction date (YYYY-MM-DD)
     - notes: New notes for the transaction
-    - instrument_type: Type of instrument (stock, etf, bond, crypto, cash, mutual_fund, option, future)
+    - instrument_type: Type of instrument (stock, etf, bond, structured_product, crypto, cash, mutual_fund, option, future)
 
     Use get_transactions or get_transaction_history to find transaction IDs first.
     """

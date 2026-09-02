@@ -36,6 +36,7 @@ const FINAI = (() => {
   const ASSET_COLORS = {
     Equities: '#8FA9C4', Bonds: '#84A99A', ETFs: '#C2A97E', 'Mutual Funds': '#B08C97',
     Cash: '#5E666F', Crypto: '#9A8FB5', Options: '#7FA8A0', Futures: '#A9926F',
+    'Structured Products': '#C08552',
   };
 
   const fmtMoney = (v, ccy = 'USD') => {

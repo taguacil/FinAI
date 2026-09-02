@@ -61,6 +61,9 @@ class DataProviderManager:
             InstrumentType.CASH: [],  # No provider needed
             InstrumentType.OPTION: [],  # Limited support
             InstrumentType.FUTURE: [],  # Limited support
+            # Structured products (RCs/CLNs/notes) aren't on public feeds —
+            # prices are entered/interpolated manually.
+            InstrumentType.STRUCTURED_PRODUCT: [],
         }
 
     def _normalize_symbol(self, symbol: str) -> str:
