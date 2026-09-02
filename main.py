@@ -157,34 +157,18 @@ def main():
             else:
                 print("❌ Failed to create sample portfolio")
 
-        # Start the UI via Streamlit's own runtime. A Streamlit app must be
-        # launched with `streamlit run`; calling its main() directly leaves it
-        # without a ScriptRunContext (session state won't work).
+        # Start the FastAPI web frontend (src/web/app.py) via uvicorn.
         try:
-            import subprocess
-
-            streamlit_app = Path(__file__).parent / "src" / "ui" / "streamlit_app.py"
+            import uvicorn
 
             print("🌐 Starting web interface...")
-            print("   Open your browser to: http://localhost:8501")
-            print("   Note: Use the 'Update Prices' button to fetch new data")
-            subprocess.run(
-                [
-                    sys.executable,
-                    "-m",
-                    "streamlit",
-                    "run",
-                    str(streamlit_app),
-                ],
-                check=True,
-            )
-        except FileNotFoundError as e:
-            print(f"❌ Failed to start UI: {e}")
-            print("   Make sure all dependencies are installed: uv sync")
+            print("   Open your browser to: http://localhost:8000")
+            uvicorn.run("src.web.app:app", host="127.0.0.1", port=8000)
         except KeyboardInterrupt:
             print("\n👋 UI stopped.")
         except Exception as e:
             print(f"❌ Error starting UI: {e}")
+            print("   Make sure all dependencies are installed: uv sync")
 
     elif args.mode == "update-snapshots":
         print("📊 Updating portfolio snapshots...")
