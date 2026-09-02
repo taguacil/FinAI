@@ -11,7 +11,12 @@
 <div x-data="analytics()" x-init="init()">
   <!-- Period + currency controls -->
   {% set ccy = data.display_currency %}
-  <div class="flex items-start justify-between mb-5 flex-wrap gap-3">
+  {% set view_mode = data.view_mode or 'all' %}
+  {# preserve the active period when switching class/currency #}
+  {% if preset == 'ytd' %}{% set period_q = 'start=' ~ year_start ~ '&end=' ~ today %}
+  {% elif preset == 'custom' %}{% set period_q = 'start=' ~ range_start ~ '&end=' ~ range_end %}
+  {% else %}{% set period_q = 'days=' ~ days %}{% endif %}
+  <div class="flex items-start justify-between mb-4 flex-wrap gap-3">
     <p class="page-sub">Performance, risk and benchmark analytics
       {% if data.period and data.period.start %}· {{ data.period.start }} → {{ data.period.end }}{% endif %}
       {% if ccy and ccy != data.base_currency %}· in {{ ccy }}{% endif %}
@@ -26,13 +31,14 @@
           ('0', 'All', 'days=0')
         ] %}
         {% for key, lbl, q in presets %}
-        <a href="/analytics?portfolio={{ active_portfolio_id or '' }}&{{ q }}&currency={{ ccy }}"
+        <a href="/analytics?portfolio={{ active_portfolio_id or '' }}&{{ q }}&currency={{ ccy }}&view={{ view_mode }}"
            class="seg-item {{ 'seg-item-active' if preset == key else '' }}">{{ lbl }}</a>
         {% endfor %}
       </div>
       <!-- Calendar range + currency -->
       <form method="get" action="/analytics" class="flex items-center gap-2">
         <input type="hidden" name="portfolio" value="{{ active_portfolio_id or '' }}" />
+        <input type="hidden" name="view" value="{{ view_mode }}" />
         <input type="date" name="start" value="{{ range_start }}" max="{{ today }}" class="input input-sm mono" />
         <span class="text-muted text-xs">→</span>
         <input type="date" name="end" value="{{ range_end }}" max="{{ today }}" class="input input-sm mono" />
@@ -43,6 +49,17 @@
         </select>
         <button type="submit" class="btn btn-sm {{ 'btn-accent' if preset == 'custom' else '' }}">Apply</button>
       </form>
+    </div>
+  </div>
+
+  <!-- Asset-class view: analyse one class separately (with attributed cash) -->
+  <div class="flex items-center gap-2 mb-5 flex-wrap">
+    <span class="text-xs text-muted mr-1">Asset class</span>
+    <div class="seg">
+      {% for v in data.views %}
+      <a href="/analytics?portfolio={{ active_portfolio_id or '' }}&{{ period_q }}&currency={{ ccy }}&view={{ v.key }}"
+         class="seg-item {{ 'seg-item-active' if view_mode == v.key else '' }}">{{ v.label }}</a>
+      {% endfor %}
     </div>
   </div>
 

@@ -113,11 +113,16 @@ class PortfolioAnalyzer:
         }
 
     def get_external_cash_flows_by_day(
-        self, portfolio: Portfolio, start_date: date, end_date: date
+        self, portfolio: Portfolio, start_date: date, end_date: date,
+        target_currency: Optional[Currency] = None,
     ) -> Dict[date, Decimal]:
-        """Calculate daily cash flows in base currency."""
+        """Calculate daily external cash flows, in ``target_currency`` (default base).
+
+        Passing the display currency keeps time-weighted returns consistent when
+        the value history is denominated in a non-base currency.
+        """
         flows: Dict[date, Decimal] = {}
-        base = portfolio.base_currency
+        base = target_currency or portfolio.base_currency
 
         for txn in portfolio.transactions:
             txn_date = txn.timestamp.date()

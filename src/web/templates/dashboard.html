@@ -9,12 +9,24 @@
   </div>
 {% else %}
 <div x-data="dashboard()" x-init="init()">
+  {% set view_mode = data.view_mode or 'all' %}
+  <!-- Asset-class filter: analyse one class on its own -->
+  <div class="flex items-center gap-2 mb-4 flex-wrap">
+    <span class="text-xs text-muted mr-1">Asset class</span>
+    <div class="seg">
+      {% for v in data.views %}
+      <a href="/?portfolio={{ active_portfolio_id or '' }}&view={{ v.key }}"
+         class="seg-item {{ 'seg-item-active' if view_mode == v.key else '' }}">{{ v.label }}</a>
+      {% endfor %}
+    </div>
+  </div>
+
   <!-- KPI row -->
   <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-5">
     <div class="card kpi">
-      <div class="kpi-label">Net Worth</div>
+      <div class="kpi-label" x-text="d.kpis.cash === null ? 'Class Value' : 'Net Worth'"></div>
       <div class="kpi-value mono" x-text="money(d.kpis.net_worth)"></div>
-      <div class="kpi-sub text-muted" x-text="'Cash ' + money(d.kpis.cash)"></div>
+      <div class="kpi-sub text-muted" x-text="d.kpis.cash === null ? assetLabel2(d.view_mode) : ('Cash ' + money(d.kpis.cash))"></div>
     </div>
     <div class="card kpi">
       <div class="kpi-label">Invested</div>
@@ -137,6 +149,7 @@
       pct(v) { return FINAI.fmtPct(v); },
       cls(v) { return FINAI.signClass(v); },
       assetLabel(k) { return FINAI.assetClassLabel(k); },
+      assetLabel2(vm) { const v = (this.d.views || []).find(x => x.key === vm); return v ? v.label : ''; },
       chartMode: 'total',
       setMode(m) { this.chartMode = m; this.renderValueChart(); },
       renderValueChart() {

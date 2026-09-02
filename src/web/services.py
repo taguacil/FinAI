@@ -46,6 +46,35 @@ _ASSET_CLASS_LABELS = {
     "structured_product": "Structured Products",
 }
 
+# Asset-class view modes shared by the Dashboard and Analytics selectors.
+ASSET_CLASS_VIEWS = [
+    ("all", "All"),
+    ("equities_only", "Equities"),
+    ("fixed_income_only", "Fixed Income"),
+    ("structured_only", "Structured"),
+    ("other_only", "Other"),
+]
+
+# view_mode -> instrument category. "all" has no single category.
+_CATEGORY_BY_VIEW_MODE = {
+    "equities_only": "equity",
+    "fixed_income_only": "fixed_income",
+    "structured_only": "structured",
+    "other_only": "other",
+}
+
+# instrument_type -> category (mirrors PortfolioHistory._get_instrument_category).
+_INSTRUMENT_CATEGORY = {
+    "stock": "equity", "etf": "equity",
+    "bond": "fixed_income",
+    "structured_product": "structured",
+}
+
+
+def _instrument_category(instrument_type: Optional[str]) -> str:
+    """Map an instrument type to its asset-class category."""
+    return _INSTRUMENT_CATEGORY.get(instrument_type or "", "other")
+
 
 def _f(value: Any) -> Optional[float]:
     """Coerce Decimal/int/float to float; None stays None."""
@@ -171,27 +200,32 @@ class AppContext:
         earliest = min(t["timestamp"].date() for t in txns)
         return min(earliest, floor) if earliest < floor else earliest
 
-    def _ytd_return_pct(self, target_ccy: Optional["Currency"]) -> Optional[float]:
+    def _ytd_return_pct(self, target_ccy: Optional["Currency"],
+                        view_mode: str = "all") -> Optional[float]:
         """Year-to-date time-weighted return (%) in the given display currency.
 
         Mirrors the base-currency TWR that PortfolioManager.get_ytd_performance
         computes, but honours ``target_currency`` so the figure changes when the
-        user switches display currency. Returns None if history is insufficient.
+        user switches display currency, and ``view_mode`` so a single-class view
+        reports that class's YTD. Returns None if history is insufficient.
         """
         pm = self.manager
         try:
             today = date.today()
             ystart = date(today.year, 1, 1)
             ydf = pm.get_portfolio_history_filtered(
-                ystart, today, view_mode="all", target_currency=target_ccy
+                ystart, today, view_mode=view_mode, target_currency=target_ccy
             )
             if (not isinstance(ydf, pd.DataFrame) or ydf.empty
                     or "total_value" not in ydf or len(ydf) < 2):
                 return None
-            yflows = {
-                d: float(v)
-                for d, v in pm.get_external_cash_flows_by_day(ystart, today).items()
-            }
+            if view_mode == "all":
+                raw = pm.get_external_cash_flows_by_day(
+                    ystart, today, target_currency=target_ccy)
+            else:
+                raw = pm.get_category_cash_flows_by_day(
+                    ystart, today, view_mode=view_mode, target_currency=target_ccy)
+            yflows = {d: float(v) for d, v in raw.items()}
             yreturns = self.metrics.calculate_returns_from_df(
                 ydf, "total_value", yflows
             ) or []
@@ -204,12 +238,23 @@ class AppContext:
         except Exception:
             return None
 
-    def dashboard(self) -> Dict[str, Any]:
-        """Everything the dashboard page needs."""
+    def dashboard(self, view_mode: str = "all") -> Dict[str, Any]:
+        """Everything the dashboard page needs.
+
+        ``view_mode`` optionally restricts the KPIs, equity curve, holdings table,
+        by-holding allocation and transactions to a single asset class so it can
+        be analysed on its own. The by-class allocation and per-class value bands
+        always reflect the whole portfolio, to keep the overview available.
+        """
         pm = self.manager
         portfolio = pm.current_portfolio
         if not portfolio:
             return {"empty": True}
+
+        if view_mode not in {k for k, _ in ASSET_CLASS_VIEWS}:
+            view_mode = "all"
+        category = _CATEGORY_BY_VIEW_MODE.get(view_mode)
+        views = [{"key": k, "label": lbl} for k, lbl in ASSET_CLASS_VIEWS]
 
         base_ccy = portfolio.base_currency.value
         positions = pm.get_position_summary()
@@ -316,13 +361,67 @@ class AppContext:
             reverse=True,
         )
 
-        # allocation by holding (base currency), + residual cash
-        alloc = [{"label": r["symbol"], "value": r["value"] or 0} for r in pos_rows if (r["value"] or 0) > 0]
-        if cash and cash > 0:
+        # --- asset-class filter -------------------------------------------
+        # When a single class is selected, the KPIs, equity curve, holdings
+        # table, by-holding allocation and transactions narrow to that class;
+        # cash is only shown in the "all" view (it isn't attributed to a class).
+        if category is not None:
+            view_rows = [r for r in pos_rows
+                         if _instrument_category(r["asset_class"]) == category]
+            invested_v = sum((r["value"] or 0) for r in view_rows)
+            unrealized_v = sum((r["pnl"] or 0) for r in view_rows)
+            cost_v = invested_v - unrealized_v
+            kpis = {
+                "net_worth": invested_v,
+                "invested": invested_v,
+                "cash": None,
+                "unrealized_pnl": unrealized_v,
+                "total_return_pct": (unrealized_v / cost_v * 100) if cost_v else 0.0,
+                "ytd_pct": self._ytd_return_pct(None, view_mode=view_mode),
+            }
+            # equity curve = this class's market value over time
+            cdf = pm.get_portfolio_history_filtered(start, date.today(), view_mode=view_mode)
+            curve_out = {"dates": [], "values": []}
+            if isinstance(cdf, pd.DataFrame) and not cdf.empty and "total_value" in cdf:
+                curve_out["dates"] = [d.strftime("%Y-%m-%d") for d in cdf.index]
+                curve_out["values"] = [float(v) for v in cdf["total_value"].tolist()]
+            # Category per symbol for filtering transactions. Transaction records
+            # can carry an inconsistent instrument_type for the same symbol (e.g.
+            # a dividend booked as "stock" on a bond), so the live position's type
+            # is authoritative; fall back to transactions only for sold-out names.
+            cat_by_symbol = {
+                t.instrument.symbol: _instrument_category(
+                    t.instrument.instrument_type.value
+                    if hasattr(t.instrument.instrument_type, "value")
+                    else str(t.instrument.instrument_type))
+                for t in portfolio.transactions
+            }
+            cat_by_symbol.update(
+                {sym: _instrument_category(itype) for sym, itype in type_by_symbol.items()}
+            )
+            tx_filter = lambda sym: cat_by_symbol.get(sym) == category
+        else:
+            view_rows = pos_rows
+            kpis = {
+                "net_worth": _f(net_worth),
+                "invested": _f(invested),
+                "cash": _f(cash),
+                "unrealized_pnl": _f(unrealized),
+                "total_return_pct": total_return_pct,
+                "ytd_pct": ytd_pct,
+            }
+            curve_out = curve
+            tx_filter = None
+
+        # allocation by holding (base currency), + residual cash (all view only)
+        alloc = [{"label": r["symbol"], "value": r["value"] or 0}
+                 for r in view_rows if (r["value"] or 0) > 0]
+        if category is None and cash and cash > 0:
             alloc.append({"label": "Cash", "value": float(cash)})
 
         # recent transactions (longer list; the panel scrolls)
-        txns = pm.get_transaction_history()[:40]
+        txns = [t for t in pm.get_transaction_history()
+                if tx_filter is None or tx_filter(t["symbol"])][:40]
         tx_rows = [
             {
                 "date": t["timestamp"].strftime("%Y-%m-%d"),
@@ -339,17 +438,12 @@ class AppContext:
         return {
             "empty": False,
             "base_currency": base_ccy,
-            "kpis": {
-                "net_worth": _f(net_worth),
-                "invested": _f(invested),
-                "cash": _f(cash),
-                "unrealized_pnl": _f(unrealized),
-                "total_return_pct": total_return_pct,
-                "ytd_pct": ytd_pct,
-            },
-            "curve": curve,
+            "view_mode": view_mode,
+            "views": views,
+            "kpis": kpis,
+            "curve": curve_out,
             "class_history": class_history,
-            "positions": pos_rows,
+            "positions": view_rows,
             "allocation": alloc,
             "allocation_by_class": alloc_by_class,
             "transactions": tx_rows,
@@ -357,15 +451,24 @@ class AppContext:
 
     # -- analytics -----------------------------------------------------------
 
+    # Asset-class views for the analytics selector; each maps to a
+    # get_portfolio_history_filtered view_mode. "All assets" reads nicer here
+    # than the shared "All" label.
+    ANALYTICS_VIEWS = [(k, "All assets" if k == "all" else lbl)
+                       for k, lbl in ASSET_CLASS_VIEWS]
+
     def analytics(self, days: int = 365, benchmark: str = "SPY",
                   start_date: Optional[date] = None, end_date: Optional[date] = None,
-                  currency: Optional[str] = None) -> Dict[str, Any]:
+                  currency: Optional[str] = None,
+                  view_mode: str = "all") -> Dict[str, Any]:
         """Performance, risk and (when data allows) benchmark analytics.
 
         An explicit start_date/end_date pair (from the calendar) takes
         precedence over the `days` preset. `currency` denominates the whole
         analysis in a chosen currency (defaults to the portfolio base
-        currency); conversion uses cached historical FX rates.
+        currency); conversion uses cached historical FX rates. `view_mode`
+        restricts the analysis to one asset class (with attributed cash) so a
+        class can be analysed separately.
         """
         pm = self.manager
         portfolio = pm.current_portfolio
@@ -389,10 +492,14 @@ class AppContext:
             start = self._history_start()
 
         all_currencies = [c.value for c in Currency]
+        valid_view_modes = {m for m, _ in self.ANALYTICS_VIEWS}
+        if view_mode not in valid_view_modes:
+            view_mode = "all"
+        views = [{"key": k, "label": lbl} for k, lbl in self.ANALYTICS_VIEWS]
 
         try:
             df = pm.get_portfolio_history_filtered(
-                start, end, view_mode="all", target_currency=target_ccy
+                start, end, view_mode=view_mode, target_currency=target_ccy
             )
         except Exception:
             df = pd.DataFrame()
@@ -400,13 +507,22 @@ class AppContext:
         if not isinstance(df, pd.DataFrame) or df.empty or "total_value" not in df:
             return {"empty": False, "base_currency": base_ccy,
                     "display_currency": display_ccy.value, "currencies": all_currencies,
-                    "no_history": True,
+                    "no_history": True, "view_mode": view_mode, "views": views,
                     "period": {"days": days, "start": start.isoformat(),
                                "end": end.isoformat()}}
 
-        # cash flows for time-weighted returns
+        # Cash flows for time-weighted returns. The "all" view uses external
+        # deposits/withdrawals; a single-class view uses that class's buys/sells
+        # (in the display currency) so the return reflects price/coupon
+        # performance rather than capital deployed into the class.
+        flows: Dict[date, float] = {}
         try:
-            flows = {d: float(v) for d, v in pm.get_external_cash_flows_by_day(start, end).items()}
+            if view_mode == "all":
+                raw = pm.get_external_cash_flows_by_day(start, end, target_currency=target_ccy)
+            else:
+                raw = pm.get_category_cash_flows_by_day(
+                    start, end, view_mode=view_mode, target_currency=target_ccy)
+            flows = {d: float(v) for d, v in raw.items()}
         except Exception:
             flows = {}
 
@@ -465,7 +581,7 @@ class AppContext:
         # YTD in the *display* currency. pm.get_ytd_performance() only computes
         # it in the base currency, so it would report an identical number in
         # every currency view; recompute the TWR from a currency-aware history.
-        ytd_pct = self._ytd_return_pct(target_ccy)
+        ytd_pct = self._ytd_return_pct(target_ccy, view_mode=view_mode)
 
         metrics = {
             "total_return": _pct(m.get("total_return")),
@@ -498,6 +614,8 @@ class AppContext:
             "base_currency": base_ccy,
             "display_currency": display_ccy.value,
             "currencies": all_currencies,
+            "view_mode": view_mode,
+            "views": views,
             "benchmark_symbol": benchmark,
             "offline": self.offline,
             "period": {"days": days, "start": start.isoformat(), "end": end.isoformat()},

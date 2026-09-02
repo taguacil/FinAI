@@ -70,31 +70,32 @@ def health():
 
 
 @app.get("/", response_class=HTMLResponse)
-def dashboard(request: Request, portfolio: Optional[str] = None):
+def dashboard(request: Request, portfolio: Optional[str] = None, view: str = "all"):
     ctx, base = _base_context(request, "dashboard", portfolio)
-    base["data"] = ctx.dashboard()
+    base["data"] = ctx.dashboard(view_mode=view or "all")
     return templates.TemplateResponse("dashboard.html", base)
 
 
 @app.get("/api/dashboard")
-def api_dashboard(portfolio: Optional[str] = None):
+def api_dashboard(portfolio: Optional[str] = None, view: str = "all"):
     ctx = get_context()
     ctx.ensure_loaded(portfolio)
-    return JSONResponse(ctx.dashboard())
+    return JSONResponse(ctx.dashboard(view_mode=view or "all"))
 
 
 @app.get("/analytics", response_class=HTMLResponse)
 def analytics(request: Request, portfolio: Optional[str] = None,
               days: int = 365, benchmark: str = "SPY",
               start: Optional[str] = None, end: Optional[str] = None,
-              currency: Optional[str] = None):
+              currency: Optional[str] = None, view: str = "all"):
     ctx, base = _base_context(request, "analytics", portfolio)
     today = date.today()
     year_start = date(today.year, 1, 1)
     start_d = _parse_date(start, today) if start else None
     end_d = _parse_date(end, today) if end else None
     base["data"] = ctx.analytics(days=days, benchmark=benchmark or "SPY",
-                                 start_date=start_d, end_date=end_d, currency=currency)
+                                 start_date=start_d, end_date=end_d, currency=currency,
+                                 view_mode=view or "all")
     # Which control is active (drives selector highlight).
     if start_d or end_d:
         is_ytd = start_d == year_start and (end_d is None or end_d == today)

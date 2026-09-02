@@ -871,20 +871,23 @@ class PortfolioManager:
 
         Supports different view modes:
         - "all": All assets (default behavior, includes all cash)
-        - "equities_only": Stocks + ETFs only, with attributed cash from equity transactions
-        - "fixed_income_only": Bonds only, with attributed cash from bond transactions
+        - "equities_only": Stocks + ETFs, with attributed cash from equity transactions
+        - "fixed_income_only": Bonds, with attributed cash from bond transactions
+        - "structured_only": Structured products (RCs/CLNs/notes), attributed cash
+        - "other_only": Everything else (crypto, options, futures, …), attributed cash
 
-        For filtered views, attributed cash tracks realized gains/losses from sales
-        and dividends within that category, excluding unrelated transactions.
+        For filtered views the series is the market value of just that class's
+        positions; pair it with get_category_cash_flows_by_day so time-weighted
+        returns reflect price/coupon performance rather than capital deployed.
 
         Args:
             start_date: Start date
             end_date: End date
-            view_mode: View mode ("all", "equities_only", "fixed_income_only")
+            view_mode: View mode (see list above)
             target_currency: Currency to express values in. Defaults to portfolio base currency.
 
         Returns:
-            DataFrame with columns: total_value, positions_value, cash_value/attributed_cash
+            DataFrame with columns: total_value, positions_value (+ cash_value for "all")
         """
         if not self.current_portfolio:
             return pd.DataFrame()
@@ -892,6 +895,14 @@ class PortfolioManager:
         history = self._get_portfolio_history()
         if not history:
             return pd.DataFrame()
+
+        # Map view mode -> attribution category (None = all assets, all cash).
+        category_by_mode = {
+            "equities_only": "equity",
+            "fixed_income_only": "fixed_income",
+            "structured_only": "structured",
+            "other_only": "other",
+        }
 
         if view_mode == "all":
             # Standard behavior - all assets with all cash
@@ -901,18 +912,13 @@ class PortfolioManager:
                 include_cash=True,
                 target_currency=target_currency,
             )
-        elif view_mode == "equities_only":
-            # Equities with attributed cash (realized gains from equity transactions)
-            return history.get_value_history_with_attribution(
+        elif view_mode in category_by_mode:
+            # Single asset class: market value of just that class's positions.
+            # Returns are made currency- and flow-aware by the caller via
+            # get_category_cash_flows_by_day (buys/sells are external flows).
+            return history.get_category_value_history(
                 start_date, end_date,
-                category="equity",
-                target_currency=target_currency,
-            )
-        elif view_mode == "fixed_income_only":
-            # Fixed income with attributed cash
-            return history.get_value_history_with_attribution(
-                start_date, end_date,
-                category="fixed_income",
+                category=category_by_mode[view_mode],
                 target_currency=target_currency,
             )
         else:
@@ -924,6 +930,38 @@ class PortfolioManager:
                 include_cash=True,
                 target_currency=target_currency,
             )
+
+    # Maps analytics view modes to instrument categories (mirrors the mapping in
+    # get_portfolio_history_filtered). "all" has no single category.
+    _CATEGORY_BY_VIEW_MODE = {
+        "equities_only": "equity",
+        "fixed_income_only": "fixed_income",
+        "structured_only": "structured",
+        "other_only": "other",
+    }
+
+    def get_category_cash_flows_by_day(
+        self,
+        start_date: date,
+        end_date: date,
+        view_mode: str,
+        target_currency: Optional[Currency] = None,
+    ) -> Dict[date, Decimal]:
+        """Net buy/sell capital flows for a class view, per day, in target currency.
+
+        Used to make time-weighted returns for a single-class analytics view
+        reflect performance rather than capital deployment. Returns an empty dict
+        for the "all" view mode (which uses external deposit/withdrawal flows).
+        """
+        category = self._CATEGORY_BY_VIEW_MODE.get(view_mode)
+        if not category or not self.current_portfolio:
+            return {}
+        history = self._get_portfolio_history()
+        if not history:
+            return {}
+        return history.get_category_cash_flows_by_day(
+            start_date, end_date, category=category, target_currency=target_currency
+        )
 
     def _fetch_and_store_prices(
         self,
@@ -1697,13 +1735,17 @@ class PortfolioManager:
         return self.analyzer.get_performance_metrics(self.current_portfolio, days, portfolio_history=history)
 
     def get_external_cash_flows_by_day(
-        self, start_date: date, end_date: date
+        self, start_date: date, end_date: date,
+        target_currency: Optional[Currency] = None,
     ) -> Dict[date, Decimal]:
-        """Compute net external cash flows (deposits/withdrawals) per day in base currency."""
+        """Compute net external cash flows (deposits/withdrawals) per day.
+
+        Denominated in ``target_currency`` (defaults to the portfolio base).
+        """
         if not self.current_portfolio:
             return {}
         return self.analyzer.get_external_cash_flows_by_day(
-            self.current_portfolio, start_date, end_date
+            self.current_portfolio, start_date, end_date, target_currency=target_currency
         )
 
     def get_cash_fx_summary(self) -> Dict[Currency, Dict[str, Decimal]]:
