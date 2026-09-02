@@ -1,0 +1,236 @@
+{% extends "base.html" %}
+{% block title %}Data & Settings · FinAI{% endblock %}
+{% block heading %}Data &amp; Settings{% endblock %}
+
+{% block content %}
+{% if data.empty %}
+  <div class="card text-center py-16"><p class="text-muted">No portfolio loaded.</p></div>
+{% else %}
+<div x-data="dataPage()">
+  <!-- Flash -->
+  {% if flash.msg %}
+  <div class="card card-tight mb-4 flex items-center gap-2"><i data-lucide="check-circle" class="h-4 w-4 pos"></i><span class="text-sm">{{ flash.msg }}</span></div>
+  {% endif %}
+  {% if flash.err %}
+  <div class="card card-tight mb-4 flex items-center gap-2"><i data-lucide="alert-triangle" class="h-4 w-4 neg"></i><span class="text-sm neg">{{ flash.err }}</span></div>
+  {% endif %}
+
+  <div class="flex items-center justify-between mb-5 flex-wrap gap-3">
+    <p class="page-sub">Market data, pricing and portfolio settings.</p>
+    {% if data.stats.data_as_of %}
+    <span class="chip {{ 'chip-sell' if data.stats.is_stale else 'chip-buy' }}">Data as of {{ data.stats.data_as_of }}</span>
+    {% else %}
+    <span class="chip chip-sell">No stored prices</span>
+    {% endif %}
+  </div>
+
+  <!-- Overview stats -->
+  <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-5">
+    <div class="card card-tight metric"><span class="metric-label">Net worth</span>
+      <span class="metric-value mono">{{ '{:,.0f}'.format(data.stats.net_worth) }} {{ data.base_currency }}</span></div>
+    <div class="card card-tight metric"><span class="metric-label">Positions</span>
+      <span class="metric-value mono">{{ data.stats.positions }}</span></div>
+    <div class="card card-tight metric"><span class="metric-label">Prices stored</span>
+      <span class="metric-value mono">{{ data.stats.price_count }}</span></div>
+    <div class="card card-tight metric"><span class="metric-label">Data as of</span>
+      <span class="metric-value mono {{ 'neg' if data.stats.is_stale else '' }}">{{ data.stats.data_as_of or '—' }}</span></div>
+  </div>
+
+  <!-- Refresh actions -->
+  <div class="card mb-5">
+    <div class="flex items-center justify-between flex-wrap gap-3">
+      <div>
+        <div class="section-title mb-1">Fetch market data</div>
+        <p class="hint text-xs">Pulls the latest prices from your data providers into local storage.</p>
+      </div>
+      <div class="flex items-center gap-2">
+        <form method="post" action="/data/refresh">
+          <input type="hidden" name="portfolio" value="{{ active_portfolio_id or '' }}" />
+          <input type="hidden" name="historical" value="0" />
+          <button type="submit" class="btn"><i data-lucide="refresh-cw" class="h-4 w-4"></i> Current prices</button>
+        </form>
+        <form method="post" action="/data/refresh">
+          <input type="hidden" name="portfolio" value="{{ active_portfolio_id or '' }}" />
+          <input type="hidden" name="historical" value="1" />
+          <button type="submit" class="btn"><i data-lucide="history" class="h-4 w-4"></i> Historical</button>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- Prices table + manual set -->
+  <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-5">
+    <div class="card lg:col-span-2 overflow-hidden">
+      <div class="section-title mb-3">Instrument prices</div>
+      <div class="overflow-x-auto" style="max-height: 520px;">
+        <table class="tbl">
+          <thead class="sticky-head"><tr>
+            <th>Symbol</th><th>Name</th><th class="num">Price (native)</th><th class="num">Price ({{ data.base_currency }})</th><th class="num">Last price</th>
+          </tr></thead>
+          <tbody>
+            {% for p in data.prices %}
+            <tr class="cursor-pointer hover:bg-white/[0.02]" @click="pick('{{ p.symbol }}', '{{ p.currency }}')">
+              <td class="font-semibold">{{ p.symbol }}</td>
+              <td class="text-muted truncate max-w-[220px]">{{ p.name or '—' }}</td>
+              <td class="num">
+                {% if p.has_price %}{{ '{:,.4f}'.format(p.price_local) }} <span class="text-muted text-xs">{{ p.currency }}</span>
+                {% else %}<span class="neg text-xs">no price</span>{% endif %}
+              </td>
+              <td class="num">{% if p.has_price and p.is_fx %}{{ '{:,.2f}'.format(p.price_base) }}{% elif p.has_price %}—{% else %}—{% endif %}</td>
+              <td class="num text-muted text-xs">{{ p.last_price_date or '—' }}</td>
+            </tr>
+            {% endfor %}
+            {% if not data.prices %}
+            <tr><td colspan="5" class="text-muted text-center py-6">No instruments tracked.</td></tr>
+            {% endif %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="section-title mb-3">Set price manually</div>
+      <form method="post" action="/data/set-price" class="space-y-3">
+        <input type="hidden" name="portfolio" value="{{ active_portfolio_id or '' }}" />
+        <div>
+          <label class="label">Symbol</label>
+          <input type="text" name="symbol" x-model="sym" required class="input mono" placeholder="AAPL" list="symbol-list" />
+          <datalist id="symbol-list">
+            {% for p in data.prices %}<option value="{{ p.symbol }}"></option>{% endfor %}
+          </datalist>
+        </div>
+        <div>
+          <label class="label">Price</label>
+          <input type="number" name="price" step="any" min="0" required class="input mono" placeholder="0.00" />
+        </div>
+        <div>
+          <label class="label">Currency</label>
+          <select name="currency" x-model="ccy" class="select">
+            <option value="">Keep existing</option>
+            {% for c in data.currencies %}<option value="{{ c }}">{{ c }}</option>{% endfor %}
+          </select>
+        </div>
+        <button type="submit" class="btn btn-accent w-full"><i data-lucide="save" class="h-4 w-4"></i> Save price</button>
+        <p class="hint text-xs">Click a row on the left to prefill the symbol.</p>
+      </form>
+    </div>
+  </div>
+
+  <!-- Transactions -->
+  <div class="card mb-5">
+    <div class="flex items-center justify-between mb-3">
+      <div class="section-title">Transactions <span class="text-muted font-normal">({{ data.transactions | length }})</span></div>
+      <button type="button" class="btn btn-sm" @click="showAdd = !showAdd">
+        <i data-lucide="plus" class="h-4 w-4"></i> Add transaction
+      </button>
+    </div>
+
+    <!-- Add form -->
+    <form method="post" action="/data/txn/add" class="mb-4" x-show="showAdd" x-cloak x-transition>
+      <input type="hidden" name="portfolio" value="{{ active_portfolio_id or '' }}" />
+      <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-2 items-end">
+        <div><label class="label">Symbol</label><input type="text" name="symbol" required class="input mono" placeholder="AAPL" /></div>
+        <div><label class="label">Type</label>
+          <select name="txn_type" class="select">
+            {% for t in data.transaction_types %}<option value="{{ t }}" {{ 'selected' if t == 'buy' else '' }}>{{ t }}</option>{% endfor %}
+          </select>
+        </div>
+        <div><label class="label">Quantity</label><input type="number" name="quantity" step="any" required class="input mono" value="0" /></div>
+        <div><label class="label">Price</label><input type="number" name="price" step="any" required class="input mono" value="0" /></div>
+        <div><label class="label">Date</label><input type="date" name="date" value="{{ data.stats.data_as_of or '' }}" class="input mono" /></div>
+        <div><label class="label">Currency</label>
+          <select name="currency" class="select">
+            <option value="">Default</option>
+            {% for c in data.currencies %}<option value="{{ c }}">{{ c }}</option>{% endfor %}
+          </select>
+        </div>
+        <div><button type="submit" class="btn btn-accent w-full"><i data-lucide="check" class="h-4 w-4"></i> Add</button></div>
+      </div>
+      <input type="text" name="notes" class="input mt-2" placeholder="Notes (optional)" />
+    </form>
+
+    <div class="overflow-x-auto" style="max-height: 460px;">
+      <table class="tbl">
+        <thead class="sticky-head"><tr>
+          <th>Date</th><th>Symbol</th><th>Type</th><th class="num">Qty</th>
+          <th class="num">Price</th><th class="num">Total</th><th>Notes</th><th class="num">Actions</th>
+        </tr></thead>
+        <tbody>
+          {% for t in data.transactions %}
+          <tr>
+            <td class="mono text-xs">{{ t.date }}</td>
+            <td class="font-semibold">{{ t.symbol }}</td>
+            <td><span class="chip {{ 'chip-buy' if t.type in ['buy','deposit','dividend','interest'] else ('chip-sell' if t.type in ['sell','withdrawal','fees'] else '') }}">{{ t.type }}</span></td>
+            <td class="num">{{ '{:,.4f}'.format(t.quantity) }}</td>
+            <td class="num">{{ '{:,.4f}'.format(t.price) }} <span class="text-muted text-xs">{{ t.currency }}</span></td>
+            <td class="num">{{ '{:,.2f}'.format(t.total_value) }}</td>
+            <td class="text-muted truncate max-w-[180px]">{{ t.notes or '—' }}</td>
+            <td class="num whitespace-nowrap">
+              <button type="button" class="btn btn-sm" @click='editTxn({{ t | tojson }})'><i data-lucide="pencil" class="h-3.5 w-3.5"></i></button>
+              <form method="post" action="/data/txn/delete" class="inline" onsubmit="return confirm('Delete this transaction? Positions will be recalculated.');">
+                <input type="hidden" name="portfolio" value="{{ active_portfolio_id or '' }}" />
+                <input type="hidden" name="transaction_id" value="{{ t.id }}" />
+                <button type="submit" class="btn btn-sm"><i data-lucide="trash-2" class="h-3.5 w-3.5 neg"></i></button>
+              </form>
+            </td>
+          </tr>
+          {% endfor %}
+          {% if not data.transactions %}
+          <tr><td colspan="8" class="text-muted text-center py-6">No transactions yet.</td></tr>
+          {% endif %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Edit transaction modal -->
+  <div x-show="edit" x-cloak class="fixed inset-0 z-50 flex items-center justify-center p-4" style="background: rgba(0,0,0,0.6);" @click.self="edit = null">
+    <div class="card w-full max-w-md">
+      <div class="flex items-center justify-between mb-3">
+        <div class="section-title">Edit transaction</div>
+        <button type="button" class="btn btn-sm" @click="edit = null"><i data-lucide="x" class="h-4 w-4"></i></button>
+      </div>
+      <template x-if="edit">
+        <form method="post" action="/data/txn/edit" class="space-y-3">
+          <input type="hidden" name="portfolio" value="{{ active_portfolio_id or '' }}" />
+          <input type="hidden" name="transaction_id" :value="edit.id" />
+          <p class="hint text-xs"><span class="font-semibold" x-text="edit.symbol"></span> · <span x-text="edit.type"></span> · <span x-text="edit.currency"></span></p>
+          <div class="grid grid-cols-2 gap-3">
+            <div><label class="label">Quantity</label><input type="number" name="quantity" step="any" class="input mono" :value="edit.quantity" /></div>
+            <div><label class="label">Price</label><input type="number" name="price" step="any" class="input mono" :value="edit.price" /></div>
+          </div>
+          <div><label class="label">Date</label><input type="date" name="date" class="input mono" :value="edit.date" /></div>
+          <div><label class="label">Notes</label><input type="text" name="notes" class="input" :value="edit.notes" /></div>
+          <div class="flex gap-2 justify-end">
+            <button type="button" class="btn" @click="edit = null">Cancel</button>
+            <button type="submit" class="btn btn-accent"><i data-lucide="save" class="h-4 w-4"></i> Save</button>
+          </div>
+        </form>
+      </template>
+    </div>
+  </div>
+
+  <!-- Portfolio info -->
+  <div class="card">
+    <div class="section-title mb-3">Portfolio</div>
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div class="metric"><span class="metric-label">Name</span><span class="metric-value">{{ data.portfolio_name }}</span></div>
+      <div class="metric"><span class="metric-label">Base currency</span><span class="metric-value mono">{{ data.base_currency }}</span></div>
+      <div class="metric"><span class="metric-label">Symbols tracked</span><span class="metric-value mono">{{ data.stats.symbols_tracked }}</span></div>
+      <div class="metric"><span class="metric-label">Created</span><span class="metric-value mono text-sm">{{ data.created_at or '—' }}</span></div>
+    </div>
+    <p class="metric-label mt-4">ID <span class="mono">{{ data.portfolio_id }}</span></p>
+  </div>
+</div>
+
+<script>
+  function dataPage() {
+    return {
+      sym: '', ccy: '', showAdd: false, edit: null,
+      pick(symbol, currency) { this.sym = symbol; this.ccy = currency || ''; window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' }); },
+      editTxn(t) { this.edit = t; this.$nextTick(() => window.lucide && window.lucide.createIcons()); },
+    };
+  }
+</script>
+{% endif %}
+{% endblock %}

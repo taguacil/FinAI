@@ -348,7 +348,7 @@ class HealthChecker:
                 "numpy": "Numerical calculations",
                 "yfinance": "Yahoo Finance data",
                 "requests": "HTTP requests",
-                "streamlit": "Web UI",
+                "fastapi": "Web UI",
             }
 
             missing_deps = []

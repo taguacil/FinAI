@@ -70,7 +70,7 @@ An AI-powered portfolio management system built with Python, LangChain, and MCP 
    python main.py
    ```
 
-The application will start the web interface at `http://localhost:8501`
+The application will start the web interface at `http://localhost:8000`
 
 ## Usage
 
@@ -172,9 +172,11 @@ FinAI/
 │   ├── services/
 │   │   └── market_data_service.py  # Market data operations
 │   │
-│   ├── ui/
-│   │   ├── streamlit_app.py    # Main web interface
-│   │   └── market_data_page.py # Market data UI
+│   ├── web/
+│   │   ├── app.py              # FastAPI web interface
+│   │   ├── services.py         # Page data services
+│   │   ├── templates/          # Jinja2 templates
+│   │   └── static/             # JS/CSS assets
 │   │
 │   ├── utils/
 │   │   ├── metrics.py       # Financial calculations
@@ -305,7 +307,7 @@ uv sync
 **UI Not Starting**
 ```bash
 python main.py --mode status
-# Check if port 8501 is available
+# Check if port 8000 is available
 ```
 
 **Missing Prices**

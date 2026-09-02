@@ -6,6 +6,7 @@ from portfolio management concerns.
 """
 
 import logging
+import re
 from typing import Dict, Optional
 
 from ..data_providers.manager import DataProviderManager
@@ -68,7 +69,7 @@ class InstrumentResolver:
             return {
                 "symbol": instrument_info.symbol,
                 "name": instrument_info.name,
-                "instrument_type": self._get_instrument_type(instrument_type, normalized_symbol, isin),
+                "instrument_type": self._get_instrument_type(instrument_type, normalized_symbol, isin, instrument_info.name),
                 "currency": currency or instrument_info.currency,
                 "exchange": instrument_info.exchange,
                 "isin": isin.upper(),  # Use provided ISIN
@@ -93,7 +94,7 @@ class InstrumentResolver:
             return {
                 "symbol": instrument_info.symbol,
                 "name": instrument_info.name,
-                "instrument_type": self._get_instrument_type(instrument_type, instrument_info.symbol, isin),
+                "instrument_type": self._get_instrument_type(instrument_type, instrument_info.symbol, isin, instrument_info.name),
                 "currency": currency or instrument_info.currency,
                 "exchange": instrument_info.exchange,
                 "isin": isin,
@@ -126,7 +127,7 @@ class InstrumentResolver:
             return {
                 "symbol": instrument_info.symbol,
                 "name": instrument_info.name,
-                "instrument_type": self._get_instrument_type(instrument_type, normalized_symbol, None),
+                "instrument_type": self._get_instrument_type(instrument_type, normalized_symbol, None, instrument_info.name),
                 "currency": currency or instrument_info.currency,
                 "exchange": instrument_info.exchange,
                 "isin": instrument_info.isin,
@@ -318,18 +319,12 @@ class InstrumentResolver:
         instrument_type: Optional[str] = None,
     ) -> Dict:
         """Create basic instrument info when provider data is unavailable."""
-        # Use provided instrument type if available, otherwise infer from symbol
-        if instrument_type:
-            try:
-                inferred_type = InstrumentType(instrument_type.lower())
-            except ValueError:
-                # If invalid instrument type provided, fall back to inference
-                inferred_type = self._infer_instrument_type(symbol, isin)
-        else:
-            inferred_type = self._infer_instrument_type(symbol, isin)
-
-        # Try to find a better name than the symbol
+        # Try to find a better name than the symbol first — it feeds the
+        # name-based structured-product detection in _get_instrument_type.
         instrument_name = self._find_instrument_name(symbol, isin, notes)
+        inferred_type = self._get_instrument_type(
+            instrument_type, symbol, isin, instrument_name
+        )
 
         return {
             "symbol": symbol.upper(),
@@ -344,21 +339,17 @@ class InstrumentResolver:
         self, isin: str, currency: Optional[Currency], notes: Optional[str], instrument_type: Optional[str] = None
     ) -> Dict:
         """Create placeholder instrument info when ISIN lookup fails."""
-        # Use provided instrument type if available, otherwise infer from ISIN prefix
-        if instrument_type:
-            try:
-                inferred_type = InstrumentType(instrument_type.lower())
-            except ValueError:
-                # If invalid instrument type provided, fall back to inference
-                inferred_type = self._infer_instrument_type_from_isin(isin)
-        else:
-            inferred_type = self._infer_instrument_type_from_isin(isin)
-
-        # Create a descriptive name
+        # Create a descriptive name first — it feeds the name-based
+        # structured-product detection in _get_instrument_type.
         if notes and len(notes) > 10:
             instrument_name = notes
         else:
             instrument_name = f"Instrument {isin}"
+
+        # Use provided type if valid, else infer (name-aware) from ISIN prefix.
+        inferred_type = self._get_instrument_type(
+            instrument_type, None, isin, instrument_name
+        )
 
         # Create placeholder symbol
         if isin.upper().startswith("XS"):
@@ -545,11 +536,42 @@ class InstrumentResolver:
         # Default to stock for unknown ISIN patterns
         return InstrumentType.STOCK
 
+    # Names that denote a bank-issued structured product rather than a plain
+    # bond. STRONG markers are unambiguous. The bare word "note" is only a WEAK
+    # hint, since plain bonds are routinely named "... Note" (Treasury Note,
+    # Medium Term Note, Fixed Rate Note). BOND_GUARD vetoes that weak hint for
+    # names that plainly read as ordinary bonds so they are not misfiled as
+    # structured products (which would drop them from fixed-income analytics and
+    # the optimizer). "Callable" is a plain-bond feature, not a structured
+    # marker, so it lives in the guard rather than the weak set.
+    _STRUCT_STRONG = re.compile(
+        r"reverse convertible|\bRC\b|credit linked note|\bCLN\b|autocallable"
+        r"|\borion\b|shark note|tracker certificate|best performer",
+        re.I,
+    )
+    _STRUCT_BOND_GUARD = re.compile(
+        r"treasury|senior|\bbond\b|callable|medium[- ]term note|\bmtn\b"
+        r"|fixed[- ]rate note|floating[- ]rate note|\bfrn\b",
+        re.I,
+    )
+    _STRUCT_WEAK = re.compile(r"\bnotes?\b", re.I)
+
+    @classmethod
+    def _is_structured_product_name(cls, name: Optional[str]) -> bool:
+        """Heuristic: does this instrument name denote a structured product?"""
+        n = name or ""
+        if cls._STRUCT_STRONG.search(n):
+            return True
+        if cls._STRUCT_BOND_GUARD.search(n):
+            return False
+        return bool(cls._STRUCT_WEAK.search(n))
+
     def _get_instrument_type(
         self,
         user_provided_type: Optional[str],
         symbol: Optional[str],
-        isin: Optional[str]
+        isin: Optional[str],
+        name: Optional[str] = None,
     ) -> InstrumentType:
         """Get instrument type, prioritizing user-provided type over automatic inference."""
         if user_provided_type:
@@ -558,6 +580,11 @@ class InstrumentResolver:
             except ValueError:
                 # If invalid instrument type provided, fall back to inference
                 pass
+
+        # Name-based structured-product detection runs before the symbol/ISIN
+        # heuristics, which would otherwise tag RCs/CLNs (often XS ISINs) as bonds.
+        if self._is_structured_product_name(name):
+            return InstrumentType.STRUCTURED_PRODUCT
 
         # Fall back to automatic inference
         if symbol:

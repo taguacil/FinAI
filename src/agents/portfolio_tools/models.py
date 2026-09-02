@@ -306,6 +306,10 @@ class OptimizePortfolioInput(BaseModel):
         default=None,
         description="Comma-separated symbols to keep at current weights (e.g., 'AAPL,GOOG')",
     )
+    candidate_symbols: Optional[str] = Field(
+        default=None,
+        description="Comma-separated symbols NOT currently held to consider adding (e.g., 'GLD,QQQ'). Only symbols with local price history are used; the optimizer may allocate to them, producing BUY suggestions.",
+    )
     method: str = Field(
         default="hrp",
         description="Optimization method: 'hrp' (recommended) or 'markowitz'",

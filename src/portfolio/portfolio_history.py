@@ -10,50 +10,13 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from functools import lru_cache
-from collections import defaultdict
 from typing import Callable, Dict, List, Optional, Tuple
 
 import pandas as pd
 
+from . import asset_classes
 from .market_data_store import MarketDataStore
 from .models import Currency, Portfolio, Position, Transaction, TransactionType
-
-
-@dataclass
-class AttributedCashState:
-    """Cash balances attributed by instrument category.
-
-    Tracks cash separately for different instrument categories to enable
-    category-specific analytics (e.g., equities-only view with realized gains).
-
-    Attributed cash starts at zero for each category, isolating pure trading performance:
-    - Deposits/withdrawals are external flows (not attributed to any category)
-    - Buying equities creates negative equity cash (capital invested)
-    - Selling equities creates positive equity cash (realized gains/losses)
-    - Dividends from equities increase equity cash
-    """
-
-    equity: Dict[Currency, Decimal] = field(default_factory=lambda: defaultdict(Decimal))
-    fixed_income: Dict[Currency, Decimal] = field(default_factory=lambda: defaultdict(Decimal))
-    other: Dict[Currency, Decimal] = field(default_factory=lambda: defaultdict(Decimal))
-
-    def get_category_total(
-        self,
-        category: str,
-        target_currency: Currency,
-        fx_rate_func: Callable[[Currency, Currency], Optional[Decimal]],
-    ) -> Decimal:
-        """Get total cash for a category in target currency."""
-        balances = getattr(self, category, {})
-        total = Decimal("0")
-        for currency, amount in balances.items():
-            if currency == target_currency:
-                total += amount
-            else:
-                rate = fx_rate_func(currency, target_currency)
-                if rate:
-                    total += amount * rate
-        return total
 
 
 @dataclass
@@ -125,9 +88,11 @@ class PortfolioHistory:
     replaying all transactions for each query.
     """
 
-    # Instrument type categories for filtering
-    EQUITY_TYPES = {"stock", "etf"}
-    FIXED_INCOME_TYPES = {"bond"}
+    # Instrument type categories for filtering (canonical taxonomy lives in
+    # asset_classes; aliased here for backwards compatibility).
+    EQUITY_TYPES = asset_classes.EQUITY_TYPES
+    FIXED_INCOME_TYPES = asset_classes.FIXED_INCOME_TYPES
+    STRUCTURED_TYPES = asset_classes.STRUCTURED_TYPES
 
     def __init__(
         self,
@@ -211,6 +176,20 @@ class PortfolioHistory:
         # Try ISIN as fallback (if set)
         if pos.isin:
             price = self.market_data.get_price_with_fallback(pos.isin, target_date)
+            if price is not None:
+                return price
+
+        # Carry-forward: this position is held on target_date, so it must have a
+        # value. If no recent quote exists within the normal fallback window
+        # (e.g. a bond whose price series ends weeks before it is sold), fall
+        # back to the last-known price with no look-back limit so the position
+        # never silently drops out of the value history.
+        for identifier in (pos.data_provider_symbol, pos.symbol, pos.isin):
+            if not identifier:
+                continue
+            price = self.market_data.get_last_price_on_or_before(
+                identifier, target_date
+            )
             if price is not None:
                 return price
 
@@ -460,6 +439,10 @@ class PortfolioHistory:
         # Get initial state once
         state = self._replay_transactions_to_date(start_date)
 
+        # Warn at most once per symbol when FX conversion is impossible, so a
+        # missing rate never silently drops a position without a trace.
+        warned_fx: set = set()
+
         current = start_date
         while current <= end_date:
             # Only re-replay when we hit a transaction date (state changed)
@@ -489,6 +472,14 @@ class PortfolioHistory:
                         rate = self._get_fx_rate(pos.currency, base, as_of=current)
                         if rate:
                             positions_value += pv * rate
+                        elif symbol not in warned_fx:
+                            warned_fx.add(symbol)
+                            logging.warning(
+                                "No FX rate for %s->%s around %s; excluding %s "
+                                "from value history. Run a historical refresh "
+                                "to seed FX rates.",
+                                pos.currency.value, base.value, current, symbol,
+                            )
 
             total_value = cash_value + positions_value
 
@@ -505,6 +496,82 @@ class PortfolioHistory:
         if not df.empty:
             df["date"] = pd.to_datetime(df["date"])
             df = df.set_index("date")
+
+        return df
+
+    def get_value_history_by_type(
+        self, start_date: date, end_date: date,
+        types: Optional[List[str]] = None,
+        target_currency: Optional[Currency] = None,
+    ) -> pd.DataFrame:
+        """Per-instrument-type positions value over time, in a single replay.
+
+        Returns a DataFrame indexed by date with one column per instrument type,
+        each holding that type's positions market value in the target currency
+        (cash excluded). Computing every class band in one pass avoids replaying
+        the whole history once per class (as calling get_value_history with an
+        instrument_types filter N times would).
+
+        Args:
+            start_date: Start date
+            end_date: End date
+            types: Optional list of instrument types to include; None = all.
+            target_currency: Currency to express values in. Defaults to base.
+        """
+        base = target_currency or self.portfolio.base_currency
+        type_filter = set(types) if types is not None else None
+
+        txn_dates_in_range = set(
+            d for d in self._transaction_dates if start_date < d <= end_date
+        )
+        state = self._replay_transactions_to_date(start_date)
+        warned_fx: set = set()
+
+        data: List[Dict] = []
+        current = start_date
+        while current <= end_date:
+            if current in txn_dates_in_range:
+                state = self._replay_transactions_to_date(current)
+
+            row: Dict = {"date": current}
+            per_type: Dict[str, Decimal] = {}
+            for symbol, pos in state.positions.items():
+                itype = pos.instrument_type
+                if type_filter is not None and itype not in type_filter:
+                    continue
+
+                price = self._get_price_for_position(pos, current)
+                if price is None or pos.quantity <= 0:
+                    continue
+
+                pv = pos.quantity * price
+                if pos.currency == base:
+                    val = pv
+                else:
+                    rate = self._get_fx_rate(pos.currency, base, as_of=current)
+                    if not rate:
+                        if symbol not in warned_fx:
+                            warned_fx.add(symbol)
+                            logging.warning(
+                                "No FX rate for %s->%s around %s; excluding %s "
+                                "from value history. Run a historical refresh "
+                                "to seed FX rates.",
+                                pos.currency.value, base.value, current, symbol,
+                            )
+                        continue
+                    val = pv * rate
+
+                per_type[itype] = per_type.get(itype, Decimal("0")) + val
+
+            for itype, val in per_type.items():
+                row[itype] = float(val)
+            data.append(row)
+            current += timedelta(days=1)
+
+        df = pd.DataFrame(data)
+        if not df.empty:
+            df["date"] = pd.to_datetime(df["date"])
+            df = df.set_index("date").fillna(0.0)
 
         return df
 
@@ -694,91 +761,82 @@ class PortfolioHistory:
 
     def _get_instrument_category(self, instrument_type: str) -> str:
         """Map instrument type to category."""
-        if instrument_type in self.EQUITY_TYPES:
-            return "equity"
-        elif instrument_type in self.FIXED_INCOME_TYPES:
-            return "fixed_income"
-        return "other"
+        return asset_classes.category_for_instrument_type(instrument_type)
 
-    def get_value_history_with_attribution(
+    def _type_by_symbol(self) -> Dict[str, str]:
+        """One authoritative instrument type per symbol, matching the replay.
+
+        A position takes its instrument type from the first BUY that opens it, so
+        we resolve each symbol by that same transaction. This keeps flow
+        attribution consistent with the value history even when a symbol's
+        transactions carry inconsistent instrument types (e.g. a dividend booked
+        as "stock" on a bond).
+        """
+        first_type: Dict[str, str] = {}   # earliest transaction type per symbol
+        buy_type: Dict[str, str] = {}      # earliest BUY type per symbol
+        for txn in sorted(self.portfolio.transactions, key=lambda t: t.timestamp):
+            sym = txn.instrument.symbol
+            itype = txn.instrument.instrument_type
+            itype = itype.value if hasattr(itype, "value") else str(itype)
+            if sym not in first_type:
+                first_type[sym] = itype
+            if txn.transaction_type == TransactionType.BUY and sym not in buy_type:
+                buy_type[sym] = itype
+        return {sym: buy_type.get(sym, first_type[sym]) for sym in first_type}
+
+    def _category_by_symbol(self) -> Dict[str, str]:
+        """One authoritative category per symbol, matching the replayed position."""
+        return {sym: self._get_instrument_category(itype)
+                for sym, itype in self._type_by_symbol().items()}
+
+    def get_category_value_history(
         self,
         start_date: date,
         end_date: date,
         category: str = "equity",
         target_currency: Optional[Currency] = None,
     ) -> pd.DataFrame:
-        """Get portfolio value history with attributed cash for a specific category.
+        """Market value history for a single asset class (positions only, no cash).
 
-        This method tracks cash flows by instrument category, enabling category-specific
-        analytics that properly reflect realized gains from sold positions.
-
-        For example, with category="equity":
-        - Shows only stock + ETF positions
-        - Includes realized gains from sold equities (attributed as positive equity cash)
-        - Excludes cash from bond transactions
-        - Deposits/withdrawals remain as external flows (for TWR adjustment)
-
-        Attributed cash starts at zero, isolating pure trading performance:
-        - Negative attributed cash = capital invested (bought but not yet sold)
-        - Positive attributed cash = realized gains/losses from sales + dividends
+        Unlike the whole-portfolio view, this isolates one class ("equity",
+        "fixed_income", "structured" or "other") and reports the market value of
+        just those positions over time, converted to ``target_currency``. Pair it
+        with :meth:`get_category_cash_flows_by_day` to compute a time-weighted
+        return that reflects price/coupon performance rather than the capital
+        deployed into (or withdrawn from) the class.
 
         Args:
             start_date: Start date
             end_date: End date
-            category: Category to filter ("equity", "fixed_income", "other")
-            target_currency: Currency to express values in. Defaults to portfolio base currency.
+            category: One of "equity", "fixed_income", "structured", "other".
+            target_currency: Currency to express values in. Defaults to base.
 
         Returns:
-            DataFrame with columns: date, total_value, positions_value, attributed_cash
+            DataFrame indexed by date with a single ``total_value`` column (the
+            class market value); ``positions_value`` is provided as an alias.
         """
         data: List[Dict] = []
         base = target_currency or self.portfolio.base_currency
 
-        # Initialize attributed cash state (starts at zero for pure trading performance)
-        attributed_cash = AttributedCashState()
+        txn_dates_in_range = set(
+            d for d in self._transaction_dates if start_date < d <= end_date
+        )
+        state = self._replay_transactions_to_date(start_date)
 
-        # Sort transactions chronologically
-        sorted_txns = sorted(self.portfolio.transactions, key=lambda t: t.timestamp)
-
-        # Build a map of transaction dates to transactions for efficient lookup
-        txn_by_date: Dict[date, List[Transaction]] = defaultdict(list)
-        for txn in sorted_txns:
-            txn_by_date[txn.timestamp.date()].append(txn)
-
-        # Get all transaction dates in order
-        all_txn_dates = sorted(txn_by_date.keys())
-
-        # Process all transactions BEFORE start_date to initialize attributed cash
-        for txn_date in all_txn_dates:
-            if txn_date >= start_date:
-                break
-            for txn in txn_by_date[txn_date]:
-                self._apply_transaction_to_attributed_cash(txn, attributed_cash)
+        # Warn at most once per symbol when FX conversion is impossible.
+        warned_fx: set = set()
 
         current = start_date
-
         while current <= end_date:
-            # Process transactions for this date
-            for txn in txn_by_date.get(current, []):
-                self._apply_transaction_to_attributed_cash(txn, attributed_cash)
+            if current in txn_dates_in_range:
+                state = self._replay_transactions_to_date(current)
 
-            # Get position state at this date
-            state = self._replay_transactions_to_date(current)
-
-            # Create date-aware FX rate function
-            def fx_rate_for_current(from_curr: Currency, to_curr: Currency, dt: date = current) -> Optional[Decimal]:
-                return self._get_fx_rate(from_curr, to_curr, as_of=dt)
-
-            # Calculate positions value for the category
             positions_value = Decimal("0")
             for symbol, pos in state.positions.items():
-                # Filter by instrument category
-                pos_category = self._get_instrument_category(pos.instrument_type)
-                if pos_category != category:
+                if self._get_instrument_category(pos.instrument_type) != category:
                     continue
 
                 price = self._get_price_for_position(pos, current)
-
                 if price is not None and pos.quantity > 0:
                     pv = pos.quantity * price
                     if pos.currency == base:
@@ -787,61 +845,100 @@ class PortfolioHistory:
                         rate = self._get_fx_rate(pos.currency, base, as_of=current)
                         if rate:
                             positions_value += pv * rate
-
-            # Get attributed cash for this category
-            cash_value = attributed_cash.get_category_total(category, base, fx_rate_for_current)
-
-            total_value = positions_value + cash_value
+                        elif symbol not in warned_fx:
+                            warned_fx.add(symbol)
+                            logging.warning(
+                                "No FX rate for %s->%s around %s; excluding %s "
+                                "from %s value history. Run a historical refresh "
+                                "to seed FX rates.",
+                                pos.currency.value, base.value, current,
+                                symbol, category,
+                            )
 
             data.append({
                 "date": current,
-                "total_value": float(total_value),
+                "total_value": float(positions_value),
                 "positions_value": float(positions_value),
-                "attributed_cash": float(cash_value),
             })
-
             current += timedelta(days=1)
 
         df = pd.DataFrame(data)
         if not df.empty:
             df["date"] = pd.to_datetime(df["date"])
             df = df.set_index("date")
-
         return df
 
-    def _apply_transaction_to_attributed_cash(
-        self, txn: Transaction, attributed_cash: AttributedCashState
-    ) -> None:
-        """Apply a transaction's cash effect to the attributed cash state.
+    def get_category_cash_flows_by_day(
+        self,
+        start_date: date,
+        end_date: date,
+        category: str = "equity",
+        target_currency: Optional[Currency] = None,
+        instrument_type: Optional[str] = None,
+    ) -> Dict[date, Decimal]:
+        """Net capital flows into a class's positions, per day, in target currency.
 
-        Cash Attribution Rules:
-        - BUY: Decreases category cash (capital invested)
-        - SELL: Increases category cash (realized gain/loss)
-        - DIVIDEND/INTEREST: Increases category cash (if from that category's instrument)
-        - DEPOSIT/WITHDRAWAL: Not attributed (external flows)
-        - FEES: Attributed to "other" category
+        A BUY adds to the class's market value without being a return, so it is a
+        positive external flow; a SELL removes market value, so it is a negative
+        flow. These are the flows to subtract when computing a time-weighted
+        return from the matching value history. Income (dividends / coupons) does
+        not change positions market value and is not included here.
+
+        When ``instrument_type`` is given, flows are attributed to that exact
+        instrument type (e.g. only ETFs); otherwise they are attributed to the
+        broader ``category`` (e.g. all equities).
+
+        Sign convention matches ``calculate_returns_from_df``: daily return =
+        (value_t - value_{t-1} - flow_t) / value_{t-1}.
         """
-        currency = txn.currency
-        instrument_type = txn.instrument.instrument_type.value if hasattr(txn.instrument.instrument_type, 'value') else str(txn.instrument.instrument_type)
-        category = self._get_instrument_category(instrument_type)
+        base = target_currency or self.portfolio.base_currency
+        flows: Dict[date, Decimal] = {}
 
-        if txn.transaction_type == TransactionType.BUY:
-            # Buying decreases category cash (capital invested)
-            balances = getattr(attributed_cash, category)
-            balances[currency] -= txn.total_value
+        # A symbol's class must match how the value history sees it: the replayed
+        # position takes its type from the first BUY, and transaction records for
+        # the same symbol can be inconsistently typed. So resolve one class per
+        # symbol (from its earliest buy) and use it for every flow.
+        if instrument_type is not None:
+            class_by_symbol = self._type_by_symbol()
+            target_class = instrument_type
+        else:
+            class_by_symbol = self._category_by_symbol()
+            target_class = category
+        warned_fx: set = set()
 
-        elif txn.transaction_type == TransactionType.SELL:
-            # Selling increases category cash (realized gain/loss)
-            balances = getattr(attributed_cash, category)
-            balances[currency] += txn.total_value
+        for txn in self.portfolio.transactions:
+            txn_date = txn.timestamp.date()
+            if not (start_date < txn_date <= end_date):
+                continue
+            if txn.transaction_type not in (TransactionType.BUY, TransactionType.SELL):
+                continue
 
-        elif txn.transaction_type in [TransactionType.DIVIDEND, TransactionType.INTEREST]:
-            # Income is attributed to the instrument's category
-            balances = getattr(attributed_cash, category)
-            balances[currency] += txn.total_value
+            if class_by_symbol.get(txn.instrument.symbol) != target_class:
+                continue
 
-        elif txn.transaction_type == TransactionType.FEES:
-            # Fees attributed to "other" category
-            attributed_cash.other[currency] -= txn.total_value
+            amount = txn.total_value
+            if txn.currency != base:
+                rate = self._get_fx_rate(txn.currency, base, as_of=txn_date)
+                if not rate:
+                    # No historical rate: excluding this flow keeps it consistent
+                    # with get_category_value_history, which likewise drops a
+                    # position it cannot convert. Adding the raw foreign amount
+                    # would silently corrupt the class TWR.
+                    if txn.currency.value not in warned_fx:
+                        warned_fx.add(txn.currency.value)
+                        logging.warning(
+                            "No FX rate for %s->%s around %s; excluding %s "
+                            "cash flow from category returns. Run a historical "
+                            "refresh to seed FX rates.",
+                            txn.currency.value, base.value, txn_date,
+                            txn.instrument.symbol,
+                        )
+                    continue
+                amount = amount * rate
 
-        # DEPOSIT/WITHDRAWAL are NOT attributed - they are external flows
+            if txn.transaction_type == TransactionType.SELL:
+                amount = -amount
+
+            flows[txn_date] = flows.get(txn_date, Decimal("0")) + amount
+
+        return flows

@@ -1,0 +1,194 @@
+{% extends "base.html" %}
+{% block title %}Analytics · FinAI{% endblock %}
+{% block heading %}Analytics{% endblock %}
+
+{% block content %}
+{% if data.empty %}
+  <div class="card text-center py-16">
+    <p class="text-muted">No portfolio loaded.</p>
+  </div>
+{% else %}
+<div x-data="analytics()" x-init="init()">
+  <!-- Period + currency controls -->
+  {% set ccy = data.display_currency %}
+  {% set view_mode = data.view_mode or 'all' %}
+  {# preserve the active period when switching class/currency #}
+  {% if preset == 'ytd' %}{% set period_q = 'start=' ~ year_start ~ '&end=' ~ today %}
+  {% elif preset == 'custom' %}{% set period_q = 'start=' ~ range_start ~ '&end=' ~ range_end %}
+  {% else %}{% set period_q = 'days=' ~ days %}{% endif %}
+  <div class="flex items-start justify-between mb-4 flex-wrap gap-3">
+    <p class="page-sub">Performance, risk and benchmark analytics
+      {% if data.period and data.period.start %}· {{ data.period.start }} → {{ data.period.end }}{% endif %}
+      {% if ccy and ccy != data.base_currency %}· in {{ ccy }}{% endif %}
+    </p>
+    <div class="flex items-center gap-2 flex-wrap">
+      <!-- Presets -->
+      <div class="seg">
+        {% set presets = [
+          ('30', '1M', 'days=30'), ('90', '3M', 'days=90'),
+          ('180', '6M', 'days=180'), ('365', '1Y', 'days=365'),
+          ('ytd', 'YTD', 'start=' ~ year_start ~ '&end=' ~ today),
+          ('0', 'All', 'days=0')
+        ] %}
+        {% for key, lbl, q in presets %}
+        <a href="/analytics?portfolio={{ active_portfolio_id or '' }}&{{ q }}&currency={{ ccy }}&view={{ view_mode }}"
+           class="seg-item {{ 'seg-item-active' if preset == key else '' }}">{{ lbl }}</a>
+        {% endfor %}
+      </div>
+      <!-- Calendar range + currency -->
+      <form method="get" action="/analytics" class="flex items-center gap-2">
+        <input type="hidden" name="portfolio" value="{{ active_portfolio_id or '' }}" />
+        <input type="hidden" name="view" value="{{ view_mode }}" />
+        <input type="date" name="start" value="{{ range_start }}" max="{{ today }}" class="input input-sm mono" />
+        <span class="text-muted text-xs">→</span>
+        <input type="date" name="end" value="{{ range_end }}" max="{{ today }}" class="input input-sm mono" />
+        <select name="currency" class="select select-sm" onchange="this.form.submit()">
+          {% for c in data.currencies %}
+          <option value="{{ c }}" {{ 'selected' if c == ccy else '' }}>{{ c }}</option>
+          {% endfor %}
+        </select>
+        <button type="submit" class="btn btn-sm {{ 'btn-accent' if preset == 'custom' else '' }}">Apply</button>
+      </form>
+    </div>
+  </div>
+
+  <!-- Asset-class view: analyse one class separately (with attributed cash) -->
+  <div class="flex items-center gap-2 mb-5 flex-wrap">
+    <span class="text-xs text-muted mr-1">Asset class</span>
+    <div class="seg">
+      {% for v in data.views %}
+      <a href="/analytics?portfolio={{ active_portfolio_id or '' }}&{{ period_q }}&currency={{ ccy }}&view={{ v.key }}"
+         class="seg-item {{ 'seg-item-active' if view_mode == v.key else '' }}">{{ v.label }}</a>
+      {% endfor %}
+    </div>
+  </div>
+
+  {% if data.no_history %}
+  <div class="card text-center py-16">
+    <p class="text-muted">Not enough history in this period to compute analytics. Try a longer range.</p>
+  </div>
+  {% else %}
+
+  <!-- Metric tiles -->
+  <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4 mb-5">
+    <div class="card card-tight metric">
+      <span class="metric-label">Total Return</span>
+      <span class="metric-value mono" :class="cls(d.metrics.total_return)" x-text="pct(d.metrics.total_return)"></span>
+    </div>
+    <div class="card card-tight metric">
+      <span class="metric-label">Annualized</span>
+      <span class="metric-value mono" :class="cls(d.metrics.annualized_return)" x-text="pct(d.metrics.annualized_return)"></span>
+    </div>
+    <div class="card card-tight metric">
+      <span class="metric-label">YTD</span>
+      <span class="metric-value mono" :class="cls(d.metrics.ytd_pct)" x-text="d.metrics.ytd_pct === null ? '—' : pct(d.metrics.ytd_pct)"></span>
+    </div>
+    <div class="card card-tight metric">
+      <span class="metric-label">Volatility</span>
+      <span class="metric-value mono" x-text="d.metrics.volatility === null ? '—' : num(d.metrics.volatility) + '%'"></span>
+    </div>
+    <div class="card card-tight metric">
+      <span class="metric-label">Sharpe</span>
+      <span class="metric-value mono" x-text="num(d.metrics.sharpe)"></span>
+    </div>
+    <div class="card card-tight metric">
+      <span class="metric-label">Max Drawdown</span>
+      <span class="metric-value mono neg" x-text="d.metrics.max_drawdown === null ? '—' : '-' + num(Math.abs(d.metrics.max_drawdown)) + '%'"></span>
+    </div>
+  </div>
+
+  <!-- Cumulative return + distribution -->
+  <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-5">
+    <div class="card lg:col-span-2">
+      <div class="flex items-center justify-between mb-2">
+        <span class="section-title">Cumulative return</span>
+        <span class="text-xs text-muted" x-show="!d.cumulative.benchmark">Portfolio (TWR)</span>
+        <span class="text-xs text-muted" x-show="d.cumulative.benchmark" x-text="'vs ' + d.benchmark_symbol"></span>
+      </div>
+      <div id="cumChart" style="height: 300px;"></div>
+    </div>
+    <div class="card">
+      <div class="section-title mb-2">Daily returns</div>
+      <div id="distChart" style="height: 300px;"></div>
+    </div>
+  </div>
+
+  <!-- Risk + benchmark + distribution stats -->
+  <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+    <div class="card">
+      <div class="section-title mb-3">Risk</div>
+      <div class="grid grid-cols-2 gap-4">
+        <div class="metric"><span class="metric-label">VaR (5%)</span>
+          <span class="metric-value mono neg" x-text="d.metrics.var_5pct === null ? '—' : '-' + num(Math.abs(d.metrics.var_5pct)) + '%'"></span></div>
+        <div class="metric"><span class="metric-label">CVaR (5%)</span>
+          <span class="metric-value mono neg" x-text="d.metrics.cvar_5pct === null ? '—' : '-' + num(Math.abs(d.metrics.cvar_5pct)) + '%'"></span></div>
+        <div class="metric"><span class="metric-label">Sortino</span>
+          <span class="metric-value mono" x-text="num(d.metrics.sortino)"></span></div>
+        <div class="metric"><span class="metric-label">Calmar</span>
+          <span class="metric-value mono" x-text="num(d.metrics.calmar)"></span></div>
+        <div class="metric"><span class="metric-label">Max DD days</span>
+          <span class="metric-value mono" x-text="d.metrics.max_dd_duration ?? '—'"></span></div>
+        <div class="metric"><span class="metric-label">Days analyzed</span>
+          <span class="metric-value mono" x-text="d.metrics.days_analyzed ?? '—'"></span></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="section-title mb-3">Benchmark</div>
+      <template x-if="d.benchmark">
+        <div class="grid grid-cols-2 gap-4">
+          <div class="metric"><span class="metric-label" x-text="d.benchmark.symbol + ' Return'"></span>
+            <span class="metric-value mono" :class="cls(d.benchmark.benchmark_return)" x-text="pct(d.benchmark.benchmark_return)"></span></div>
+          <div class="metric"><span class="metric-label">Beta</span>
+            <span class="metric-value mono" x-text="num(d.benchmark.beta)"></span></div>
+          <div class="metric"><span class="metric-label">Alpha</span>
+            <span class="metric-value mono" :class="cls(d.benchmark.alpha)" x-text="pct(d.benchmark.alpha)"></span></div>
+          <div class="metric"><span class="metric-label">Info Ratio</span>
+            <span class="metric-value mono" x-text="num(d.benchmark.information_ratio)"></span></div>
+        </div>
+      </template>
+      <template x-if="!d.benchmark">
+        <p class="hint">No <span x-text="d.benchmark_symbol"></span> data overlaps this period. Try a range covered by your stored prices, or fetch more in
+          <a href="/data?portfolio={{ active_portfolio_id or '' }}" class="text-accent">Data &amp; Settings</a>.
+        </p>
+      </template>
+    </div>
+
+    <div class="card">
+      <div class="section-title mb-3">Return distribution</div>
+      <div class="grid grid-cols-2 gap-4">
+        <div class="metric"><span class="metric-label">Best day</span>
+          <span class="metric-value mono pos" x-text="pct(d.distribution.best)"></span></div>
+        <div class="metric"><span class="metric-label">Worst day</span>
+          <span class="metric-value mono neg" x-text="pct(d.distribution.worst)"></span></div>
+        <div class="metric"><span class="metric-label">Avg daily</span>
+          <span class="metric-value mono" :class="cls(d.distribution.avg)" x-text="pct(d.distribution.avg)"></span></div>
+        <div class="metric"><span class="metric-label">Positive days</span>
+          <span class="metric-value mono" x-text="d.distribution.positive_days + ' / ' + d.distribution.total_days"></span></div>
+      </div>
+    </div>
+  </div>
+  {% endif %}
+</div>
+
+<script id="analytics-data" type="application/json">{{ data | tojson }}</script>
+<script>
+  function analytics() {
+    return {
+      d: JSON.parse(document.getElementById('analytics-data').textContent),
+      num(v, dcml) { return FINAI.fmtNum(v, dcml ?? 2); },
+      pct(v) { return FINAI.fmtPct(v); },
+      cls(v) { return FINAI.signClass(v); },
+      init() {
+        if (this.d.no_history) return;
+        const c = this.d.cumulative;
+        const series = [{ name: 'Portfolio', y: c.portfolio, color: FINAI.ACCENT }];
+        if (c.benchmark) series.push({ name: this.d.benchmark_symbol, y: c.benchmark, color: '#74808C', dash: 'dot' });
+        FINAI.lineMulti(document.getElementById('cumChart'), c.dates, series, { ysuffix: '%', hoverfmt: '.2f' });
+        FINAI.histogram(document.getElementById('distChart'), this.d.distribution.returns, { xsuffix: '%', bins: 40 });
+      },
+    };
+  }
+</script>
+{% endif %}
+{% endblock %}

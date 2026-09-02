@@ -1,0 +1,271 @@
+{% extends "base.html" %}
+{% block title %}Optimize · FinAI{% endblock %}
+{% block heading %}Optimize{% endblock %}
+
+{% block content %}
+{% if data.empty %}
+  <div class="card text-center py-16"><p class="text-muted">No portfolio loaded.</p></div>
+{% else %}
+<div x-data="optimize()" x-init="init()">
+  <!-- Parameters -->
+  <form method="get" action="/optimize" class="card mb-5">
+    <input type="hidden" name="portfolio" value="{{ active_portfolio_id or '' }}" />
+    <input type="hidden" name="run" value="1" />
+    <!-- Scope + candidate selections submitted as hidden CSV, driven by pickers -->
+    <input type="hidden" name="scope" :value="scope" />
+    <input type="hidden" name="symbols" :value="sel.join(',')" />
+    <input type="hidden" name="candidates" :value="cand.join(',')" />
+    <div class="grid grid-cols-1 md:grid-cols-4 gap-4 items-end">
+      <div>
+        <label class="label">Objective</label>
+        <select name="objective" class="select">
+          <option value="max_sharpe" {{ 'selected' if data.params.objective == 'max_sharpe' else '' }}>Max Sharpe</option>
+          <option value="min_volatility" {{ 'selected' if data.params.objective == 'min_volatility' else '' }}>Min Volatility</option>
+        </select>
+      </div>
+      <div>
+        <label class="label">Lookback (days)</label>
+        <input type="number" name="lookback_days" min="30" step="1" value="{{ data.params.lookback_days }}" class="input mono" />
+      </div>
+      <div>
+        <label class="label">Risk-free rate</label>
+        <input type="number" name="risk_free_rate" min="0" max="0.5" step="0.01" value="{{ data.params.risk_free_rate }}" class="input mono" />
+      </div>
+      <div>
+        <label class="label">Scope</label>
+        <select class="select" x-model="scope">
+          <option value="all">Optimize all holdings</option>
+          <option value="lock">Lock selected, optimize rest</option>
+          <option value="only">Optimize only selected</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
+      <!-- Position picker (lock / optimize-only) -->
+      <div x-show="scope !== 'all'" x-cloak>
+        <div class="flex items-center justify-between mb-1">
+          <label class="label mb-0" x-text="scope === 'only' ? 'Positions to optimize' : 'Positions to lock'"></label>
+          <div class="flex gap-2">
+            <button type="button" class="text-xs text-muted hover:text-white" @click="sel = allHoldings.slice()">All</button>
+            <button type="button" class="text-xs text-muted hover:text-white" @click="sel = []">None</button>
+          </div>
+        </div>
+        <div class="pick-grid">
+          <template x-for="s in allHoldings" :key="s">
+            <label class="pick" :class="sel.includes(s) ? 'pick-on' : ''">
+              <input type="checkbox" class="hidden" :checked="sel.includes(s)" @change="toggle(sel, s)" />
+              <span class="mono" x-text="s"></span>
+            </label>
+          </template>
+        </div>
+        <p class="hint mt-2 text-xs" x-text="scope === 'only' ? 'Only these are rebalanced; their combined weight stays fixed.' : 'These keep their current weights; everything else is optimized.'"></p>
+      </div>
+
+      <!-- Candidate picker (add instruments not currently held) -->
+      <div :class="scope === 'all' ? 'md:col-span-2' : ''">
+        <div class="flex items-center justify-between mb-1">
+          <label class="label mb-0">Add candidates (not held)</label>
+          <div class="flex gap-2">
+            <button type="button" class="text-xs text-muted hover:text-white" @click="cand = []" x-show="cand.length">Clear</button>
+          </div>
+        </div>
+        <div class="pick-grid" x-show="allCandidates.length">
+          <template x-for="s in allCandidates" :key="s">
+            <label class="pick" :class="cand.includes(s) ? 'pick-on' : ''">
+              <input type="checkbox" class="hidden" :checked="cand.includes(s)" @change="toggle(cand, s)" />
+              <span class="mono" x-text="s"></span>
+            </label>
+          </template>
+        </div>
+        <p class="hint mt-1 text-xs" x-show="!allCandidates.length">No stored instruments outside your holdings. Fetch market data for new symbols first.</p>
+        <p class="hint mt-2 text-xs">Instruments with local data you don't hold. The optimizer may BUY them (funded from the optimized sleeve).</p>
+      </div>
+    </div>
+
+    <div class="flex items-center gap-3 mt-4">
+      <label class="flex items-center gap-2 text-sm text-muted">
+        <input type="checkbox" name="include_cash" value="1" {{ 'checked' if data.params.include_cash else '' }} class="accent-[color:var(--accent)]" />
+        Include cash
+      </label>
+      <button type="submit" class="btn btn-accent ml-auto"><i data-lucide="play" class="h-4 w-4"></i> Run</button>
+    </div>
+  </form>
+
+  {% if not data.ran %}
+    <div class="card text-center py-16">
+      <p class="text-muted">Choose your objective and run the optimizer to compare HRP and Markowitz allocations.</p>
+    </div>
+  {% elif data.error %}
+    <div class="card"><p class="neg">{{ data.error }}</p></div>
+  {% else %}
+
+  <!-- Method metrics -->
+  <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-5">
+    {% for key, title in [('hrp', 'HRP'), ('markowitz', 'Markowitz')] %}
+    <div class="card">
+      <div class="flex items-center justify-between mb-3">
+        <span class="section-title">{{ title }}</span>
+        {% if key == 'hrp' %}<span class="chip">recommended</span>{% endif %}
+      </div>
+      <div class="grid grid-cols-4 gap-3">
+        <div class="metric"><span class="metric-label">Exp. Return</span>
+          <span class="metric-value mono" :class="cls(d.metrics.{{ key }}.expected_return)" x-text="pct(d.metrics.{{ key }}.expected_return)"></span></div>
+        <div class="metric"><span class="metric-label">Volatility</span>
+          <span class="metric-value mono" x-text="d.metrics.{{ key }}.volatility === null ? '—' : num(d.metrics.{{ key }}.volatility) + '%'"></span></div>
+        <div class="metric"><span class="metric-label">Sharpe</span>
+          <span class="metric-value mono" x-text="num(d.metrics.{{ key }}.sharpe)"></span></div>
+        <div class="metric"><span class="metric-label">Cash</span>
+          <span class="metric-value mono" x-text="d.metrics.{{ key }}.cash_weight === null ? '—' : num(d.metrics.{{ key }}.cash_weight) + '%'"></span></div>
+      </div>
+      <template x-if="d.metrics.{{ key }}.warnings && d.metrics.{{ key }}.warnings.length">
+        <ul class="mt-3 space-y-1">
+          <template x-for="(w, i) in d.metrics.{{ key }}.warnings" :key="i">
+            <li class="text-xs text-muted">· <span x-text="w"></span></li>
+          </template>
+        </ul>
+      </template>
+    </div>
+    {% endfor %}
+  </div>
+
+  <!-- Weights + risk-return -->
+  <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-5">
+    <div class="card">
+      <div class="section-title mb-2">Target weights</div>
+      <div id="weightChart" style="height: 340px;"></div>
+    </div>
+    <div class="card">
+      <div class="section-title mb-2">Risk / return</div>
+      <div id="frontierChart" style="height: 340px;"></div>
+    </div>
+  </div>
+
+  <!-- Weight table -->
+  <div class="card mb-5 overflow-hidden">
+    <div class="section-title mb-3">Weight comparison</div>
+    <div class="overflow-x-auto">
+      <table class="tbl">
+        <thead><tr><th>Symbol</th><th class="num">Current</th><th class="num">HRP</th><th class="num">Markowitz</th></tr></thead>
+        <tbody>
+          <template x-for="w in d.weights" :key="w.symbol">
+            <tr>
+              <td :class="w.is_cash ? 'text-muted' : 'font-semibold'" x-text="w.symbol"></td>
+              <td class="num text-muted" x-text="num(w.current) + '%'"></td>
+              <td class="num" x-text="num(w.hrp) + '%'"></td>
+              <td class="num" x-text="num(w.markowitz) + '%'"></td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Rebalancing trades (HRP) -->
+  <div class="card overflow-hidden">
+    <div class="flex items-center justify-between mb-3">
+      <span class="section-title">Suggested trades (HRP)</span>
+      <div class="flex items-center gap-4 text-xs">
+        <span class="text-muted">Buy <span class="pos mono" x-text="money(d.trade_summary.buy)"></span></span>
+        <span class="text-muted">Sell <span class="neg mono" x-text="money(d.trade_summary.sell)"></span></span>
+        <span class="text-muted">Net <span class="mono" :class="cls(d.trade_summary.net)" x-text="money(d.trade_summary.net)"></span></span>
+      </div>
+    </div>
+    <div class="overflow-x-auto">
+      <table class="tbl">
+        <thead><tr>
+          <th>Symbol</th><th>Action</th><th class="num">Shares</th>
+          <th class="num">Value (<span x-text="d.base_currency"></span>)</th><th class="num">Value (native)</th>
+          <th class="num">Current → Target</th>
+        </tr></thead>
+        <tbody>
+          <template x-for="(t, i) in d.trades" :key="i">
+            <tr>
+              <td class="font-semibold" x-text="t.symbol"></td>
+              <td><span class="chip" :class="tradeCls(t.action)" x-text="t.action"></span></td>
+              <td class="num text-muted" x-text="num(t.shares, 0)"></td>
+              <td class="num" x-text="money(t.value_base)"></td>
+              <td class="num" x-text="moneyIn(t.value_native, t.currency)"></td>
+              <td class="num text-muted"><span x-text="num(t.current_pct) + '%'"></span> → <span class="text-slate-200" x-text="num(t.target_pct) + '%'"></span></td>
+            </tr>
+          </template>
+          <tr x-show="!d.trades.length"><td colspan="6" class="text-muted text-center py-6">No trades needed.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+  {% endif %}
+</div>
+
+<script id="optimize-data" type="application/json">{{ data | tojson }}</script>
+<script>
+  function optimize() {
+    return {
+      d: JSON.parse(document.getElementById('optimize-data').textContent),
+      scope: 'all',
+      sel: [],
+      cand: [],
+      allHoldings: [],
+      allCandidates: [],
+      num(v, dcml) { return FINAI.fmtNum(v, dcml ?? 2); },
+      pct(v) { return FINAI.fmtPct(v); },
+      cls(v) { return FINAI.signClass(v); },
+      money(v) { return FINAI.fmtMoney(v, this.d.base_currency); },
+      moneyIn(v, ccy) { return FINAI.fmtMoney(v, ccy || this.d.base_currency); },
+      tradeCls(a) { return { 'chip-buy': a === 'BUY' || a === 'DEPLOY', 'chip-sell': a === 'SELL' }; },
+      toggle(list, v) { const i = list.indexOf(v); if (i === -1) list.push(v); else list.splice(i, 1); },
+      init() {
+        const p = (this.d && this.d.params) || {};
+        this.scope = p.scope || 'all';
+        this.sel = (p.selected_symbols || []).slice();
+        this.cand = (p.candidate_symbols || []).slice();
+        this.allHoldings = (p.holdings || []).slice();
+        this.allCandidates = (p.candidate_universe || []).slice();
+        if (!this.d.ran || this.d.error) return;
+        this.$nextTick(() => { this.weightsChart(); this.riskReturn(); });
+      },
+      weightsChart() {
+        const rows = this.d.weights;
+        const labels = rows.map(r => r.symbol);
+        const mk = (key, color) => ({ x: labels, y: rows.map(r => r[key]), name: key, type: 'bar', marker: { color } });
+        const traces = [
+          { ...mk('current', '#4C555F'), name: 'Current' },
+          { ...mk('hrp', '#C7CDD4'), name: 'HRP' },
+          { ...mk('markowitz', '#74808C'), name: 'Markowitz' },
+        ];
+        Plotly.newPlot(document.getElementById('weightChart'), traces, FINAI.baseLayout({
+          barmode: 'group', showlegend: true,
+          legend: { orientation: 'h', y: 1.12, x: 0, font: { color: '#868D96', size: 11 } },
+          margin: { t: 24, r: 8, b: 60, l: 40 },
+          xaxis: { gridcolor: 'rgba(0,0,0,0)', tickangle: -35 },
+          yaxis: { ticksuffix: '%', gridcolor: 'rgba(38,42,48,0.5)' },
+        }), FINAI.config);
+      },
+      riskReturn() {
+        const s = this.d.scatter;
+        const assets = {
+          x: s.assets.map(a => a.x), y: s.assets.map(a => a.y), text: s.assets.map(a => a.label),
+          mode: 'markers', type: 'scatter', name: 'Assets',
+          marker: { color: '#5E666F', size: s.assets.map(a => Math.max(6, Math.min(26, (a.weight || 1) * 0.6 + 6))), line: { color: '#0A0B0D', width: 1 } },
+          hovertemplate: '%{text}<br>Risk %{x:.1f}%<br>Return %{y:.1f}%<extra></extra>',
+        };
+        const ports = {
+          x: s.portfolios.map(p => p.x), y: s.portfolios.map(p => p.y), text: s.portfolios.map(p => p.name),
+          mode: 'markers+text', type: 'scatter', name: 'Optimized', textposition: 'top center',
+          textfont: { color: '#C3C9D0', size: 11 },
+          marker: { color: '#C3C9D0', size: 14, symbol: 'star', line: { color: '#0A0B0D', width: 1 } },
+          hovertemplate: '%{text}<br>Risk %{x:.1f}%<br>Return %{y:.1f}%<extra></extra>',
+        };
+        Plotly.newPlot(document.getElementById('frontierChart'), [assets, ports], FINAI.baseLayout({
+          showlegend: true,
+          legend: { orientation: 'h', y: 1.12, x: 0, font: { color: '#868D96', size: 11 } },
+          margin: { t: 24, r: 12, b: 46, l: 52 },
+          xaxis: { title: { text: 'Volatility (%)', font: { color: '#868D96', size: 11 } }, gridcolor: 'rgba(38,42,48,0.5)', ticksuffix: '%' },
+          yaxis: { title: { text: 'Expected return (%)', font: { color: '#868D96', size: 11 } }, gridcolor: 'rgba(38,42,48,0.5)', ticksuffix: '%' },
+        }), FINAI.config);
+      },
+    };
+  }
+</script>
+{% endif %}
+{% endblock %}

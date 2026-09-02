@@ -13,7 +13,6 @@ dependencies = [
     "numpy>=2.3.2",
     "matplotlib>=3.10.3",
     "plotly>=6.2.0",
-    "streamlit>=1.47.1",
     "pydantic>=2.11.7",
     "python-dotenv>=1.1.1",
     "requests>=2.32.4",
@@ -25,6 +24,9 @@ dependencies = [
     "langchain-community>=0.3.0",
     "tavily-python>=0.3.5",
     "mcp[cli]>=1.0.0",
+    "fastapi>=0.141.0",
+    "uvicorn[standard]>=0.30.0",
+    "jinja2>=3.1.0",
 ]
 
 [project.scripts]
@@ -110,7 +112,6 @@ known_first_party = ["src"]
 known_third_party = [
     "langchain",
     "langgraph",
-    "streamlit",
     "pandas",
     "numpy",
     "plotly",
@@ -141,7 +142,6 @@ show_error_codes = true
 module = [
     "yfinance.*",
     "plotly.*",
-    "streamlit.*",
     "langchain.*",
     "langgraph.*",
 ]

@@ -528,6 +528,8 @@ class GetPortfolioSummaryTool(BaseTool):
                     instrument_type = pos.get("instrument_type", "stock")
                     if instrument_type == "bond":
                         unit_label = "bonds"
+                    elif instrument_type == "structured_product":
+                        unit_label = "notes"
                     elif instrument_type == "etf":
                         unit_label = "shares"
                     elif instrument_type == "crypto":
@@ -2188,7 +2190,7 @@ class ModifyTransactionTool(BaseTool):
     - price: New price per share/unit
     - date: New transaction date (YYYY-MM-DD)
     - notes: New notes for the transaction
-    - instrument_type: Type of instrument (stock, etf, bond, crypto, cash, mutual_fund, option, future)
+    - instrument_type: Type of instrument (stock, etf, bond, structured_product, crypto, cash, mutual_fund, option, future)
 
     Use get_transactions or get_transaction_history to find transaction IDs first.
     """
@@ -3322,6 +3324,7 @@ class OptimizePortfolioTool(BaseTool):
 
     Features:
     - Lock specific positions you don't want to change
+    - Add candidate instruments (not currently held) from the stored universe
     - Compare both methods side-by-side
     - Include cash for lower volatility targets (blends risky assets with cash)
     - Shows specific rebalancing trades needed with share counts
@@ -3331,6 +3334,7 @@ class OptimizePortfolioTool(BaseTool):
     - optimize_portfolio(objective="min_volatility") - minimize risk
     - optimize_portfolio(objective="efficient_risk", target_volatility=0.10) - target 10% volatility
     - optimize_portfolio(locked_symbols="VTI,BND") - keep VTI and BND at current weights
+    - optimize_portfolio(candidate_symbols="GLD,QQQ") - consider adding GLD and QQQ
     - optimize_portfolio(include_cash=False) - don't include cash in rebalancing
     - optimize_portfolio(lookback_days=126, risk_free_rate=0.05) - 6 months data, 5% risk-free rate
     """
@@ -3348,6 +3352,7 @@ class OptimizePortfolioTool(BaseTool):
     def _run(
         self,
         locked_symbols: Optional[str] = None,
+        candidate_symbols: Optional[str] = None,
         method: str = "hrp",
         compare: bool = True,
         lookback_days: int = 252,
@@ -3378,6 +3383,13 @@ class OptimizePortfolioTool(BaseTool):
                 if invalid:
                     return f"❌ Locked symbols not in portfolio: {', '.join(invalid)}"
 
+            # Parse candidate symbols (not currently held) to consider adding
+            candidate_list = None
+            if candidate_symbols:
+                candidate_list = [
+                    s.strip().upper() for s in candidate_symbols.split(",") if s.strip()
+                ] or None
+
             # Parse objective
             objective_map = {
                 "max_sharpe": OptimizationObjective.MAX_SHARPE,
@@ -3407,6 +3419,7 @@ class OptimizePortfolioTool(BaseTool):
                 results = optimizer.compare_methods(
                     positions=positions,
                     locked_symbols=locked_list,
+                    candidate_symbols=candidate_list,
                     lookback_days=lookback_days,
                     risk_free_rate=risk_free_rate,
                     total_portfolio_value=total_value,
@@ -3425,6 +3438,7 @@ class OptimizePortfolioTool(BaseTool):
                 result = optimizer.optimize(
                     positions=positions,
                     locked_symbols=locked_list,
+                    candidate_symbols=candidate_list,
                     method=opt_method,
                     lookback_days=lookback_days,
                     risk_free_rate=risk_free_rate,

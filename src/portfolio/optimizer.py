@@ -21,7 +21,7 @@ from pypfopt.efficient_frontier import EfficientFrontier
 
 from ..data_providers.manager import DataProviderManager
 from .market_data_store import MarketDataStore
-from .models import Currency, Position, PortfolioSnapshot
+from .models import Currency, FinancialInstrument, InstrumentType, Position
 from .storage import FileBasedStorage
 
 if TYPE_CHECKING:
@@ -94,6 +94,32 @@ class PortfolioOptimizer:
     Uses MarketDataStore for historical price data.
     """
 
+    # Instrument types that have a genuine tradable daily price series and can
+    # be optimized. Everything else (bonds, structured notes/RCs/CLNs, options,
+    # futures, cash) is held at its current weight: their prices are par-quoted
+    # or interpolated, which produces meaningless returns/covariance, breaks HRP
+    # (NaN correlations) and distorts Markowitz.
+    TRADABLE_TYPES = {
+        InstrumentType.STOCK,
+        InstrumentType.ETF,
+        InstrumentType.CRYPTO,
+        InstrumentType.MUTUAL_FUND,
+    }
+
+    # An asset must have its first real price within this many days of the
+    # lookback window start to be optimized. Measured on the leading gap (first
+    # observation), not row count, so weekday-only equities are not penalized
+    # against illiquid instruments stored with a value on every calendar day.
+    MAX_HISTORY_START_GAP_DAYS = 30
+
+    # Minimum std of daily returns for an asset to be considered non-flat. Real
+    # equities are ~1-3%/day; interpolated/par-quoted series are ~0 and would
+    # otherwise dominate inverse-variance weighting or make HRP crash.
+    MIN_RETURN_STD = 1e-5
+
+    # Minimum number of common observations required to optimize on real signal.
+    MIN_OBSERVATIONS = 30
+
     def __init__(
         self,
         data_provider: Union[DataProviderManager, "MarketDataService"],
@@ -129,6 +155,7 @@ class PortfolioOptimizer:
         include_cash: bool = True,
         optimization_currency: Optional[Currency] = None,
         return_adjustment: float = 0.0,
+        candidate_symbols: Optional[List[str]] = None,
     ) -> OptimizationResult:
         """
         Optimize portfolio weights.
@@ -136,6 +163,11 @@ class PortfolioOptimizer:
         Args:
             positions: Current portfolio positions (symbol -> Position)
             locked_symbols: Symbols to keep at current weights
+            candidate_symbols: Symbols NOT currently held that the optimizer may
+                allocate to (drawn from the locally stored universe). Each enters
+                the optimization at a current weight of 0, so the result surfaces
+                BUY trades for any it recommends. Candidates without local price
+                history are skipped with a warning.
             method: Optimization method (HRP or Markowitz)
             lookback_days: Days of historical data for covariance
             risk_free_rate: Annual risk-free rate for Sharpe calculation
@@ -164,8 +196,47 @@ class PortfolioOptimizer:
             sym: pos for sym, pos in positions.items() if pos.quantity > 0
         }
 
+        # Merge in candidate instruments (not currently held) so the optimizer
+        # may allocate to them. They enter at quantity 0 -> current weight 0, so
+        # any recommended allocation surfaces as a BUY trade. Added after the
+        # quantity filter above precisely because they have zero quantity.
+        if candidate_symbols:
+            candidate_positions = self._build_candidate_positions(
+                candidate_symbols, active_positions, warnings
+            )
+            active_positions = {**active_positions, **candidate_positions}
+
         if len(active_positions) < 2:
             raise ValueError("Need at least 2 positions to optimize")
+
+        # Exclude non-tradable instruments (bonds, structured notes/RCs/CLNs,
+        # options, ...) from optimization. They have no genuine daily return
+        # series, so they are held at their current weight (treated as locked)
+        # instead of being fed to HRP/Markowitz.
+        non_tradable = [
+            sym
+            for sym, pos in active_positions.items()
+            if not (
+                pos.instrument and pos.instrument.instrument_type in self.TRADABLE_TYPES
+            )
+        ]
+        if non_tradable:
+            warnings.append(
+                "Held at current weight (not optimized): "
+                f"{', '.join(sorted(non_tradable))}. "
+                "Bonds/structured products have no tradable daily price series."
+            )
+            locked_symbols = list(dict.fromkeys(list(locked_symbols) + non_tradable))
+
+        tradable_symbols = [
+            sym for sym in active_positions if sym not in set(non_tradable)
+        ]
+        if len(tradable_symbols) < 2:
+            raise ValueError(
+                "Need at least 2 tradable positions (stocks/ETFs/crypto/funds) "
+                "to optimize. Bonds and structured products are excluded because "
+                "they have no tradable daily price series."
+            )
 
         # Calculate cash value in base currency
         cash_value_base = self._convert_cash_to_base(cash_balances)
@@ -204,10 +275,9 @@ class PortfolioOptimizer:
                 f"from a {opt_currency.value} investor's perspective."
             )
 
-        # Fetch historical prices
-        prices_df, price_warnings = self._fetch_prices(
-            list(active_positions.keys()), lookback_days
-        )
+        # Fetch historical prices for the tradable universe only. Non-tradable
+        # positions are held at current weight and do not need a price series.
+        prices_df, price_warnings = self._fetch_prices(tradable_symbols, lookback_days)
         warnings.extend(price_warnings)
 
         if prices_df.empty:
@@ -461,6 +531,79 @@ class PortfolioOptimizer:
             target_volatility=target_volatility,
         )
 
+    def _build_candidate_positions(
+        self,
+        candidate_symbols: List[str],
+        existing_positions: Dict[str, Position],
+        warnings: List[str],
+    ) -> Dict[str, Position]:
+        """Build synthetic zero-quantity positions for candidate symbols.
+
+        Candidates are drawn from the locally stored universe. Their native
+        currency and latest price come from MarketDataStore (no network), so the
+        candidate path stays consistent with "universe = what I have stored".
+        Symbols already held, or without any local price data, are skipped with a
+        warning. Instruments are typed as STOCK so they pass the tradable filter;
+        the type only gates optimization eligibility, not the math.
+
+        Returns:
+            Dict of symbol -> synthetic Position (quantity 0).
+        """
+        candidates: Dict[str, Position] = {}
+        skipped: List[str] = []
+        end_date = date.today()
+        # Wide window: we only need the most recent stored price and currency to
+        # seed the synthetic position. The optimization's own lookback window
+        # (and its short-history filter) governs whether the candidate actually
+        # has enough history to be allocated.
+        start_date = end_date - timedelta(days=365)
+
+        # Normalize and dedupe; drop anything already held.
+        seen = set()
+        for raw in candidate_symbols:
+            sym = raw.strip().upper()
+            if not sym or sym in seen:
+                continue
+            seen.add(sym)
+            if sym in existing_positions:
+                continue
+
+            price_entries = self.market_data_store.get_prices_with_currency(
+                sym, start_date, end_date
+            )
+            if not price_entries:
+                skipped.append(sym)
+                continue
+
+            latest_date = max(price_entries.keys())
+            entry = price_entries[latest_date]
+            instrument = FinancialInstrument(
+                symbol=sym,
+                name=sym,
+                instrument_type=InstrumentType.STOCK,
+                currency=entry.currency,
+                price_currency=entry.currency,
+            )
+            candidates[sym] = Position(
+                instrument=instrument,
+                quantity=Decimal("0"),
+                average_cost=entry.price,
+                current_price=entry.price,
+            )
+
+        if candidates:
+            warnings.append(
+                "Candidate instruments considered for allocation: "
+                f"{', '.join(sorted(candidates))}."
+            )
+        if skipped:
+            warnings.append(
+                "Candidates skipped (no local price history): "
+                f"{', '.join(sorted(skipped))}. Fetch market data for them first."
+            )
+
+        return candidates
+
     def compare_methods(
         self,
         positions: Dict[str, Position],
@@ -473,6 +616,7 @@ class PortfolioOptimizer:
         target_volatility: Optional[float] = None,
         include_cash: bool = True,
         optimization_currency: Optional[Currency] = None,
+        candidate_symbols: Optional[List[str]] = None,
     ) -> Dict[OptimizationMethod, OptimizationResult]:
         """
         Run both HRP and Markowitz, return comparison.
@@ -508,6 +652,7 @@ class PortfolioOptimizer:
                     target_volatility=target_volatility,
                     include_cash=include_cash,
                     optimization_currency=optimization_currency,
+                    candidate_symbols=candidate_symbols,
                 )
             except Exception as e:
                 self.logger.warning(f"Failed to run {method.value} optimization: {e}")
@@ -662,6 +807,19 @@ class PortfolioOptimizer:
                 "Please update market data using 'Update Market Data' in the Portfolio tab first."
             )
 
+        # Guard against optimizing on noise: after filtering short-history and
+        # flat columns, the common window can be too short to estimate a
+        # meaningful covariance matrix. Fail clearly rather than returning
+        # degenerate weights.
+        if len(prices_df) < self.MIN_OBSERVATIONS:
+            raise ValueError(
+                f"Only {len(prices_df)} days of overlapping price history for the "
+                f"tradable assets (need at least {self.MIN_OBSERVATIONS}). This "
+                "usually means a recently added instrument has little history. "
+                "Fetch more historical market data or exclude new positions, "
+                "then retry."
+            )
+
         # Validate data coverage
         actual_start = prices_df.index.min()
         actual_end = prices_df.index.max()
@@ -715,12 +873,59 @@ class PortfolioOptimizer:
             if prices_df.empty:
                 return pd.DataFrame(), warnings
 
-            # Check for missing values before forward-fill
-            missing_before = prices_df.isna().sum()
-            total_missing = missing_before.sum()
+            # Drop columns whose history does not cover most of the window
+            # BEFORE the row-wise dropna below. Otherwise a single short series
+            # (e.g. a recently added instrument) forces dropna() to discard
+            # every earlier row, collapsing the common window to a handful of
+            # days and making the covariance matrix meaningless. Coverage is
+            # measured by the first real observation (leading gap), NOT the raw
+            # row count, because illiquid instruments are stored with a value on
+            # every calendar day while real assets trade only on weekdays.
+            window_start = prices_df.index.min()
+            max_start_allowed = window_start + pd.Timedelta(
+                days=self.MAX_HISTORY_START_GAP_DAYS
+            )
+            short_history = [
+                col
+                for col in prices_df.columns
+                if prices_df[col].first_valid_index() is None
+                or prices_df[col].first_valid_index() > max_start_allowed
+            ]
+            if short_history:
+                prices_df = prices_df.drop(columns=short_history)
+                warnings.append(
+                    "Excluded (insufficient price history for the lookback "
+                    f"window): {', '.join(sorted(short_history))}."
+                )
 
-            # Forward fill missing values
+            if prices_df.empty:
+                return pd.DataFrame(), warnings
+
+            # Check for interior missing values before forward-fill (leading
+            # gaps were removed above by dropping short-history columns).
+            missing_before = prices_df.isna().sum()
+            total_missing = int(missing_before.sum())
+
+            # Forward fill missing values, then align to the common date range.
             prices_df = prices_df.ffill().dropna()
+
+            # Drop near-constant columns: interpolated/par-quoted series have
+            # ~zero return variance, which breaks HRP (NaN correlations) and
+            # dominates inverse-variance weighting. Require minimal movement.
+            if not prices_df.empty:
+                rel_std = prices_df.pct_change().std()
+                flat_cols = [
+                    col
+                    for col in prices_df.columns
+                    if not np.isfinite(rel_std.get(col, np.nan))
+                    or rel_std.get(col, 0.0) < self.MIN_RETURN_STD
+                ]
+                if flat_cols:
+                    prices_df = prices_df.drop(columns=flat_cols)
+                    warnings.append(
+                        "Excluded (flat/non-tradable price series): "
+                        f"{', '.join(sorted(flat_cols))}."
+                    )
 
             # Warn about significant gaps that were forward-filled
             if total_missing > 0:
@@ -928,10 +1133,20 @@ class PortfolioOptimizer:
         # Calculate returns for HRP
         returns = prices.pct_change().dropna()
 
-        hrp = HRPOpt(returns)
-        weights = hrp.optimize()
-
-        return dict(weights)
+        try:
+            hrp = HRPOpt(returns)
+            weights = hrp.optimize()
+            return dict(weights)
+        except Exception as e:
+            # HRP builds a correlation-distance matrix and clusters it; a flat
+            # column (zero variance -> NaN correlation) or too few observations
+            # makes scipy raise. Degrade gracefully instead of failing the whole
+            # optimization (upstream filters should normally prevent this).
+            self.logger.error(
+                f"HRP optimization failed ({e}). Falling back to equal weights."
+            )
+            n = len(prices.columns)
+            return {sym: 1.0 / n for sym in prices.columns} if n else {}
 
     def _run_markowitz_standard(
         self,

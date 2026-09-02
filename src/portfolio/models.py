@@ -22,6 +22,10 @@ class InstrumentType(str, Enum):
     MUTUAL_FUND = "mutual_fund"
     OPTION = "option"
     FUTURE = "future"
+    # Bank-issued structured products: reverse convertibles, credit-linked
+    # notes, autocallables, shark/callable notes, tracker certificates. Debt
+    # wrappers with embedded equity/credit options — not plain bonds.
+    STRUCTURED_PRODUCT = "structured_product"
 
 
 class TransactionType(str, Enum):

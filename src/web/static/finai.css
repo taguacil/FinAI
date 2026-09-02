@@ -1,0 +1,176 @@
+/* FinAI web — component styles layered on top of Tailwind utilities. */
+
+:root {
+  --bg: #0A0B0D;          /* near-black charcoal */
+  --surface: #14161A;     /* graphite */
+  --surface-alt: #0F1113;
+  --border: #262A30;      /* subtle steel hairline */
+  --accent: #C3C9D0;      /* brushed silver */
+  --muted: #868D96;
+  --pos: #5CB27F;         /* desaturated green */
+  --neg: #D07B6B;         /* desaturated clay red */
+}
+
+html, body { background: var(--bg); }
+
+/* Hide Alpine-controlled elements until the component is initialised */
+[x-cloak] { display: none !important; }
+
+/* Sidebar nav links */
+.nav-link {
+  display: flex; align-items: center; gap: 0.65rem;
+  padding: 0.55rem 0.75rem; border-radius: 10px;
+  color: var(--muted); font-weight: 500; font-size: 0.9rem;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.nav-link:hover { color: #E6E8EB; background: rgba(255,255,255,0.03); }
+/* Minimal active state: hairline accent marker, not a filled block */
+.nav-link-active {
+  color: #E6E8EB; background: transparent;
+  box-shadow: inset 2px 0 0 var(--accent);
+  border-radius: 0 10px 10px 0;
+}
+.nav-link-active i { color: var(--accent); }
+.nav-link-active:hover { background: rgba(255,255,255,0.03); }
+
+/* Cards — flat, hairline border, no shadow */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1.25rem 1.35rem;
+}
+.card-tight { padding: 0.9rem 1rem; }
+
+/* KPI tiles — static and calm (no hover motion) */
+.kpi-label {
+  color: var(--muted); font-size: 0.72rem; font-weight: 500;
+  text-transform: uppercase; letter-spacing: 0.05em;
+}
+.kpi-value {
+  font-size: 1.6rem; font-weight: 600; line-height: 1.1; margin-top: 0.45rem;
+  letter-spacing: -0.01em; font-variant-numeric: tabular-nums;
+}
+.kpi-sub { font-size: 0.8rem; margin-top: 0.35rem; }
+
+.pos { color: var(--pos); }
+.neg { color: var(--neg); }
+.mono { font-family: 'JetBrains Mono', ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+
+/* Tables */
+.tbl { width: 100%; border-collapse: collapse; font-size: 0.875rem; }
+.tbl thead th {
+  text-align: left; color: var(--muted); font-weight: 500; font-size: 0.72rem;
+  text-transform: uppercase; letter-spacing: 0.05em;
+  padding: 0.6rem 0.75rem; border-bottom: 1px solid var(--border);
+}
+.tbl tbody td { padding: 0.7rem 0.75rem; border-bottom: 1px solid rgba(38,42,48,0.6); }
+.tbl tbody tr:last-child td { border-bottom: 0; }
+.tbl tbody tr:hover { background: rgba(255,255,255,0.02); }
+.tbl .num { text-align: right; font-family: 'JetBrains Mono', ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+
+/* Sticky header for scrollable lists (keeps context while scrolling long tables) */
+.sticky-head th {
+  position: sticky; top: 0; z-index: 1;
+  background: var(--surface);
+}
+
+/* Chips / badges */
+.chip {
+  display: inline-flex; align-items: center; gap: 0.3rem;
+  padding: 0.1rem 0.45rem; border-radius: 6px;
+  font-size: 0.72rem; font-weight: 500; text-transform: capitalize;
+  border: 1px solid var(--border); color: var(--muted);
+}
+.chip-buy { color: var(--pos); border-color: rgba(92,178,127,0.3); }
+.chip-sell { color: var(--neg); border-color: rgba(208,123,107,0.3); }
+/* Neutral asset-class tag next to a holding symbol */
+.chip-class {
+  padding: 0.02rem 0.4rem; font-size: 0.66rem; font-weight: 500;
+  text-transform: none; letter-spacing: 0.01em;
+  color: var(--muted); background: rgba(255,255,255,0.02);
+  border-color: rgba(38,42,48,0.9);
+}
+
+.section-title { font-size: 0.9rem; font-weight: 600; letter-spacing: -0.01em; color: #C3C9D0; }
+.page-sub { color: var(--muted); font-size: 0.82rem; }
+
+/* Metric readouts (compact stat inside a card, e.g. Sharpe / Vol / Max DD) */
+.metric { display: flex; flex-direction: column; gap: 0.25rem; }
+.metric-label {
+  color: var(--muted); font-size: 0.7rem; font-weight: 500;
+  text-transform: uppercase; letter-spacing: 0.05em;
+}
+.metric-value {
+  font-size: 1.15rem; font-weight: 600; line-height: 1.1;
+  font-variant-numeric: tabular-nums; letter-spacing: -0.01em;
+}
+.metric-value.mono { font-family: 'JetBrains Mono', ui-monospace, monospace; }
+
+/* Form controls */
+.label { display: block; color: var(--muted); font-size: 0.72rem; font-weight: 500;
+  text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.35rem; }
+.input, .select {
+  width: 100%; background: var(--surface-alt);
+  border: 1px solid var(--border); border-radius: 8px;
+  color: #E6E8EB; font-size: 0.875rem; padding: 0.5rem 0.7rem;
+  transition: border-color 0.15s ease;
+}
+.input:focus, .select:focus { outline: none; border-color: var(--accent); }
+.input.mono { font-family: 'JetBrains Mono', ui-monospace, monospace; }
+.select { appearance: none; -webkit-appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23868D96' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat; background-position: right 0.6rem center; padding-right: 1.8rem; }
+/* Compact inline variants (e.g. analytics calendar/currency toolbar) */
+.input-sm, .select-sm { width: auto; font-size: 0.78rem; padding: 0.35rem 0.6rem; }
+.select-sm { padding-right: 1.7rem; }
+
+/* Multi-select pill pickers (universe / strategy choosers) */
+.pick-grid { display: flex; flex-wrap: wrap; gap: 0.4rem; max-height: 168px; overflow-y: auto; padding: 0.15rem; }
+.pick {
+  display: inline-flex; align-items: center; gap: 0.35rem; cursor: pointer;
+  padding: 0.3rem 0.6rem; border-radius: 7px; font-size: 0.78rem;
+  border: 1px solid var(--border); color: var(--muted);
+  background: var(--surface-alt); user-select: none; transition: all 0.12s ease;
+}
+.pick:hover { color: #E6E8EB; border-color: #363B42; }
+.pick-on { color: #0A0B0D; background: var(--accent); border-color: var(--accent); }
+
+/* Buttons */
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 0.4rem;
+  padding: 0.5rem 0.9rem; border-radius: 8px; font-size: 0.85rem; font-weight: 600;
+  border: 1px solid var(--border); color: #E6E8EB; background: transparent;
+  cursor: pointer; transition: background 0.15s ease, border-color 0.15s ease, opacity 0.15s ease;
+  white-space: nowrap;
+}
+.btn:hover { background: rgba(255,255,255,0.03); }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-accent { background: var(--accent); color: #0A0B0D; border-color: var(--accent); }
+.btn-accent:hover { background: #D6DBE0; }
+.btn-sm { padding: 0.35rem 0.65rem; font-size: 0.78rem; }
+
+/* Segmented control (sub-tabs, e.g. Backtest / Monte Carlo) */
+.seg { display: inline-flex; padding: 0.2rem; gap: 0.2rem;
+  background: var(--surface-alt); border: 1px solid var(--border); border-radius: 10px; }
+.seg-item {
+  padding: 0.4rem 0.9rem; border-radius: 7px; font-size: 0.82rem; font-weight: 500;
+  color: var(--muted); cursor: pointer; transition: background 0.15s ease, color 0.15s ease;
+}
+.seg-item:hover { color: #E6E8EB; }
+.seg-item-active { color: #0A0B0D; background: var(--accent); }
+.seg-item-active:hover { color: #0A0B0D; }
+
+/* Progress / weight bar (used for allocation & optimizer weight rows) */
+.bar-track { height: 6px; border-radius: 4px; background: var(--surface-alt); overflow: hidden; }
+.bar-fill { height: 100%; border-radius: 4px; background: var(--accent); }
+
+/* Empty / hint states */
+.hint { color: var(--muted); font-size: 0.85rem; }
+.divider { height: 1px; background: var(--border); border: 0; margin: 1rem 0; }
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 8px; }
+::-webkit-scrollbar-thumb:hover { background: #363B42; }
+::-webkit-scrollbar-track { background: transparent; }

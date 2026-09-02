@@ -1,0 +1,172 @@
+{% extends "base.html" %}
+{% block title %}Dashboard · FinAI{% endblock %}
+{% block heading %}{{ active_portfolio_name or 'Dashboard' }}{% endblock %}
+
+{% block content %}
+{% if data.empty %}
+  <div class="card text-center py-16">
+    <p class="text-muted">No portfolio loaded. Create one in the desktop app or add transactions to get started.</p>
+  </div>
+{% else %}
+<div x-data="dashboard()" x-init="init()">
+  {% set view_mode = data.view_mode or 'all' %}
+  <!-- Asset-class filter: analyse one class on its own -->
+  <div class="flex items-center gap-2 mb-4 flex-wrap">
+    <span class="text-xs text-muted mr-1">Asset class</span>
+    <div class="seg">
+      {% for v in data.views %}
+      <a href="/?portfolio={{ active_portfolio_id or '' }}&view={{ v.key }}"
+         class="seg-item {{ 'seg-item-active' if view_mode == v.key else '' }}">{{ v.label }}</a>
+      {% endfor %}
+    </div>
+  </div>
+
+  <!-- KPI row -->
+  <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-5">
+    <div class="card kpi">
+      <div class="kpi-label" x-text="d.kpis.cash === null ? 'Class Value' : 'Net Worth'"></div>
+      <div class="kpi-value mono" x-text="money(d.kpis.net_worth)"></div>
+      <div class="kpi-sub text-muted" x-text="d.kpis.cash === null ? assetLabel2(d.view_mode) : ('Cash ' + money(d.kpis.cash))"></div>
+    </div>
+    <div class="card kpi">
+      <div class="kpi-label">Invested</div>
+      <div class="kpi-value mono" x-text="money(d.kpis.invested)"></div>
+      <div class="kpi-sub text-muted" x-text="d.positions.length + ' positions'"></div>
+    </div>
+    <div class="card kpi">
+      <div class="kpi-label">Unrealized P&amp;L</div>
+      <div class="kpi-value mono" :class="cls(d.kpis.unrealized_pnl)" x-text="money(d.kpis.unrealized_pnl)"></div>
+      <div class="kpi-sub" :class="cls(d.kpis.total_return_pct)" x-text="pct(d.kpis.total_return_pct)"></div>
+    </div>
+    <div class="card kpi">
+      <div class="kpi-label">YTD Return</div>
+      <div class="kpi-value mono" :class="cls(d.kpis.ytd_pct)" x-text="d.kpis.ytd_pct === null ? '—' : pct(d.kpis.ytd_pct)"></div>
+      <div class="kpi-sub text-muted">Time-weighted</div>
+    </div>
+  </div>
+
+  <!-- Charts row -->
+  <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-5">
+    <div class="card lg:col-span-2">
+      <div class="flex items-center justify-between mb-2">
+        <span class="section-title">Portfolio value</span>
+        <div class="seg" x-show="d.class_history && d.class_history.series.length">
+          <span class="seg-item" :class="chartMode === 'total' ? 'seg-item-active' : ''" @click="setMode('total')">Total</span>
+          <span class="seg-item" :class="chartMode === 'class' ? 'seg-item-active' : ''" @click="setMode('class')">By class</span>
+        </div>
+      </div>
+      <div id="equityChart" style="height: 300px;"></div>
+    </div>
+    <div class="card">
+      <div class="flex items-center justify-between mb-2">
+        <span class="section-title">Asset allocation</span>
+        <span class="text-xs text-muted" x-text="d.allocation_by_class.length + ' classes'"></span>
+      </div>
+      <div id="allocChart" style="height: 300px;"></div>
+    </div>
+  </div>
+
+  <!-- Positions + transactions -->
+  <div class="grid grid-cols-1 xl:grid-cols-3 gap-4">
+    <div class="card xl:col-span-2 overflow-hidden">
+      <div class="flex items-center justify-between mb-3">
+        <span class="section-title">Positions</span>
+        <span class="text-xs text-muted">Local &amp; <span x-text="d.base_currency"></span></span>
+      </div>
+      <div class="overflow-x-auto">
+        <table class="tbl">
+          <thead><tr>
+            <th>Instrument</th><th class="num">Qty</th>
+            <th class="num">Price</th><th class="num">Value</th>
+            <th class="num">P&amp;L (<span x-text="d.base_currency"></span>)</th><th class="num">%</th>
+          </tr></thead>
+          <tbody>
+            <template x-for="p in d.positions" :key="p.symbol">
+              <tr>
+                <td>
+                  <div class="flex items-center gap-2">
+                    <span class="font-semibold" x-text="p.symbol"></span>
+                    <span class="chip chip-class" x-text="assetLabel(p.asset_class)"></span>
+                  </div>
+                  <div class="text-xs text-muted truncate max-w-[200px]" x-text="p.name"></div>
+                </td>
+                <td class="num text-muted" x-text="num(p.quantity, 2)"></td>
+                <!-- Price: original currency, base equivalent underneath when it differs -->
+                <td class="num">
+                  <div x-text="p.has_price ? moneyIn(p.price_local, p.currency) : '—'"></div>
+                  <div class="text-xs text-muted" x-show="p.is_fx && p.has_price" x-text="money(p.price)"></div>
+                </td>
+                <!-- Value: original currency, base equivalent underneath when it differs -->
+                <td class="num">
+                  <div class="font-semibold" x-text="moneyIn(p.value_local, p.currency)"></div>
+                  <div class="text-xs text-muted" x-show="p.is_fx" x-text="money(p.value)"></div>
+                </td>
+                <td class="num" :class="cls(p.pnl)" x-text="money(p.pnl)"></td>
+                <td class="num" :class="cls(p.pnl_pct)" x-text="pct(p.pnl_pct)"></td>
+              </tr>
+            </template>
+            <tr x-show="!d.positions.length"><td colspan="6" class="text-muted text-center py-6">No positions.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card overflow-hidden">
+      <div class="flex items-center justify-between mb-3">
+        <span class="section-title">Recent activity</span>
+        <span class="text-xs text-muted" x-text="d.transactions.length + ' transactions'"></span>
+      </div>
+      <div class="overflow-y-auto pr-1" style="max-height: 520px;">
+        <table class="tbl">
+          <thead class="sticky-head"><tr>
+            <th>Date</th><th>Symbol</th><th>Type</th><th class="num">Total</th>
+          </tr></thead>
+          <tbody>
+            <template x-for="(t, i) in d.transactions" :key="i">
+              <tr>
+                <td class="text-muted mono text-xs whitespace-nowrap" x-text="t.date"></td>
+                <td class="font-semibold" x-text="t.symbol"></td>
+                <td><span class="chip" :class="{'chip-buy': t.type=='buy', 'chip-sell': t.type=='sell'}" x-text="t.type"></span></td>
+                <td class="num whitespace-nowrap" x-text="moneyIn(t.total, t.currency)"></td>
+              </tr>
+            </template>
+            <tr x-show="!d.transactions.length"><td colspan="4" class="text-muted text-center py-6">No transactions.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script id="dashboard-data" type="application/json">{{ data | tojson }}</script>
+<script>
+  function dashboard() {
+    return {
+      d: JSON.parse(document.getElementById('dashboard-data').textContent),
+      money(v) { return FINAI.fmtMoney(v, this.d.base_currency); },
+      moneyIn(v, ccy) { return FINAI.fmtMoney(v, ccy || this.d.base_currency); },
+      num(v, dcml) { return FINAI.fmtNum(v, dcml); },
+      pct(v) { return FINAI.fmtPct(v); },
+      cls(v) { return FINAI.signClass(v); },
+      assetLabel(k) { return FINAI.assetClassLabel(k); },
+      assetLabel2(vm) { const v = (this.d.views || []).find(x => x.key === vm); return v ? v.label : ''; },
+      chartMode: 'total',
+      setMode(m) { this.chartMode = m; this.renderValueChart(); },
+      renderValueChart() {
+        const el = document.getElementById('equityChart');
+        if (this.chartMode === 'class' && this.d.class_history && this.d.class_history.series.length) {
+          FINAI.stackArea(el, this.d.class_history.dates, this.d.class_history.series, { ccy: this.d.base_currency });
+        } else {
+          FINAI.equityCurve(el, this.d.curve.dates, this.d.curve.values, this.d.base_currency);
+        }
+      },
+      init() {
+        this.renderValueChart();
+        const alloc = this.d.allocation_by_class;
+        FINAI.donut(document.getElementById('allocChart'), alloc.map(a => a.label), alloc.map(a => a.value));
+      },
+    };
+  }
+</script>
+{% endif %}
+{% endblock %}

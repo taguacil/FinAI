@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 import pandas as pd
 
 from ..data_providers.manager import DataProviderManager
+from . import asset_classes
 from .analyzer import PortfolioAnalyzer
 from .instrument_resolver import InstrumentResolver
 from .market_data_store import MarketDataStore, PriceEntry
@@ -264,6 +265,63 @@ class PortfolioManager:
         logging.info(
             f"Added {transaction_type} transaction: {quantity} {instrument.symbol} ({instrument.name}) @ {price}"
         )
+        return True
+
+    def modify_transaction(
+        self,
+        transaction_id: str,
+        quantity: Optional[Decimal] = None,
+        price: Optional[Decimal] = None,
+        timestamp: Optional[datetime] = None,
+        notes: Optional[str] = None,
+    ) -> bool:
+        """Modify fields of an existing transaction, then recalc & persist."""
+        if not self.current_portfolio:
+            logging.error("No portfolio loaded")
+            return False
+
+        transaction = next(
+            (t for t in self.current_portfolio.transactions if t.id == transaction_id),
+            None,
+        )
+        if transaction is None:
+            logging.error(f"Transaction not found: {transaction_id}")
+            return False
+
+        if quantity is not None:
+            transaction.quantity = Decimal(str(quantity))
+        if price is not None:
+            transaction.price = Decimal(str(price))
+        if timestamp is not None:
+            transaction.timestamp = timestamp
+        if notes is not None:
+            transaction.notes = notes
+
+        self.current_portfolio.recalculate_positions()
+        self.storage.save_portfolio(self.current_portfolio)
+        self._invalidate_portfolio_history()
+        logging.info(f"Modified transaction {transaction_id}")
+        return True
+
+    def delete_transaction(self, transaction_id: str) -> bool:
+        """Remove a transaction by id, then recalc positions & persist."""
+        if not self.current_portfolio:
+            logging.error("No portfolio loaded")
+            return False
+
+        transaction = next(
+            (t for t in self.current_portfolio.transactions if t.id == transaction_id),
+            None,
+        )
+        if transaction is None:
+            logging.error(f"Transaction not found: {transaction_id}")
+            return False
+
+        self.current_portfolio.transactions.remove(transaction)
+        self.current_portfolio.recalculate_positions()
+        self.storage.save_portfolio(self.current_portfolio)
+        self._invalidate_portfolio_history()
+        logging.info(f"Deleted transaction {transaction_id}")
         return True
 
     def buy_shares(
@@ -732,7 +790,16 @@ class PortfolioManager:
             if result and result.rate is not None:
                 return result.rate
 
-        # Fall back to current rate if historical not available
+        # Fall back to current rate if historical not available. This keeps the
+        # position in the valuation rather than silently dropping it, but the
+        # value for `as_of` may be inaccurate — surface it so a historical
+        # refresh (which seeds the FX cache) can fix it.
+        logging.warning(
+            "No historical FX rate for %s->%s on %s; falling back to current "
+            "rate (that day's value may be inaccurate). Run a historical "
+            "refresh to seed FX rates.",
+            from_currency.value, to_currency.value, as_of,
+        )
         return self._get_exchange_rate(from_currency, to_currency)
 
     def get_portfolio_value(self, target_date: Optional[date] = None, use_history: bool = True) -> Decimal:
@@ -794,6 +861,30 @@ class PortfolioManager:
 
         return pd.DataFrame()
 
+    def get_value_history_by_type(
+        self,
+        start_date: date,
+        end_date: date,
+        types: Optional[List[str]] = None,
+        target_currency: Optional[Currency] = None,
+    ) -> pd.DataFrame:
+        """Per-instrument-type positions value history in a single replay.
+
+        Returns a DataFrame indexed by date with one column per instrument type
+        (positions market value, cash excluded). Use this to build per-class
+        bands without replaying the whole history once per class.
+        """
+        if not self.current_portfolio:
+            return pd.DataFrame()
+
+        history = self._get_portfolio_history()
+        if not history:
+            return pd.DataFrame()
+
+        return history.get_value_history_by_type(
+            start_date, end_date, types=types, target_currency=target_currency
+        )
+
     def get_portfolio_history_filtered(
         self,
         start_date: date,
@@ -805,20 +896,23 @@ class PortfolioManager:
 
         Supports different view modes:
         - "all": All assets (default behavior, includes all cash)
-        - "equities_only": Stocks + ETFs only, with attributed cash from equity transactions
-        - "fixed_income_only": Bonds only, with attributed cash from bond transactions
+        - "equities_only": Stocks + ETFs, with attributed cash from equity transactions
+        - "fixed_income_only": Bonds, with attributed cash from bond transactions
+        - "structured_only": Structured products (RCs/CLNs/notes), attributed cash
+        - "other_only": Everything else (crypto, options, futures, …), attributed cash
 
-        For filtered views, attributed cash tracks realized gains/losses from sales
-        and dividends within that category, excluding unrelated transactions.
+        For filtered views the series is the market value of just that class's
+        positions; pair it with get_category_cash_flows_by_day so time-weighted
+        returns reflect price/coupon performance rather than capital deployed.
 
         Args:
             start_date: Start date
             end_date: End date
-            view_mode: View mode ("all", "equities_only", "fixed_income_only")
+            view_mode: View mode (see list above)
             target_currency: Currency to express values in. Defaults to portfolio base currency.
 
         Returns:
-            DataFrame with columns: total_value, positions_value, cash_value/attributed_cash
+            DataFrame with columns: total_value, positions_value (+ cash_value for "all")
         """
         if not self.current_portfolio:
             return pd.DataFrame()
@@ -835,29 +929,58 @@ class PortfolioManager:
                 include_cash=True,
                 target_currency=target_currency,
             )
-        elif view_mode == "equities_only":
-            # Equities with attributed cash (realized gains from equity transactions)
-            return history.get_value_history_with_attribution(
+
+        # A view_mode is either a legacy category alias ("equities_only", which
+        # merges stocks + ETFs) or a concrete instrument type ("stock", "etf",
+        # "bond", ...). Per-type views mirror the asset-allocation breakdown.
+        # Either way the series is the market value of just that class's
+        # positions (no cash); returns are made currency- and flow-aware by the
+        # caller via get_category_cash_flows_by_day (buys/sells are external).
+        category = asset_classes.category_for_view_mode(view_mode)
+        if category is not None:
+            return history.get_category_value_history(
                 start_date, end_date,
-                category="equity",
+                category=category,
                 target_currency=target_currency,
             )
-        elif view_mode == "fixed_income_only":
-            # Fixed income with attributed cash
-            return history.get_value_history_with_attribution(
-                start_date, end_date,
-                category="fixed_income",
-                target_currency=target_currency,
+        # Concrete instrument type: positions of that type only, no cash.
+        return history.get_value_history(
+            start_date, end_date,
+            instrument_types=[view_mode],
+            include_cash=False,
+            target_currency=target_currency,
+        )
+
+    def get_category_cash_flows_by_day(
+        self,
+        start_date: date,
+        end_date: date,
+        view_mode: str,
+        target_currency: Optional[Currency] = None,
+    ) -> Dict[date, Decimal]:
+        """Net buy/sell capital flows for a class view, per day, in target currency.
+
+        Used to make time-weighted returns for a single-class analytics view
+        reflect performance rather than capital deployment. Returns an empty dict
+        for the "all" view mode (which uses external deposit/withdrawal flows).
+        """
+        if view_mode == "all" or not self.current_portfolio:
+            return {}
+        history = self._get_portfolio_history()
+        if not history:
+            return {}
+        # A view_mode is either a legacy category alias ("equities_only") or a
+        # concrete instrument type ("stock", "etf", "bond", ...). The latter
+        # gives per-type filters that mirror the asset-allocation breakdown.
+        category = asset_classes.category_for_view_mode(view_mode)
+        if category is not None:
+            return history.get_category_cash_flows_by_day(
+                start_date, end_date, category=category, target_currency=target_currency
             )
-        else:
-            # Unknown mode, fall back to all
-            logging.warning(f"Unknown view_mode '{view_mode}', falling back to 'all'")
-            return history.get_value_history(
-                start_date, end_date,
-                instrument_types=None,
-                include_cash=True,
-                target_currency=target_currency,
-            )
+        return history.get_category_cash_flows_by_day(
+            start_date, end_date, target_currency=target_currency,
+            instrument_type=view_mode,
+        )
 
     def _fetch_and_store_prices(
         self,
@@ -1631,13 +1754,17 @@ class PortfolioManager:
         return self.analyzer.get_performance_metrics(self.current_portfolio, days, portfolio_history=history)
 
     def get_external_cash_flows_by_day(
-        self, start_date: date, end_date: date
+        self, start_date: date, end_date: date,
+        target_currency: Optional[Currency] = None,
     ) -> Dict[date, Decimal]:
-        """Compute net external cash flows (deposits/withdrawals) per day in base currency."""
+        """Compute net external cash flows (deposits/withdrawals) per day.
+
+        Denominated in ``target_currency`` (defaults to the portfolio base).
+        """
         if not self.current_portfolio:
             return {}
         return self.analyzer.get_external_cash_flows_by_day(
-            self.current_portfolio, start_date, end_date
+            self.current_portfolio, start_date, end_date, target_currency=target_currency
         )
 
     def get_cash_fx_summary(self) -> Dict[Currency, Dict[str, Decimal]]:
