@@ -843,12 +843,21 @@ class AppContext:
         strategy_specs = strategy_specs or ["hrp", "equal_weight", "buy_and_hold"]
         # Available holdings (symbol + name) and strategies drive the pickers.
         available_universe = []
+        held_keys = set()
         for sym, pos in portfolio.positions.items():
             if pos.quantity == 0:
                 continue
+            held_keys.add(sym)
             dps = getattr(pos.instrument, "data_provider_symbol", None) or sym
             available_universe.append({"symbol": dps, "name": pos.instrument.name or sym})
         available_universe.sort(key=lambda a: a["symbol"])
+        # Discoverable candidates: locally stored symbols not currently held, so
+        # the user can add them to the backtest universe without typing.
+        try:
+            stored = set(pm.market_data_store.get_symbols())
+        except Exception:
+            stored = set()
+        candidate_universe = sorted(stored - held_keys)
         params = {
             "symbols": symbols, "start": start.isoformat(), "end": end.isoformat(),
             "initial_capital": initial_capital, "rebalance_frequency": rebalance_frequency,
@@ -856,6 +865,7 @@ class AppContext:
             "lookback_days": lookback_days, "transaction_cost_bps": transaction_cost_bps,
             "risk_free_rate": risk_free_rate,
             "available_universe": available_universe,
+            "candidate_universe": candidate_universe,
             "available_strategies": ["hrp", "max_sharpe", "min_volatility",
                                      "equal_weight", "buy_and_hold"],
         }

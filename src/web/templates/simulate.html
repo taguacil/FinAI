@@ -52,6 +52,19 @@
           <input type="text" x-model="customSym" @keydown.enter.prevent="addCustom()" class="input input-sm mono flex-1" placeholder="Add symbol (e.g. AAPL)" />
           <button type="button" class="btn btn-sm" @click="addCustom()">Add</button>
         </div>
+        <template x-if="allCandidates.length">
+          <div class="mt-3">
+            <label class="label mb-1">Add from stored universe (not held)</label>
+            <div class="pick-grid">
+              <template x-for="s in allCandidates" :key="s">
+                <label class="pick" :class="uni.includes(s) ? 'pick-on' : ''">
+                  <input type="checkbox" class="hidden" :checked="uni.includes(s)" @change="toggle(uni, s)" />
+                  <span class="mono" x-text="s"></span>
+                </label>
+              </template>
+            </div>
+          </div>
+        </template>
       </div>
       <div>
         <label class="label">Strategies</label>
@@ -315,7 +328,7 @@
       mc: JSON.parse(document.getElementById('mc-data').textContent),
       detail: JSON.parse(document.getElementById('sim-detail-data').textContent),
       detailKind: {{ (sim_detail.kind if sim_detail else '') | tojson }},
-      uni: [], allUni: [], strat: [], allStrat: [], customSym: '',
+      uni: [], allUni: [], allCandidates: [], strat: [], allStrat: [], customSym: '',
       toggle(arr, v) { const i = arr.indexOf(v); if (i === -1) arr.push(v); else arr.splice(i, 1); },
       addCustom() {
         const s = (this.customSym || '').trim().toUpperCase();
@@ -330,6 +343,7 @@
       init() {
         const p = (this.bt && this.bt.params) || {};
         this.allUni = p.available_universe || [];
+        this.allCandidates = p.candidate_universe || [];
         this.allStrat = p.available_strategies || [];
         this.uni = (p.symbols || []).slice();
         this.strat = (p.strategy_specs || []).slice();
