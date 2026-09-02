@@ -460,6 +460,10 @@ class PortfolioHistory:
         # Get initial state once
         state = self._replay_transactions_to_date(start_date)
 
+        # Warn at most once per symbol when FX conversion is impossible, so a
+        # missing rate never silently drops a position without a trace.
+        warned_fx: set = set()
+
         current = start_date
         while current <= end_date:
             # Only re-replay when we hit a transaction date (state changed)
@@ -489,6 +493,14 @@ class PortfolioHistory:
                         rate = self._get_fx_rate(pos.currency, base, as_of=current)
                         if rate:
                             positions_value += pv * rate
+                        elif symbol not in warned_fx:
+                            warned_fx.add(symbol)
+                            logging.warning(
+                                "No FX rate for %s->%s around %s; excluding %s "
+                                "from value history. Run a historical refresh "
+                                "to seed FX rates.",
+                                pos.currency.value, base.value, current, symbol,
+                            )
 
             total_value = cash_value + positions_value
 
@@ -757,6 +769,9 @@ class PortfolioHistory:
 
         current = start_date
 
+        # Warn at most once per symbol when FX conversion is impossible.
+        warned_fx: set = set()
+
         while current <= end_date:
             # Process transactions for this date
             for txn in txn_by_date.get(current, []):
@@ -787,6 +802,15 @@ class PortfolioHistory:
                         rate = self._get_fx_rate(pos.currency, base, as_of=current)
                         if rate:
                             positions_value += pv * rate
+                        elif symbol not in warned_fx:
+                            warned_fx.add(symbol)
+                            logging.warning(
+                                "No FX rate for %s->%s around %s; excluding %s "
+                                "from %s attribution. Run a historical refresh "
+                                "to seed FX rates.",
+                                pos.currency.value, base.value, current,
+                                symbol, category,
+                            )
 
             # Get attributed cash for this category
             cash_value = attributed_cash.get_category_total(category, base, fx_rate_for_current)

@@ -170,6 +170,39 @@ class AppContext:
         earliest = min(t["timestamp"].date() for t in txns)
         return min(earliest, floor) if earliest < floor else earliest
 
+    def _ytd_return_pct(self, target_ccy: Optional["Currency"]) -> Optional[float]:
+        """Year-to-date time-weighted return (%) in the given display currency.
+
+        Mirrors the base-currency TWR that PortfolioManager.get_ytd_performance
+        computes, but honours ``target_currency`` so the figure changes when the
+        user switches display currency. Returns None if history is insufficient.
+        """
+        pm = self.manager
+        try:
+            today = date.today()
+            ystart = date(today.year, 1, 1)
+            ydf = pm.get_portfolio_history_filtered(
+                ystart, today, view_mode="all", target_currency=target_ccy
+            )
+            if (not isinstance(ydf, pd.DataFrame) or ydf.empty
+                    or "total_value" not in ydf or len(ydf) < 2):
+                return None
+            yflows = {
+                d: float(v)
+                for d, v in pm.get_external_cash_flows_by_day(ystart, today).items()
+            }
+            yreturns = self.metrics.calculate_returns_from_df(
+                ydf, "total_value", yflows
+            ) or []
+            if not yreturns:
+                return None
+            twr = 1.0
+            for r in yreturns:
+                twr *= (1.0 + r)
+            return (twr - 1.0) * 100.0
+        except Exception:
+            return None
+
     def dashboard(self) -> Dict[str, Any]:
         """Everything the dashboard page needs."""
         pm = self.manager
@@ -428,8 +461,10 @@ class AppContext:
             "total_days": len(rp),
         }
 
-        ytd = pm.get_ytd_performance()
-        ytd_pct = (ytd.get("portfolio") or {}).get("ytd_pct")
+        # YTD in the *display* currency. pm.get_ytd_performance() only computes
+        # it in the base currency, so it would report an identical number in
+        # every currency view; recompute the TWR from a currency-aware history.
+        ytd_pct = self._ytd_return_pct(target_ccy)
 
         metrics = {
             "total_return": _pct(m.get("total_return")),
@@ -1225,6 +1260,56 @@ class AppContext:
 
         store.ensure_prices(symbol, start, end, data_provider=_fetch)
 
+    def _ensure_fx_rates(self) -> None:
+        """Seed the persistent FX cache for every currency pair the portfolio
+        can need, across the full history window.
+
+        Like _ensure_benchmark, this is the explicit fetch step: analytics only
+        ever *reads* FX rates from the cache, so if the cache is incomplete a
+        currency-converted history silently falls back to the current rate (or,
+        worse, drops positions). Seeding here — during a historical refresh —
+        keeps currency conversion seamless for any display currency the UI
+        offers, offline, afterwards.
+        """
+        pm = self.manager
+        portfolio = pm.current_portfolio
+        dm = getattr(pm, "data_manager", None)
+        if portfolio is None or dm is None:
+            return
+        if not hasattr(dm, "get_historical_fx_rates_range"):
+            return
+
+        # Currencies in play = base + every position/cash native currency +
+        # every display currency the UI exposes (so switching stays seamless).
+        currencies = {portfolio.base_currency}
+        for pos in portfolio.positions.values():
+            if getattr(pos, "currency", None):
+                currencies.add(pos.currency)
+        try:
+            currencies.update(portfolio.cash_balances.keys())
+        except Exception:
+            pass
+        currencies.update(Currency)
+
+        start = self._history_start()
+        end = date.today()
+
+        # get_historical_fx_rates_range stores the pair and the cache inverts on
+        # read, so one unordered pair suffices.
+        seen: set = set()
+        for a in currencies:
+            for b in currencies:
+                if a == b:
+                    continue
+                key = frozenset((a.value, b.value))
+                if key in seen:
+                    continue
+                seen.add(key)
+                try:
+                    dm.get_historical_fx_rates_range(a, b, start, end)
+                except Exception:
+                    continue
+
     def refresh_prices(self, historical: bool = False) -> Dict[str, Any]:
         """Fetch live prices (temporarily going online), then return to cache-only."""
         pm = self.manager
@@ -1238,6 +1323,9 @@ class AppContext:
                 # Seed the benchmark series into the store as part of the same
                 # explicit fetch, so analytics/backtest can read it offline.
                 self._ensure_benchmark("SPY")
+                # Seed historical FX rates too, so currency-converted analytics
+                # stay accurate and seamless offline for any display currency.
+                self._ensure_fx_rates()
             else:
                 res = pm.update_current_prices()
             updated = sum(1 for v in (res or {}).values() if v)

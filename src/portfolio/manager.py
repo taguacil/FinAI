@@ -789,7 +789,16 @@ class PortfolioManager:
             if result and result.rate is not None:
                 return result.rate
 
-        # Fall back to current rate if historical not available
+        # Fall back to current rate if historical not available. This keeps the
+        # position in the valuation rather than silently dropping it, but the
+        # value for `as_of` may be inaccurate — surface it so a historical
+        # refresh (which seeds the FX cache) can fix it.
+        logging.warning(
+            "No historical FX rate for %s->%s on %s; falling back to current "
+            "rate (that day's value may be inaccurate). Run a historical "
+            "refresh to seed FX rates.",
+            from_currency.value, to_currency.value, as_of,
+        )
         return self._get_exchange_rate(from_currency, to_currency)
 
     def get_portfolio_value(self, target_date: Optional[date] = None, use_history: bool = True) -> Decimal:
