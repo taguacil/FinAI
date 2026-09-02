@@ -155,12 +155,18 @@ class AppContext:
         ytd = pm.get_ytd_performance()
         ytd_pct = (ytd.get("portfolio") or {}).get("ytd_pct")
 
-        # equity curve
-        start = self._history_start()
+        # equity curve — always show from Jan 1 2024 (or the first transaction,
+        # whichever is later, to avoid a long flat-zero prefix).
+        floor_2024 = date(2024, 1, 1)
+        txns_all = pm.get_transaction_history()
+        earliest = min((t["timestamp"].date() for t in txns_all), default=floor_2024)
+        start = max(floor_2024, earliest)
         hist = pm.get_portfolio_history(start, date.today())
         curve = {"dates": [], "values": []}
+        dates_idx = []
         if isinstance(hist, pd.DataFrame) and not hist.empty and "total_value" in hist:
-            curve["dates"] = [d.strftime("%Y-%m-%d") for d in hist.index]
+            dates_idx = list(hist.index)
+            curve["dates"] = [d.strftime("%Y-%m-%d") for d in dates_idx]
             curve["values"] = [float(v) for v in hist["total_value"].tolist()]
 
         # instrument type (asset class) per symbol, from the live position objects
@@ -168,6 +174,32 @@ class AppContext:
             sym: pos.instrument.instrument_type.value
             for sym, pos in portfolio.positions.items()
         }
+
+        # per-asset-class value history (cumulating stack). One band per
+        # instrument type present, plus cash — together they sum to net worth.
+        class_history = {"dates": curve["dates"], "series": []}
+        if dates_idx:
+            types_present = sorted({
+                pos.instrument.instrument_type.value
+                for pos in portfolio.positions.values() if pos.quantity != 0
+            })
+            for t in types_present:
+                dfc = pm.get_portfolio_history(
+                    start, date.today(), instrument_types=[t], include_cash=False
+                )
+                if isinstance(dfc, pd.DataFrame) and "positions_value" in dfc and not dfc.empty:
+                    s = dfc["positions_value"].reindex(dates_idx).fillna(0.0)
+                    vals = [float(v) for v in s.tolist()]
+                    if any(v > 0 for v in vals):
+                        class_history["series"].append({
+                            "label": _ASSET_CLASS_LABELS.get(t, t.title()),
+                            "values": vals,
+                        })
+            # cash band from the full-history cash column
+            if "cash_value" in hist:
+                cash_vals = [float(v) for v in hist["cash_value"].reindex(dates_idx).fillna(0.0).tolist()]
+                if any(v > 0 for v in cash_vals):
+                    class_history["series"].append({"label": "Cash", "values": cash_vals})
 
         # positions (JSON-safe), sorted by value desc.
         # We surface BOTH the instrument's original currency (price/value as
@@ -246,6 +278,7 @@ class AppContext:
                 "ytd_pct": ytd_pct,
             },
             "curve": curve,
+            "class_history": class_history,
             "positions": pos_rows,
             "allocation": alloc,
             "allocation_by_class": alloc_by_class,

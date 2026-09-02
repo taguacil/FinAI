@@ -101,6 +101,28 @@ const FINAI = (() => {
     }), config);
   }
 
+  // Stacked (cumulating) area chart — bands sum to the total at each x.
+  // series = [{ label, values, color? }]; x shared. Uses fixed asset-class
+  // colours when the label is a known class.
+  function stackArea(el, x, series, opts = {}) {
+    if (!x || !x.length || !series || !series.length) { noData(el, opts.empty); return; }
+    const ccy = opts.ccy || 'USD';
+    const traces = series.map((s, i) => ({
+      x, y: s.values, name: s.label, type: 'scatter', mode: 'lines',
+      stackgroup: 'one',
+      line: { width: 0.8, color: s.color || ASSET_COLORS[s.label] || COLORWAY[i % COLORWAY.length], shape: 'spline', smoothing: 0.3 },
+      fillcolor: s.color || ASSET_COLORS[s.label] || COLORWAY[i % COLORWAY.length],
+      hovertemplate: `%{x}<br>${s.label}: ${ccy} %{y:,.0f}<extra></extra>`,
+    }));
+    Plotly.newPlot(el, traces, baseLayout({
+      showlegend: true,
+      legend: { orientation: 'h', y: 1.12, x: 0, font: { color: MUTED, size: 11 } },
+      xaxis: { gridcolor: 'rgba(0,0,0,0)', linecolor: BORDER },
+      yaxis: { gridcolor: GRID, zerolinecolor: GRID, tickprefix: '' },
+      margin: { t: 24, r: 12, b: 36, l: 60 },
+    }), config);
+  }
+
   // Filled drawdown area (values are <= 0, e.g. percent below peak).
   function drawdown(el, x, values, opts = {}) {
     if (!x || !x.length) { noData(el, opts.empty); return; }
@@ -196,7 +218,7 @@ const FINAI = (() => {
 
   return {
     baseLayout, config, fmtMoney, fmtNum, fmtPct, signClass, assetClassLabel,
-    equityCurve, donut, lineMulti, drawdown, histogram, barsH, scatter, fanChart,
+    equityCurve, donut, lineMulti, stackArea, drawdown, histogram, barsH, scatter, fanChart,
     COLORWAY, ACCENT,
   };
 })();
