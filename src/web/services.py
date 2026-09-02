@@ -7,6 +7,7 @@ this only adapts the in-process managers to the web layer.
 
 from __future__ import annotations
 
+import json
 import math
 import os
 from datetime import date, datetime, timedelta
@@ -24,6 +25,7 @@ from src.portfolio.optimizer import (
     OptimizationObjective,
     PortfolioOptimizer,
 )
+from src.portfolio.simulation_store import SimulationStore
 from src.portfolio.storage import FileBasedStorage
 from src.services.market_data_service import MarketDataService
 from src.utils.metrics import FinancialMetricsCalculator
@@ -93,6 +95,9 @@ class AppContext:
         self.metrics = FinancialMetricsCalculator(
             data_provider, market_data_store=self.manager.market_data_store
         )
+        # Persist web simulation runs so past backtests / projections can be
+        # revisited (and re-rendered) without recomputation.
+        self.sim_store = SimulationStore(data_dir=data_dir)
 
     def set_online(self, online: bool) -> None:
         """Toggle live data providers (used by explicit price-refresh actions)."""
@@ -702,7 +707,7 @@ class AppContext:
             except Exception:
                 benchmark = None
 
-        return {
+        out = {
             "empty": False, "ran": True, "base_currency": base_ccy, "params": params,
             "window": {"start": result.price_start.isoformat() if result.price_start else None,
                        "end": result.price_end.isoformat() if result.price_end else None},
@@ -711,6 +716,16 @@ class AppContext:
             "drawdown": {"dates": master_dates, "series": dd_series},
             "metrics": metrics_rows,
         }
+        best = max(metrics_rows, key=lambda m: (m.get("total_return") or float("-inf")),
+                   default=None)
+        headline = (f"{best['name']} {best['total_return']:+.1f}%"
+                    if best and best.get("total_return") is not None else "—")
+        self._save_simulation(
+            kind="backtest",
+            label=f"{len(series)} strategies · {', '.join(symbols)}",
+            headline=headline, params=params, result=out,
+        )
+        return out
 
     # -- simulate: Monte Carlo ----------------------------------------------
 
@@ -847,7 +862,7 @@ class AppContext:
         summary["probability_of_loss"] = _num(result.probability_of_loss)
         summary["probability_of_doubling"] = _num(result.probability_of_doubling)
 
-        return {
+        out = {
             "empty": False, "ran": True, "base_currency": base_ccy, "params": params,
             "strategies": self.mc_strategies(),
             "basis": basis,
@@ -857,6 +872,82 @@ class AppContext:
             "final_values": clean_list(result.final_values),
             "summary": summary,
         }
+        median = summary.get("median_final_value")
+        headline = (f"median {median:,.0f} {base_ccy}"
+                    if median is not None else "—")
+        self._save_simulation(
+            kind="montecarlo",
+            label=f"{basis['label']} · {projection_years:g}y · {monte_carlo_runs} runs"
+            if basis else f"{projection_years:g}y · {monte_carlo_runs} runs",
+            headline=headline, params=params, result=out, random_seed=42,
+        )
+        return out
+
+    # -- simulate: history --------------------------------------------------
+
+    _SIM_TOOLS = {"backtest": "web_backtest", "montecarlo": "web_monte_carlo"}
+
+    def _save_simulation(self, kind: str, label: str, headline: str,
+                         params: Dict[str, Any], result: Dict[str, Any],
+                         random_seed: Optional[int] = None) -> None:
+        """Persist a web simulation run (best-effort; never breaks a page load)."""
+        portfolio = self.manager.current_portfolio
+        try:
+            self.sim_store.save(
+                tool=self._SIM_TOOLS.get(kind, kind),
+                inputs={"kind": kind, "label": label, "headline": headline, "params": params},
+                output=json.dumps(result, default=str),
+                portfolio_id=portfolio.id if portfolio else None,
+                portfolio_name=portfolio.name if portfolio else None,
+                random_seed=random_seed,
+            )
+        except Exception:  # noqa: BLE001 — persistence must not break the run
+            pass
+
+    def simulation_history(self, limit: int = 50) -> List[Dict[str, Any]]:
+        """Recent web simulation runs (newest first) for the current portfolio."""
+        portfolio = self.manager.current_portfolio
+        pid = portfolio.id if portfolio else None
+        rows: List[Dict[str, Any]] = []
+        for rec in self.sim_store.list(portfolio_id=pid, limit=limit):
+            inp = rec.get("inputs") or {}
+            if inp.get("kind") not in self._SIM_TOOLS:
+                continue
+            rows.append({
+                "id": rec.get("id"),
+                "created_at": rec.get("created_at"),
+                "kind": inp.get("kind"),
+                "label": inp.get("label") or "",
+                "headline": inp.get("headline") or "",
+            })
+        return rows
+
+    def get_simulation(self, sim_id: str) -> Optional[Dict[str, Any]]:
+        """Load a saved run and parse its structured result for re-rendering."""
+        rec = self.sim_store.get(sim_id)
+        if not rec:
+            return None
+        inp = rec.get("inputs") or {}
+        kind = inp.get("kind")
+        if kind not in self._SIM_TOOLS:
+            return None
+        try:
+            result = json.loads(rec.get("output") or "null")
+        except (ValueError, TypeError):
+            result = None
+        return {
+            "id": rec.get("id"),
+            "created_at": rec.get("created_at"),
+            "kind": kind,
+            "label": inp.get("label") or "",
+            "headline": inp.get("headline") or "",
+            "result": result,
+        }
+
+    def delete_simulation(self, sim_id: str) -> Dict[str, Any]:
+        """Delete a saved run."""
+        ok = self.sim_store.delete(sim_id)
+        return {"ok": ok, "error": None if ok else "Run not found."}
 
 
     # -- data & settings -----------------------------------------------------

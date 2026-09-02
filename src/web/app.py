@@ -135,6 +135,8 @@ def simulate(
     mc_run: int = 0, scenario: str = "likely", years: float = 5.0,
     runs: int = 1000, deposit: float = 0.0, withdrawal: float = 0.0,
     mc_strategy: Optional[str] = None,
+    # history
+    sim: Optional[str] = None,
 ):
     ctx, base = _base_context(request, "simulate", portfolio)
     today = date.today()
@@ -142,7 +144,9 @@ def simulate(
     strat_specs = _csv(strategies) or ["hrp", "equal_weight", "buy_and_hold"]
     # strategies come in as UPPER from _csv; normalize to spec keys
     strat_specs = [s.lower() for s in strat_specs]
-    base["tab"] = "montecarlo" if tab == "montecarlo" else "backtest"
+    base["tab"] = tab if tab in ("montecarlo", "history") else "backtest"
+    base["history"] = ctx.simulation_history()
+    base["sim_detail"] = ctx.get_simulation(sim) if sim else None
     base["backtest"] = ctx.backtest(
         run=bool(bt_run), symbols=universe,
         start=_parse_date(start, today - timedelta(days=730)),
@@ -157,6 +161,15 @@ def simulate(
         strategy=(mc_strategy or None), lookback_days=lookback_days, risk_free_rate=rf,
     )
     return templates.TemplateResponse("simulate.html", base)
+
+
+@app.post("/simulate/delete")
+def simulate_delete(portfolio: Optional[str] = Form(None), sim: str = Form(...)):
+    ctx = get_context()
+    ctx.ensure_loaded(portfolio)
+    ctx.delete_simulation(sim)
+    return RedirectResponse(
+        url=f"/simulate?portfolio={portfolio or ''}&tab=history", status_code=303)
 
 
 @app.get("/data", response_class=HTMLResponse)

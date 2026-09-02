@@ -17,6 +17,8 @@
          class="seg-item {{ 'seg-item-active' if tab == 'backtest' else '' }}">Backtest</a>
       <a href="/simulate?portfolio={{ active_portfolio_id or '' }}&tab=montecarlo"
          class="seg-item {{ 'seg-item-active' if tab == 'montecarlo' else '' }}">Monte Carlo</a>
+      <a href="/simulate?portfolio={{ active_portfolio_id or '' }}&tab=history"
+         class="seg-item {{ 'seg-item-active' if tab == 'history' else '' }}">History</a>
     </div>
   </div>
 
@@ -129,7 +131,7 @@
     </div>
   {% endif %}
 
-  {% else %}
+  {% elif tab == 'montecarlo' %}
   <!-- ============ MONTE CARLO ============ -->
   <form method="get" action="/simulate" class="card mb-5">
     <input type="hidden" name="portfolio" value="{{ active_portfolio_id or '' }}" />
@@ -208,17 +210,111 @@
       </div>
     </div>
   {% endif %}
+
+  {% else %}
+  <!-- ============ HISTORY ============ -->
+  {% if sim_detail %}
+    {% set d = sim_detail %}
+    <div class="flex items-center justify-between mb-4 flex-wrap gap-2">
+      <div>
+        <a href="/simulate?portfolio={{ active_portfolio_id or '' }}&tab=history"
+           class="text-xs text-muted hover:text-white inline-flex items-center gap-1">
+          <i data-lucide="arrow-left" class="h-3.5 w-3.5"></i> Back to history</a>
+        <div class="section-title mt-1">{{ d.label }}</div>
+      </div>
+      <div class="flex items-center gap-3">
+        <span class="chip {{ 'chip-buy' if d.kind == 'backtest' else '' }}">{{ 'Backtest' if d.kind == 'backtest' else 'Monte Carlo' }}</span>
+        <span class="text-xs text-muted mono">{{ d.created_at[:16].replace('T', ' ') }}</span>
+      </div>
+    </div>
+    {% if not d.result %}
+      <div class="card"><p class="neg">This run's data could not be loaded.</p></div>
+    {% elif d.kind == 'backtest' %}
+      <div class="card mb-4">
+        <div class="section-title mb-2">Equity curves</div>
+        <div id="simChart" style="height: 320px;"></div>
+      </div>
+      <div class="card overflow-hidden">
+        <div class="section-title mb-3">Metrics</div>
+        <div class="overflow-x-auto">
+          <table class="tbl">
+            <thead><tr><th>Strategy</th><th class="num">Final</th><th class="num">Return</th><th class="num">CAGR</th><th class="num">Vol</th><th class="num">Sharpe</th><th class="num">Max DD</th></tr></thead>
+            <tbody>
+              <template x-for="(m, i) in (detail.metrics || [])" :key="i">
+                <tr>
+                  <td class="font-semibold" x-text="m.name"></td>
+                  <td class="num" x-text="money(m.final_value)"></td>
+                  <td class="num" :class="cls(m.total_return)" x-text="pct(m.total_return)"></td>
+                  <td class="num" :class="cls(m.cagr)" x-text="pct(m.cagr)"></td>
+                  <td class="num" x-text="m.volatility === null ? '—' : num(m.volatility) + '%'"></td>
+                  <td class="num" x-text="num(m.sharpe)"></td>
+                  <td class="num neg" x-text="m.max_drawdown === null ? '—' : '-' + num(Math.abs(m.max_drawdown)) + '%'"></td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    {% else %}
+      <div class="card mb-4">
+        <div class="section-title mb-2">Projected value</div>
+        <div id="simChart" style="height: 320px;"></div>
+      </div>
+      <div class="card">
+        <div class="section-title mb-3">Summary</div>
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <div class="metric"><span class="metric-label">Median final</span><span class="metric-value mono" x-text="money(detail.summary.median_final_value)"></span></div>
+          <div class="metric"><span class="metric-label">Mean final</span><span class="metric-value mono" x-text="money(detail.summary.mean_final_value)"></span></div>
+          <div class="metric"><span class="metric-label">VaR 95</span><span class="metric-value mono" x-text="money(detail.summary.var_95)"></span></div>
+          <div class="metric"><span class="metric-label">P(loss)</span><span class="metric-value mono" x-text="pctRaw(detail.summary.probability_of_loss)"></span></div>
+        </div>
+      </div>
+    {% endif %}
+  {% else %}
+    {% if not history %}
+      <div class="card text-center py-16"><p class="text-muted">No saved runs yet. Run a backtest or Monte Carlo projection — each is stored here automatically.</p></div>
+    {% else %}
+    <div class="card overflow-hidden">
+      <table class="tbl">
+        <thead><tr><th>When</th><th>Type</th><th>Run</th><th>Result</th><th></th></tr></thead>
+        <tbody>
+          {% for r in history %}
+          <tr>
+            <td class="mono text-xs">{{ r.created_at[:16].replace('T', ' ') }}</td>
+            <td><span class="chip {{ 'chip-buy' if r.kind == 'backtest' else '' }}">{{ 'Backtest' if r.kind == 'backtest' else 'Monte Carlo' }}</span></td>
+            <td>{{ r.label }}</td>
+            <td class="mono text-xs">{{ r.headline }}</td>
+            <td class="num">
+              <div class="flex items-center justify-end gap-2">
+                <a href="/simulate?portfolio={{ active_portfolio_id or '' }}&tab=history&sim={{ r.id }}" class="btn btn-sm">View</a>
+                <form method="post" action="/simulate/delete" onsubmit="return confirm('Delete this saved run?');">
+                  <input type="hidden" name="portfolio" value="{{ active_portfolio_id or '' }}" />
+                  <input type="hidden" name="sim" value="{{ r.id }}" />
+                  <button type="submit" class="btn btn-sm" title="Delete"><i data-lucide="trash-2" class="h-3.5 w-3.5"></i></button>
+                </form>
+              </div>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+  {% endif %}
   {% endif %}
 </div>
 
 <script id="bt-data" type="application/json">{{ backtest | tojson }}</script>
 <script id="mc-data" type="application/json">{{ montecarlo | tojson }}</script>
+<script id="sim-detail-data" type="application/json">{{ (sim_detail.result if sim_detail else None) | tojson }}</script>
 <script>
   function simulate() {
     return {
       tab: {{ tab | tojson }},
       bt: JSON.parse(document.getElementById('bt-data').textContent),
       mc: JSON.parse(document.getElementById('mc-data').textContent),
+      detail: JSON.parse(document.getElementById('sim-detail-data').textContent),
+      detailKind: {{ (sim_detail.kind if sim_detail else '') | tojson }},
       uni: [], allUni: [], strat: [], allStrat: [], customSym: '',
       toggle(arr, v) { const i = arr.indexOf(v); if (i === -1) arr.push(v); else arr.splice(i, 1); },
       addCustom() {
@@ -250,6 +346,17 @@
           if (this.tab === 'montecarlo' && this.mc.ran && !this.mc.error) {
             FINAI.fanChart(document.getElementById('mcFan'), this.mc.dates, this.mc.bands, this.mc.base_currency);
             FINAI.histogram(document.getElementById('mcHist'), this.mc.final_values, { bins: 40 });
+          }
+          if (this.tab === 'history' && this.detail) {
+            const el = document.getElementById('simChart');
+            if (el && this.detailKind === 'backtest' && this.detail.equity) {
+              const e = this.detail.equity;
+              const series = e.series.map((s, i) => ({ name: s.name, y: s.values, color: FINAI.COLORWAY[i % FINAI.COLORWAY.length] }));
+              if (e.benchmark) series.push({ name: e.benchmark.name, y: e.benchmark.values, color: '#5E666F', dash: 'dot' });
+              FINAI.lineMulti(el, e.dates, series, { hoverfmt: ',.0f' });
+            } else if (el && this.detailKind === 'montecarlo' && this.detail.bands) {
+              FINAI.fanChart(el, this.detail.dates, this.detail.bands, this.detail.base_currency);
+            }
           }
         });
       },
