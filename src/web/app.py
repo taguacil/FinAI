@@ -113,11 +113,14 @@ def analytics(request: Request, portfolio: Optional[str] = None,
 @app.get("/optimize", response_class=HTMLResponse)
 def optimize(request: Request, portfolio: Optional[str] = None, run: int = 0,
              lookback_days: int = 252, risk_free_rate: float = 0.04,
-             objective: str = "max_sharpe", include_cash: int = 1):
+             objective: str = "max_sharpe", include_cash: int = 1,
+             scope: str = "all", symbols: Optional[str] = None,
+             candidates: Optional[str] = None):
     ctx, base = _base_context(request, "optimize", portfolio)
     base["data"] = ctx.optimize(
         run=bool(run), lookback_days=lookback_days, risk_free_rate=risk_free_rate,
         objective=objective, include_cash=bool(include_cash),
+        scope=scope, selected_symbols=_csv(symbols), candidate_symbols=_csv(candidates),
     )
     return templates.TemplateResponse("optimize.html", base)
 

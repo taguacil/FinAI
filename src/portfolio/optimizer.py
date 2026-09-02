@@ -21,7 +21,7 @@ from pypfopt.efficient_frontier import EfficientFrontier
 
 from ..data_providers.manager import DataProviderManager
 from .market_data_store import MarketDataStore
-from .models import Currency, InstrumentType, Position
+from .models import Currency, FinancialInstrument, InstrumentType, Position
 from .storage import FileBasedStorage
 
 if TYPE_CHECKING:
@@ -155,6 +155,7 @@ class PortfolioOptimizer:
         include_cash: bool = True,
         optimization_currency: Optional[Currency] = None,
         return_adjustment: float = 0.0,
+        candidate_symbols: Optional[List[str]] = None,
     ) -> OptimizationResult:
         """
         Optimize portfolio weights.
@@ -162,6 +163,11 @@ class PortfolioOptimizer:
         Args:
             positions: Current portfolio positions (symbol -> Position)
             locked_symbols: Symbols to keep at current weights
+            candidate_symbols: Symbols NOT currently held that the optimizer may
+                allocate to (drawn from the locally stored universe). Each enters
+                the optimization at a current weight of 0, so the result surfaces
+                BUY trades for any it recommends. Candidates without local price
+                history are skipped with a warning.
             method: Optimization method (HRP or Markowitz)
             lookback_days: Days of historical data for covariance
             risk_free_rate: Annual risk-free rate for Sharpe calculation
@@ -189,6 +195,16 @@ class PortfolioOptimizer:
         active_positions = {
             sym: pos for sym, pos in positions.items() if pos.quantity > 0
         }
+
+        # Merge in candidate instruments (not currently held) so the optimizer
+        # may allocate to them. They enter at quantity 0 -> current weight 0, so
+        # any recommended allocation surfaces as a BUY trade. Added after the
+        # quantity filter above precisely because they have zero quantity.
+        if candidate_symbols:
+            candidate_positions = self._build_candidate_positions(
+                candidate_symbols, active_positions, warnings
+            )
+            active_positions = {**active_positions, **candidate_positions}
 
         if len(active_positions) < 2:
             raise ValueError("Need at least 2 positions to optimize")
@@ -515,6 +531,79 @@ class PortfolioOptimizer:
             target_volatility=target_volatility,
         )
 
+    def _build_candidate_positions(
+        self,
+        candidate_symbols: List[str],
+        existing_positions: Dict[str, Position],
+        warnings: List[str],
+    ) -> Dict[str, Position]:
+        """Build synthetic zero-quantity positions for candidate symbols.
+
+        Candidates are drawn from the locally stored universe. Their native
+        currency and latest price come from MarketDataStore (no network), so the
+        candidate path stays consistent with "universe = what I have stored".
+        Symbols already held, or without any local price data, are skipped with a
+        warning. Instruments are typed as STOCK so they pass the tradable filter;
+        the type only gates optimization eligibility, not the math.
+
+        Returns:
+            Dict of symbol -> synthetic Position (quantity 0).
+        """
+        candidates: Dict[str, Position] = {}
+        skipped: List[str] = []
+        end_date = date.today()
+        # Wide window: we only need the most recent stored price and currency to
+        # seed the synthetic position. The optimization's own lookback window
+        # (and its short-history filter) governs whether the candidate actually
+        # has enough history to be allocated.
+        start_date = end_date - timedelta(days=365)
+
+        # Normalize and dedupe; drop anything already held.
+        seen = set()
+        for raw in candidate_symbols:
+            sym = raw.strip().upper()
+            if not sym or sym in seen:
+                continue
+            seen.add(sym)
+            if sym in existing_positions:
+                continue
+
+            price_entries = self.market_data_store.get_prices_with_currency(
+                sym, start_date, end_date
+            )
+            if not price_entries:
+                skipped.append(sym)
+                continue
+
+            latest_date = max(price_entries.keys())
+            entry = price_entries[latest_date]
+            instrument = FinancialInstrument(
+                symbol=sym,
+                name=sym,
+                instrument_type=InstrumentType.STOCK,
+                currency=entry.currency,
+                price_currency=entry.currency,
+            )
+            candidates[sym] = Position(
+                instrument=instrument,
+                quantity=Decimal("0"),
+                average_cost=entry.price,
+                current_price=entry.price,
+            )
+
+        if candidates:
+            warnings.append(
+                "Candidate instruments considered for allocation: "
+                f"{', '.join(sorted(candidates))}."
+            )
+        if skipped:
+            warnings.append(
+                "Candidates skipped (no local price history): "
+                f"{', '.join(sorted(skipped))}. Fetch market data for them first."
+            )
+
+        return candidates
+
     def compare_methods(
         self,
         positions: Dict[str, Position],
@@ -527,6 +616,7 @@ class PortfolioOptimizer:
         target_volatility: Optional[float] = None,
         include_cash: bool = True,
         optimization_currency: Optional[Currency] = None,
+        candidate_symbols: Optional[List[str]] = None,
     ) -> Dict[OptimizationMethod, OptimizationResult]:
         """
         Run both HRP and Markowitz, return comparison.
@@ -562,6 +652,7 @@ class PortfolioOptimizer:
                     target_volatility=target_volatility,
                     include_cash=include_cash,
                     optimization_currency=optimization_currency,
+                    candidate_symbols=candidate_symbols,
                 )
             except Exception as e:
                 self.logger.warning(f"Failed to run {method.value} optimization: {e}")

@@ -11,6 +11,10 @@
   <form method="get" action="/optimize" class="card mb-5">
     <input type="hidden" name="portfolio" value="{{ active_portfolio_id or '' }}" />
     <input type="hidden" name="run" value="1" />
+    <!-- Scope + candidate selections submitted as hidden CSV, driven by pickers -->
+    <input type="hidden" name="scope" :value="scope" />
+    <input type="hidden" name="symbols" :value="sel.join(',')" />
+    <input type="hidden" name="candidates" :value="cand.join(',')" />
     <div class="grid grid-cols-1 md:grid-cols-4 gap-4 items-end">
       <div>
         <label class="label">Objective</label>
@@ -27,13 +31,64 @@
         <label class="label">Risk-free rate</label>
         <input type="number" name="risk_free_rate" min="0" max="0.5" step="0.01" value="{{ data.params.risk_free_rate }}" class="input mono" />
       </div>
-      <div class="flex items-center gap-3">
-        <label class="flex items-center gap-2 text-sm text-muted">
-          <input type="checkbox" name="include_cash" value="1" {{ 'checked' if data.params.include_cash else '' }} class="accent-[color:var(--accent)]" />
-          Include cash
-        </label>
-        <button type="submit" class="btn btn-accent ml-auto"><i data-lucide="play" class="h-4 w-4"></i> Run</button>
+      <div>
+        <label class="label">Scope</label>
+        <select class="select" x-model="scope">
+          <option value="all">Optimize all holdings</option>
+          <option value="lock">Lock selected, optimize rest</option>
+          <option value="only">Optimize only selected</option>
+        </select>
       </div>
+    </div>
+
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
+      <!-- Position picker (lock / optimize-only) -->
+      <div x-show="scope !== 'all'" x-cloak>
+        <div class="flex items-center justify-between mb-1">
+          <label class="label mb-0" x-text="scope === 'only' ? 'Positions to optimize' : 'Positions to lock'"></label>
+          <div class="flex gap-2">
+            <button type="button" class="text-xs text-muted hover:text-white" @click="sel = allHoldings.slice()">All</button>
+            <button type="button" class="text-xs text-muted hover:text-white" @click="sel = []">None</button>
+          </div>
+        </div>
+        <div class="pick-grid">
+          <template x-for="s in allHoldings" :key="s">
+            <label class="pick" :class="sel.includes(s) ? 'pick-on' : ''">
+              <input type="checkbox" class="hidden" :checked="sel.includes(s)" @change="toggle(sel, s)" />
+              <span class="mono" x-text="s"></span>
+            </label>
+          </template>
+        </div>
+        <p class="hint mt-2 text-xs" x-text="scope === 'only' ? 'Only these are rebalanced; their combined weight stays fixed.' : 'These keep their current weights; everything else is optimized.'"></p>
+      </div>
+
+      <!-- Candidate picker (add instruments not currently held) -->
+      <div :class="scope === 'all' ? 'md:col-span-2' : ''">
+        <div class="flex items-center justify-between mb-1">
+          <label class="label mb-0">Add candidates (not held)</label>
+          <div class="flex gap-2">
+            <button type="button" class="text-xs text-muted hover:text-white" @click="cand = []" x-show="cand.length">Clear</button>
+          </div>
+        </div>
+        <div class="pick-grid" x-show="allCandidates.length">
+          <template x-for="s in allCandidates" :key="s">
+            <label class="pick" :class="cand.includes(s) ? 'pick-on' : ''">
+              <input type="checkbox" class="hidden" :checked="cand.includes(s)" @change="toggle(cand, s)" />
+              <span class="mono" x-text="s"></span>
+            </label>
+          </template>
+        </div>
+        <p class="hint mt-1 text-xs" x-show="!allCandidates.length">No stored instruments outside your holdings. Fetch market data for new symbols first.</p>
+        <p class="hint mt-2 text-xs">Instruments with local data you don't hold. The optimizer may BUY them (funded from the optimized sleeve).</p>
+      </div>
+    </div>
+
+    <div class="flex items-center gap-3 mt-4">
+      <label class="flex items-center gap-2 text-sm text-muted">
+        <input type="checkbox" name="include_cash" value="1" {{ 'checked' if data.params.include_cash else '' }} class="accent-[color:var(--accent)]" />
+        Include cash
+      </label>
+      <button type="submit" class="btn btn-accent ml-auto"><i data-lucide="play" class="h-4 w-4"></i> Run</button>
     </div>
   </form>
 
@@ -147,13 +202,25 @@
   function optimize() {
     return {
       d: JSON.parse(document.getElementById('optimize-data').textContent),
+      scope: 'all',
+      sel: [],
+      cand: [],
+      allHoldings: [],
+      allCandidates: [],
       num(v, dcml) { return FINAI.fmtNum(v, dcml ?? 2); },
       pct(v) { return FINAI.fmtPct(v); },
       cls(v) { return FINAI.signClass(v); },
       money(v) { return FINAI.fmtMoney(v, this.d.base_currency); },
       moneyIn(v, ccy) { return FINAI.fmtMoney(v, ccy || this.d.base_currency); },
       tradeCls(a) { return { 'chip-buy': a === 'BUY' || a === 'DEPLOY', 'chip-sell': a === 'SELL' }; },
+      toggle(list, v) { const i = list.indexOf(v); if (i === -1) list.push(v); else list.splice(i, 1); },
       init() {
+        const p = (this.d && this.d.params) || {};
+        this.scope = p.scope || 'all';
+        this.sel = (p.selected_symbols || []).slice();
+        this.cand = (p.candidate_symbols || []).slice();
+        this.allHoldings = (p.holdings || []).slice();
+        this.allCandidates = (p.candidate_universe || []).slice();
         if (!this.d.ran || this.d.error) return;
         this.$nextTick(() => { this.weightsChart(); this.riskReturn(); });
       },

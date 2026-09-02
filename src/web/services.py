@@ -482,19 +482,47 @@ class AppContext:
         risk_free_rate: float = 0.04,
         objective: str = "max_sharpe",
         include_cash: bool = True,
+        scope: str = "all",
+        selected_symbols: Optional[List[str]] = None,
+        candidate_symbols: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
-        """HRP & Markowitz target weights, risk/return picture, rebalancing trades."""
+        """HRP & Markowitz target weights, risk/return picture, rebalancing trades.
+
+        scope controls which held positions are optimized:
+          - "all":  optimize every tradable holding (default).
+          - "lock": keep `selected_symbols` at current weight, optimize the rest.
+          - "only": optimize only `selected_symbols` (their combined weight is
+                    held fixed); everything else is kept at current weight.
+        candidate_symbols are instruments not currently held (drawn from the
+        locally stored universe) that the optimizer may allocate to (BUY).
+        """
         pm = self.manager
         portfolio = pm.current_portfolio
         if not portfolio:
             return {"empty": True}
 
         base_ccy = portfolio.base_currency.value
+        selected_symbols = [s.upper() for s in (selected_symbols or [])]
+        candidate_symbols = [s.upper() for s in (candidate_symbols or [])]
+
+        # Pickers for the form: held symbols, and the stored universe not held.
+        held_symbols = [s for s, p in portfolio.positions.items() if p.quantity != 0]
+        try:
+            universe = set(pm.market_data_store.get_symbols())
+        except Exception:
+            universe = set()
+        candidate_universe = sorted(universe - set(held_symbols))
+
         params = {
             "lookback_days": lookback_days,
             "risk_free_rate": risk_free_rate,
             "objective": objective,
             "include_cash": include_cash,
+            "scope": scope,
+            "selected_symbols": selected_symbols,
+            "candidate_symbols": candidate_symbols,
+            "holdings": sorted(held_symbols),
+            "candidate_universe": candidate_universe,
         }
         if not run:
             return {"empty": False, "ran": False, "base_currency": base_ccy, "params": params}
@@ -503,6 +531,14 @@ class AppContext:
         if not positions:
             return {"empty": False, "ran": True, "base_currency": base_ccy, "params": params,
                     "error": "No positions to optimize."}
+
+        # Translate the scope choice into the optimizer's lock list.
+        if scope == "lock":
+            locked_symbols = [s for s in selected_symbols if s in positions] or None
+        elif scope == "only" and selected_symbols:
+            locked_symbols = [s for s in positions if s not in selected_symbols] or None
+        else:
+            locked_symbols = None
 
         total_value = Decimal(0)
         for p in positions.values():
@@ -522,12 +558,14 @@ class AppContext:
             )
             results = optimizer.compare_methods(
                 positions=positions,
+                locked_symbols=locked_symbols,
                 lookback_days=lookback_days,
                 risk_free_rate=risk_free_rate,
                 total_portfolio_value=total_value,
                 cash_balances=cash_balances,
                 objective=obj,
                 include_cash=include_cash,
+                candidate_symbols=candidate_symbols or None,
             )
         except Exception as exc:  # noqa: BLE001 — surface any optimizer failure to the UI
             return {"empty": False, "ran": True, "base_currency": base_ccy, "params": params,
@@ -586,8 +624,8 @@ class AppContext:
             {
                 "symbol": t.symbol, "action": t.action, "shares": _num(t.shares),
                 "value_base": _num(t.estimated_value), "value_native": _num(t.estimated_value_native),
-                "currency": t.currency, "current_pct": _num(t.current_weight),
-                "target_pct": _num(t.target_weight),
+                "currency": t.currency, "current_pct": _num(t.current_weight * 100),
+                "target_pct": _num(t.target_weight * 100),
             }
             for t in (hrp.rebalancing_trades or [])
         ]
