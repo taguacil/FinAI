@@ -604,12 +604,23 @@ class AppContext:
             return {"empty": True}
         base_ccy = portfolio.base_currency.value
         strategy_specs = strategy_specs or ["hrp", "equal_weight", "buy_and_hold"]
+        # Available holdings (symbol + name) and strategies drive the pickers.
+        available_universe = []
+        for sym, pos in portfolio.positions.items():
+            if pos.quantity == 0:
+                continue
+            dps = getattr(pos.instrument, "data_provider_symbol", None) or sym
+            available_universe.append({"symbol": dps, "name": pos.instrument.name or sym})
+        available_universe.sort(key=lambda a: a["symbol"])
         params = {
             "symbols": symbols, "start": start.isoformat(), "end": end.isoformat(),
             "initial_capital": initial_capital, "rebalance_frequency": rebalance_frequency,
             "strategy_specs": strategy_specs, "benchmark_symbol": benchmark_symbol,
             "lookback_days": lookback_days, "transaction_cost_bps": transaction_cost_bps,
             "risk_free_rate": risk_free_rate,
+            "available_universe": available_universe,
+            "available_strategies": ["hrp", "max_sharpe", "min_volatility",
+                                     "equal_weight", "buy_and_hold"],
         }
         if not run:
             return {"empty": False, "ran": False, "base_currency": base_ccy, "params": params}
@@ -703,6 +714,45 @@ class AppContext:
 
     # -- simulate: Monte Carlo ----------------------------------------------
 
+    # Strategies whose expected return / volatility can drive a Monte Carlo run.
+    _MC_STRATEGIES = {
+        "max_sharpe": ("Max Sharpe", OptimizationObjective.MAX_SHARPE, OptimizationMethod.MARKOWITZ),
+        "min_volatility": ("Min Volatility", OptimizationObjective.MIN_VOLATILITY, OptimizationMethod.MARKOWITZ),
+        "hrp": ("HRP", OptimizationObjective.MAX_SHARPE, OptimizationMethod.HRP),
+    }
+
+    @staticmethod
+    def mc_strategies() -> List[Dict[str, str]]:
+        return [{"key": k, "label": v[0]} for k, v in AppContext._MC_STRATEGIES.items()]
+
+    def _strategy_assumptions(self, strategy: str, lookback_days: int,
+                              risk_free_rate: float) -> Dict[str, float]:
+        """Expected annual return / volatility for a strategy, via the optimizer."""
+        pm = self.manager
+        portfolio = pm.current_portfolio
+        label, objective, method = self._MC_STRATEGIES[strategy]
+        positions = {s: p for s, p in portfolio.positions.items() if p.quantity != 0}
+        if len(positions) < 2:
+            raise ValueError("Need at least 2 tradable positions to derive a strategy.")
+        total_value = Decimal(0)
+        for p in positions.values():
+            mv = p.market_value if p.market_value else (p.quantity * p.average_cost)
+            total_value += mv or Decimal(0)
+        optimizer = PortfolioOptimizer(
+            pm.data_manager, base_currency=portfolio.base_currency,
+            storage=pm.storage, portfolio_id=portfolio.id,
+        )
+        results = optimizer.compare_methods(
+            positions=positions, lookback_days=lookback_days,
+            risk_free_rate=risk_free_rate, total_portfolio_value=total_value,
+            cash_balances=portfolio.cash_balances, objective=objective, include_cash=True,
+        )
+        r = results.get(method)
+        if not r or r.expected_annual_return is None or r.annual_volatility is None:
+            raise ValueError(f"Optimizer produced no {label} result for this window.")
+        return {"label": label, "mu": float(r.expected_annual_return),
+                "sigma": float(r.annual_volatility), "sharpe": _f(r.sharpe_ratio)}
+
     def monte_carlo(
         self,
         run: bool,
@@ -711,31 +761,64 @@ class AppContext:
         monte_carlo_runs: int = 1000,
         monthly_deposit: float = 0.0,
         monthly_withdrawal: float = 0.0,
+        strategy: Optional[str] = None,
+        lookback_days: int = 252,
+        risk_free_rate: float = 0.04,
     ) -> Dict[str, Any]:
         pm = self.manager
         portfolio = pm.current_portfolio
         if not portfolio:
             return {"empty": True}
         base_ccy = portfolio.base_currency.value
+        strategy = strategy if strategy in self._MC_STRATEGIES else None
         params = {
             "scenario": scenario, "projection_years": projection_years,
             "monte_carlo_runs": monte_carlo_runs,
             "monthly_deposit": monthly_deposit, "monthly_withdrawal": monthly_withdrawal,
+            "strategy": strategy, "lookback_days": lookback_days,
+            "risk_free_rate": risk_free_rate,
         }
         if not run:
-            return {"empty": False, "ran": False, "base_currency": base_ccy, "params": params}
+            return {"empty": False, "ran": False, "base_currency": base_ccy, "params": params,
+                    "strategies": self.mc_strategies()}
 
         try:
-            from src.portfolio.scenarios import PortfolioScenarioEngine
+            from src.portfolio.scenarios import (
+                MarketAssumptions, PortfolioScenarioEngine,
+                ScenarioConfiguration, ScenarioType,
+            )
 
             value = pm.get_portfolio_value()
             if not value or value <= 0:
                 return {"empty": False, "ran": True, "base_currency": base_ccy, "params": params,
+                        "strategies": self.mc_strategies(),
                         "error": "Portfolio has no value to project."}
             engine = PortfolioScenarioEngine(random_seed=42)
             snapshot = pm.create_current_snapshot()
-            scenarios = engine.create_predefined_scenarios(float(value))
-            config = scenarios.get(scenario) or scenarios.get("likely")
+
+            basis = None
+            if strategy:
+                # Drive the projection from a strategy's optimized return/vol.
+                # (The GBM engine is single-asset, so only mu/sigma matter.)
+                a = self._strategy_assumptions(strategy, int(lookback_days), float(risk_free_rate))
+                config = ScenarioConfiguration(
+                    scenario_type=ScenarioType.CUSTOM,
+                    name=f"{a['label']} strategy",
+                    description=f"Monte Carlo driven by the {a['label']} optimized portfolio.",
+                    market_assumptions=MarketAssumptions(
+                        expected_return=a["mu"], volatility=a["sigma"],
+                        risk_free_rate=float(risk_free_rate),
+                    ),
+                )
+                basis = {"kind": "strategy", "label": a["label"],
+                         "mu": a["mu"], "sigma": a["sigma"], "sharpe": a["sharpe"]}
+            else:
+                scenarios = engine.create_predefined_scenarios(float(value))
+                config = scenarios.get(scenario) or scenarios.get("likely")
+                ma = config.market_assumptions
+                basis = {"kind": "scenario", "label": scenario.capitalize(),
+                         "mu": float(ma.expected_return), "sigma": float(ma.volatility),
+                         "sharpe": None}
             config.projection_years = float(projection_years)
             config.monte_carlo_runs = int(monte_carlo_runs)
             config.recurring_deposits = float(monthly_deposit)
@@ -744,6 +827,7 @@ class AppContext:
             result = engine.run_scenario_simulation(snapshot, config)
         except Exception as exc:  # noqa: BLE001
             return {"empty": False, "ran": True, "base_currency": base_ccy, "params": params,
+                    "strategies": self.mc_strategies(),
                     "error": f"Simulation failed: {exc}"}
 
         def clean_list(xs):
@@ -765,6 +849,8 @@ class AppContext:
 
         return {
             "empty": False, "ran": True, "base_currency": base_ccy, "params": params,
+            "strategies": self.mc_strategies(),
+            "basis": basis,
             "start_value": _num(result.start_value),
             "dates": dates,
             "bands": bands,

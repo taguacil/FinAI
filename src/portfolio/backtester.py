@@ -18,6 +18,7 @@ Design notes:
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Callable, Dict, List, Optional
@@ -161,10 +162,27 @@ class Backtester:
 
         rebalance_dates = self._rebalance_dates(sim_index, config.rebalance_frequency)
 
-        results = [
-            self._run_strategy(strategy, config, prices, sim_index, rebalance_dates)
-            for strategy in strategies
-        ]
+        # Simulations are independent and operate only on the in-memory price
+        # matrix, so they can run in parallel. Metrics are computed afterwards on
+        # the main thread because they read the (single-connection) price store
+        # for the benchmark, which is not safe to touch from worker threads.
+        def _sim(strategy: Strategy) -> StrategyResult:
+            return self._run_strategy(
+                strategy, config, prices, sim_index, rebalance_dates,
+                compute_metrics=False,
+            )
+
+        if len(strategies) > 1:
+            with ThreadPoolExecutor(max_workers=min(len(strategies), 4)) as pool:
+                results = list(pool.map(_sim, strategies))  # preserves order
+        else:
+            results = [_sim(strategies[0])]
+
+        if self.metrics_calculator is not None:
+            for r in results:
+                r.metrics = self._compute_strategy_metrics(
+                    r.equity_curve, config, r.name
+                )
 
         benchmark_curve = self._build_benchmark_curve(config, sim_index)
 
@@ -186,6 +204,7 @@ class Backtester:
         prices: pd.DataFrame,
         sim_index: pd.DatetimeIndex,
         rebalance_dates: set,
+        compute_metrics: bool = True,
     ) -> StrategyResult:
         symbols = list(prices.columns)
         cash = float(config.initial_capital)
@@ -255,17 +274,10 @@ class Backtester:
         )
 
         metrics = {}
-        if self.metrics_calculator is not None:
-            try:
-                metrics = self.metrics_calculator.calculate_metrics_from_df(
-                    equity_curve,
-                    value_column="total_value",
-                    benchmark_symbol=config.benchmark_symbol,
-                    risk_free_rate=config.risk_free_rate,
-                )
-            except Exception as e:
-                logger.warning(f"Metrics calculation failed for {strategy.name}: {e}")
-                metrics = {"error": str(e)}
+        if compute_metrics:
+            metrics = self._compute_strategy_metrics(
+                equity_curve, config, strategy.name
+            )
 
         return StrategyResult(
             name=strategy.name,
@@ -275,6 +287,26 @@ class Backtester:
             metrics=metrics,
             final_value=equity_values[-1] if equity_values else 0.0,
         )
+
+    def _compute_strategy_metrics(
+        self, equity_curve: pd.DataFrame, config: BacktestConfig, name: str
+    ) -> Dict:
+        """Compute performance metrics for a finished equity curve.
+
+        Kept separate from the simulation so it can run on the main thread
+        (it reads the price store for the benchmark)."""
+        if self.metrics_calculator is None:
+            return {}
+        try:
+            return self.metrics_calculator.calculate_metrics_from_df(
+                equity_curve,
+                value_column="total_value",
+                benchmark_symbol=config.benchmark_symbol,
+                risk_free_rate=config.risk_free_rate,
+            )
+        except Exception as e:
+            logger.warning(f"Metrics calculation failed for {name}: {e}")
+            return {"error": str(e)}
 
     def _rebalance(
         self,

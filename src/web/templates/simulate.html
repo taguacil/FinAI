@@ -26,15 +26,42 @@
     <input type="hidden" name="portfolio" value="{{ active_portfolio_id or '' }}" />
     <input type="hidden" name="tab" value="backtest" />
     <input type="hidden" name="bt_run" value="1" />
+    <!-- Selections are driven by the pickers below and submitted as hidden CSV -->
+    <input type="hidden" name="symbols" :value="uni.join(',')" />
+    <input type="hidden" name="strategies" :value="strat.join(',')" />
     <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
       <div>
-        <label class="label">Universe (symbols, comma-separated)</label>
-        <input type="text" name="symbols" value="{{ bt.params.symbols | join(', ') }}" class="input mono" placeholder="AAPL, MSFT, ..." />
+        <div class="flex items-center justify-between mb-1">
+          <label class="label mb-0">Universe</label>
+          <div class="flex gap-2">
+            <button type="button" class="text-xs text-muted hover:text-white" @click="uni = allUni.map(a => a.symbol)">All</button>
+            <button type="button" class="text-xs text-muted hover:text-white" @click="uni = []">None</button>
+          </div>
+        </div>
+        <div class="pick-grid">
+          <template x-for="a in allUni" :key="a.symbol">
+            <label class="pick" :class="uni.includes(a.symbol) ? 'pick-on' : ''" :title="a.name">
+              <input type="checkbox" class="hidden" :checked="uni.includes(a.symbol)" @change="toggle(uni, a.symbol)" />
+              <span class="mono" x-text="a.symbol"></span>
+            </label>
+          </template>
+        </div>
+        <div class="flex gap-2 mt-2">
+          <input type="text" x-model="customSym" @keydown.enter.prevent="addCustom()" class="input input-sm mono flex-1" placeholder="Add symbol (e.g. AAPL)" />
+          <button type="button" class="btn btn-sm" @click="addCustom()">Add</button>
+        </div>
       </div>
       <div>
-        <label class="label">Strategies (comma-separated)</label>
-        <input type="text" name="strategies" value="{{ bt.params.strategy_specs | join(', ') }}" class="input mono" />
-        <p class="hint mt-1 text-xs">hrp · max_sharpe · min_volatility · equal_weight · buy_and_hold</p>
+        <label class="label">Strategies</label>
+        <div class="pick-grid">
+          <template x-for="s in allStrat" :key="s">
+            <label class="pick" :class="strat.includes(s) ? 'pick-on' : ''">
+              <input type="checkbox" class="hidden" :checked="strat.includes(s)" @change="toggle(strat, s)" />
+              <span class="mono" x-text="s"></span>
+            </label>
+          </template>
+        </div>
+        <p class="hint mt-2 text-xs">HRP &amp; max-Sharpe optimize weights; buy &amp; hold allocates once (≠ the benchmark line).</p>
       </div>
     </div>
     <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-4 items-end">
@@ -108,8 +135,17 @@
     <input type="hidden" name="portfolio" value="{{ active_portfolio_id or '' }}" />
     <input type="hidden" name="tab" value="montecarlo" />
     <input type="hidden" name="mc_run" value="1" />
-    <div class="grid grid-cols-2 md:grid-cols-5 gap-4 items-end">
+    <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4 items-end" x-data="{ basis: {{ (mc.params.strategy or '') | tojson }} }">
       <div>
+        <label class="label">Basis</label>
+        <select name="mc_strategy" class="select" x-model="basis">
+          <option value="">Scenario</option>
+          {% for s in mc.strategies %}
+          <option value="{{ s.key }}">Strategy · {{ s.label }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div x-show="!basis">
         <label class="label">Scenario</label>
         <select name="scenario" class="select">
           {% for opt in ['optimistic', 'likely', 'pessimistic', 'stress'] %}
@@ -139,9 +175,15 @@
   {% elif mc.error %}
     <div class="card"><p class="neg">{{ mc.error }}</p></div>
   {% else %}
+    {% if mc.basis %}
+    <div class="card card-tight mb-4 flex items-center gap-4 flex-wrap">
+      <span class="chip {{ 'chip-buy' if mc.basis.kind == 'strategy' else '' }}">{{ 'Strategy' if mc.basis.kind == 'strategy' else 'Scenario' }}: {{ mc.basis.label }}</span>
+      <span class="text-xs text-muted">Driven by μ <span class="mono">{{ '{:.1f}'.format(mc.basis.mu * 100) }}%</span> · σ <span class="mono">{{ '{:.1f}'.format(mc.basis.sigma * 100) }}%</span>{% if mc.basis.sharpe is not none %} · Sharpe <span class="mono">{{ '{:.2f}'.format(mc.basis.sharpe) }}</span>{% endif %}</span>
+    </div>
+    {% endif %}
     <div class="card mb-4">
       <div class="flex items-center justify-between mb-2">
-        <span class="section-title">Projected value — {{ mc.params.scenario | capitalize }}</span>
+        <span class="section-title">Projected value — {{ mc.basis.label if mc.basis else (mc.params.scenario | capitalize) }}</span>
         <span class="text-xs text-muted">Median with 50% &amp; 90% bands · {{ mc.params.monte_carlo_runs }} runs</span>
       </div>
       <div id="mcFan" style="height: 320px;"></div>
@@ -177,12 +219,24 @@
       tab: {{ tab | tojson }},
       bt: JSON.parse(document.getElementById('bt-data').textContent),
       mc: JSON.parse(document.getElementById('mc-data').textContent),
+      uni: [], allUni: [], strat: [], allStrat: [], customSym: '',
+      toggle(arr, v) { const i = arr.indexOf(v); if (i === -1) arr.push(v); else arr.splice(i, 1); },
+      addCustom() {
+        const s = (this.customSym || '').trim().toUpperCase();
+        if (s && !this.uni.includes(s)) this.uni.push(s);
+        this.customSym = '';
+      },
       num(v, dcml) { return FINAI.fmtNum(v, dcml ?? 2); },
       pct(v) { return FINAI.fmtPct(v); },
       pctRaw(v, neg) { if (v === null || v === undefined) return '—'; const p = v * 100; return (neg ? '-' : '') + FINAI.fmtNum(Math.abs(p), 1) + '%'; },
       cls(v) { return FINAI.signClass(v); },
       money(v) { return FINAI.fmtMoney(v, (this.bt && this.bt.base_currency) || (this.mc && this.mc.base_currency) || 'USD'); },
       init() {
+        const p = (this.bt && this.bt.params) || {};
+        this.allUni = p.available_universe || [];
+        this.allStrat = p.available_strategies || [];
+        this.uni = (p.symbols || []).slice();
+        this.strat = (p.strategy_specs || []).slice();
         this.$nextTick(() => {
           if (this.tab === 'backtest' && this.bt.ran && !this.bt.error) {
             const e = this.bt.equity;

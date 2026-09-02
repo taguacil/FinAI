@@ -134,6 +134,7 @@ def simulate(
     # monte carlo params
     mc_run: int = 0, scenario: str = "likely", years: float = 5.0,
     runs: int = 1000, deposit: float = 0.0, withdrawal: float = 0.0,
+    mc_strategy: Optional[str] = None,
 ):
     ctx, base = _base_context(request, "simulate", portfolio)
     today = date.today()
@@ -153,6 +154,7 @@ def simulate(
     base["montecarlo"] = ctx.monte_carlo(
         run=bool(mc_run), scenario=scenario, projection_years=years,
         monte_carlo_runs=runs, monthly_deposit=deposit, monthly_withdrawal=withdrawal,
+        strategy=(mc_strategy or None), lookback_days=lookback_days, risk_free_rate=rf,
     )
     return templates.TemplateResponse("simulate.html", base)
 
