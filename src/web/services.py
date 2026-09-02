@@ -542,7 +542,16 @@ class AppContext:
         for r in returns:
             acc *= (1.0 + r)
             port_cum.append((acc - 1.0) * 100)
-        cum_dates = dates[1:1 + len(port_cum)]
+        # calculate_returns_from_df emits a return only for days where the prior
+        # value was > 0, so for a class acquired partway through the window the
+        # return series is shorter than df and does NOT map onto dates[1:].
+        # Rebuild the exact positional indices it used so the cumulative curve
+        # (and the benchmark below) line up with the correct dates.
+        raw_vals = df["total_value"].tolist()
+        ret_idx = [i for i in range(1, len(raw_vals)) if float(raw_vals[i - 1]) > 0]
+        n = min(len(port_cum), len(ret_idx))
+        port_cum = port_cum[:n]
+        cum_dates = [dates[i] for i in ret_idx[:n]]
 
         # benchmark cumulative return (%), aligned to the portfolio dates.
         # The curve renders whenever we have stored benchmark prices; the
@@ -563,7 +572,9 @@ class AppContext:
                 base0 = float(clean.iloc[0]) if not clean.empty else None
                 if base0:
                     full = [((float(v) / base0) - 1.0) * 100 if pd.notna(v) else None for v in s]
-                    bench_cum = full[1:1 + len(port_cum)]
+                    # Align the benchmark curve to the same return dates as the
+                    # portfolio curve (see ret_idx above) so both share an x-axis.
+                    bench_cum = [full[i] for i in ret_idx[:n]]
             except Exception:
                 bench_cum = None
 

@@ -537,15 +537,24 @@ class InstrumentResolver:
         return InstrumentType.STOCK
 
     # Names that denote a bank-issued structured product rather than a plain
-    # bond. STRONG markers are unambiguous; WEAK ones ("note", "callable")
-    # only count when the name doesn't also read as a senior/government bond.
+    # bond. STRONG markers are unambiguous. The bare word "note" is only a WEAK
+    # hint, since plain bonds are routinely named "... Note" (Treasury Note,
+    # Medium Term Note, Fixed Rate Note). BOND_GUARD vetoes that weak hint for
+    # names that plainly read as ordinary bonds so they are not misfiled as
+    # structured products (which would drop them from fixed-income analytics and
+    # the optimizer). "Callable" is a plain-bond feature, not a structured
+    # marker, so it lives in the guard rather than the weak set.
     _STRUCT_STRONG = re.compile(
         r"reverse convertible|\bRC\b|credit linked note|\bCLN\b|autocallable"
         r"|\borion\b|shark note|tracker certificate|best performer",
         re.I,
     )
-    _STRUCT_GOVT_SENIOR = re.compile(r"treasury|senior", re.I)
-    _STRUCT_WEAK = re.compile(r"\bnotes?\b|callable", re.I)
+    _STRUCT_BOND_GUARD = re.compile(
+        r"treasury|senior|\bbond\b|callable|medium[- ]term note|\bmtn\b"
+        r"|fixed[- ]rate note|floating[- ]rate note|\bfrn\b",
+        re.I,
+    )
+    _STRUCT_WEAK = re.compile(r"\bnotes?\b", re.I)
 
     @classmethod
     def _is_structured_product_name(cls, name: Optional[str]) -> bool:
@@ -553,7 +562,7 @@ class InstrumentResolver:
         n = name or ""
         if cls._STRUCT_STRONG.search(n):
             return True
-        if cls._STRUCT_GOVT_SENIOR.search(n):
+        if cls._STRUCT_BOND_GUARD.search(n):
             return False
         return bool(cls._STRUCT_WEAK.search(n))
 

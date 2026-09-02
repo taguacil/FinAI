@@ -819,6 +819,7 @@ class PortfolioHistory:
         # records for the same symbol can be inconsistently typed. So resolve one
         # category per symbol (from its earliest buy) and use it for every flow.
         category_by_symbol = self._category_by_symbol()
+        warned_fx: set = set()
 
         for txn in self.portfolio.transactions:
             txn_date = txn.timestamp.date()
@@ -833,7 +834,22 @@ class PortfolioHistory:
             amount = txn.total_value
             if txn.currency != base:
                 rate = self._get_fx_rate(txn.currency, base, as_of=txn_date)
-                amount = amount * rate if rate else amount
+                if not rate:
+                    # No historical rate: excluding this flow keeps it consistent
+                    # with get_category_value_history, which likewise drops a
+                    # position it cannot convert. Adding the raw foreign amount
+                    # would silently corrupt the class TWR.
+                    if txn.currency.value not in warned_fx:
+                        warned_fx.add(txn.currency.value)
+                        logging.warning(
+                            "No FX rate for %s->%s around %s; excluding %s "
+                            "cash flow from category returns. Run a historical "
+                            "refresh to seed FX rates.",
+                            txn.currency.value, base.value, txn_date,
+                            txn.instrument.symbol,
+                        )
+                    continue
+                amount = amount * rate
 
             if txn.transaction_type == TransactionType.SELL:
                 amount = -amount

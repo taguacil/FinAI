@@ -28,6 +28,7 @@ const FINAI = (() => {
   const ASSET_CLASS_LABELS = {
     stock: 'Equities', etf: 'ETFs', bond: 'Bonds', crypto: 'Crypto',
     cash: 'Cash', mutual_fund: 'Mutual Funds', option: 'Options', future: 'Futures',
+    structured_product: 'Structured Products',
   };
   const assetClassLabel = (k) => ASSET_CLASS_LABELS[k] || (k ? k.charAt(0).toUpperCase() + k.slice(1) : '—');
 
