@@ -1211,6 +1211,7 @@ def test_hypothetical_position(
 @mcp.tool()
 def optimize_portfolio(
     locked_symbols: Optional[str] = None,
+    candidate_symbols: Optional[str] = None,
     method: str = "hrp",
     compare: bool = True,
     lookback_days: int = 252,
@@ -1226,6 +1227,9 @@ def optimize_portfolio(
 
     Args:
         locked_symbols: Comma-separated symbols to keep at current weight (e.g., "AAPL,MSFT")
+        candidate_symbols: Comma-separated symbols NOT currently held to consider adding
+            (e.g., "GLD,QQQ"). Only symbols with local price history are used; the optimizer
+            may allocate to them, producing BUY suggestions.
         method: Optimization method: "hrp" or "markowitz"
         compare: Whether to compare results from both methods
         lookback_days: Days of historical data to use (default 252 = 1 year)
@@ -1236,6 +1240,7 @@ def optimize_portfolio(
     """
     output = _optimize_portfolio._run(
         locked_symbols=locked_symbols,
+        candidate_symbols=candidate_symbols,
         method=method,
         compare=compare,
         lookback_days=lookback_days,
@@ -1248,6 +1253,7 @@ def optimize_portfolio(
         "optimize_portfolio",
         {
             "locked_symbols": locked_symbols,
+            "candidate_symbols": candidate_symbols,
             "method": method,
             "compare": compare,
             "lookback_days": lookback_days,
