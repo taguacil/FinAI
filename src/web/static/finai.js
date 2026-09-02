@@ -31,10 +31,11 @@ const FINAI = (() => {
   };
   const assetClassLabel = (k) => ASSET_CLASS_LABELS[k] || (k ? k.charAt(0).toUpperCase() + k.slice(1) : '—');
 
-  // Fixed, institutional colours per asset class for a consistent read across views.
+  // Fixed asset-class colours: muted, low-saturation hues chosen so stacked
+  // bands stay distinguishable while keeping the restrained, professional feel.
   const ASSET_COLORS = {
-    Equities: '#C7CDD4', Bonds: '#9AA4AF', ETFs: '#74808C', 'Mutual Funds': '#B6AEA3',
-    Cash: '#4C555F', Crypto: '#8A8F98', Options: '#A9B0B8', Futures: '#5E666F',
+    Equities: '#8FA9C4', Bonds: '#84A99A', ETFs: '#C2A97E', 'Mutual Funds': '#B08C97',
+    Cash: '#5E666F', Crypto: '#9A8FB5', Options: '#7FA8A0', Futures: '#A9926F',
   };
 
   const fmtMoney = (v, ccy = 'USD') => {
@@ -110,7 +111,7 @@ const FINAI = (() => {
     const traces = series.map((s, i) => ({
       x, y: s.values, name: s.label, type: 'scatter', mode: 'lines',
       stackgroup: 'one',
-      line: { width: 0.8, color: s.color || ASSET_COLORS[s.label] || COLORWAY[i % COLORWAY.length], shape: 'spline', smoothing: 0.3 },
+      line: { width: 0.8, color: s.color || ASSET_COLORS[s.label] || COLORWAY[i % COLORWAY.length] },
       fillcolor: s.color || ASSET_COLORS[s.label] || COLORWAY[i % COLORWAY.length],
       hovertemplate: `%{x}<br>${s.label}: ${ccy} %{y:,.0f}<extra></extra>`,
     }));

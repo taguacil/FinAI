@@ -403,7 +403,12 @@ class AppContext:
             try:
                 s = pd.Series(m["benchmark_prices"])
                 s.index = pd.to_datetime(list(s.index))
-                s = s.reindex(df.index, method="ffill")
+                s = s.sort_index()
+                last_real = s.index.max()
+                # ffill fills weekends/holidays within the covered range, but we
+                # must NOT fabricate a flat tail past the last real observation
+                # (that produced a misleading straight benchmark line).
+                s = s.reindex(df.index, method="ffill").where(df.index <= last_real)
                 clean = s.dropna()
                 base0 = float(clean.iloc[0]) if not clean.empty else None
                 if base0:
