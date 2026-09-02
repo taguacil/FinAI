@@ -18,7 +18,7 @@ import pandas as pd
 
 from src.data_providers.manager import DataProviderManager
 from src.portfolio.manager import PortfolioManager
-from src.portfolio.models import Currency
+from src.portfolio.models import Currency, TransactionType
 from src.portfolio.optimizer import (
     OptimizationMethod,
     OptimizationObjective,
@@ -822,6 +822,8 @@ class AppContext:
             },
             "prices": rows,
             "currencies": [c.value for c in Currency],
+            "transactions": self.transactions(),
+            "transaction_types": self.transaction_types(),
         }
 
     def set_price(self, symbol: str, price: float, currency: Optional[str] = None) -> Dict[str, Any]:
@@ -833,6 +835,87 @@ class AppContext:
             ccy = Currency(currency) if currency else None
             ok = pm.set_position_price(symbol, Decimal(str(price)), currency=ccy)
             return {"ok": bool(ok), "error": None if ok else f"Could not set price for {symbol}."}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": str(exc)}
+
+    # -- transactions --------------------------------------------------------
+
+    def transactions(self, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+        """Transaction list (most recent first) for the CRUD table."""
+        pm = self.manager
+        if not pm.current_portfolio:
+            return []
+        rows = pm.get_transaction_history()
+        out = []
+        for t in rows:
+            ts = t["timestamp"]
+            out.append({
+                "id": t["id"],
+                "date": ts.date().isoformat() if hasattr(ts, "date") else str(ts),
+                "symbol": t["symbol"],
+                "name": t["name"],
+                "type": t["type"],
+                "quantity": float(t["quantity"]),
+                "price": float(t["price"]),
+                "total_value": float(t["total_value"]),
+                "currency": t["currency"],
+                "notes": t["notes"] or "",
+            })
+        return out[:limit] if limit else out
+
+    @staticmethod
+    def transaction_types() -> List[str]:
+        return [t.value for t in TransactionType]
+
+    def add_transaction(self, symbol: str, txn_type: str, quantity: float,
+                        price: float, date_str: Optional[str] = None,
+                        currency: Optional[str] = None,
+                        notes: Optional[str] = None) -> Dict[str, Any]:
+        """Add a transaction from the web form."""
+        pm = self.manager
+        if not pm.current_portfolio:
+            return {"ok": False, "error": "No portfolio loaded."}
+        try:
+            tt = TransactionType(txn_type.lower())
+            ts = datetime.strptime(date_str, "%Y-%m-%d") if date_str else None
+            ccy = Currency(currency) if currency else None
+            ok = pm.add_transaction(
+                symbol=symbol.upper().strip(), transaction_type=tt,
+                quantity=Decimal(str(quantity)), price=Decimal(str(price)),
+                timestamp=ts, currency=ccy, notes=notes or None,
+            )
+            return {"ok": bool(ok), "error": None if ok else "Could not add transaction."}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": str(exc)}
+
+    def modify_transaction(self, transaction_id: str, quantity: Optional[float] = None,
+                          price: Optional[float] = None, date_str: Optional[str] = None,
+                          notes: Optional[str] = None) -> Dict[str, Any]:
+        """Edit an existing transaction from the web form."""
+        pm = self.manager
+        if not pm.current_portfolio:
+            return {"ok": False, "error": "No portfolio loaded."}
+        try:
+            ts = datetime.strptime(date_str, "%Y-%m-%d") if date_str else None
+            ok = pm.modify_transaction(
+                transaction_id,
+                quantity=Decimal(str(quantity)) if quantity is not None else None,
+                price=Decimal(str(price)) if price is not None else None,
+                timestamp=ts,
+                notes=notes,
+            )
+            return {"ok": bool(ok), "error": None if ok else "Transaction not found."}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": str(exc)}
+
+    def delete_transaction(self, transaction_id: str) -> Dict[str, Any]:
+        """Delete a transaction from the web form."""
+        pm = self.manager
+        if not pm.current_portfolio:
+            return {"ok": False, "error": "No portfolio loaded."}
+        try:
+            ok = pm.delete_transaction(transaction_id)
+            return {"ok": bool(ok), "error": None if ok else "Transaction not found."}
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "error": str(exc)}
 

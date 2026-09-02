@@ -116,6 +116,100 @@
     </div>
   </div>
 
+  <!-- Transactions -->
+  <div class="card mb-5">
+    <div class="flex items-center justify-between mb-3">
+      <div class="section-title">Transactions <span class="text-muted font-normal">({{ data.transactions | length }})</span></div>
+      <button type="button" class="btn btn-sm" @click="showAdd = !showAdd">
+        <i data-lucide="plus" class="h-4 w-4"></i> Add transaction
+      </button>
+    </div>
+
+    <!-- Add form -->
+    <form method="post" action="/data/txn/add" class="mb-4" x-show="showAdd" x-cloak x-transition>
+      <input type="hidden" name="portfolio" value="{{ active_portfolio_id or '' }}" />
+      <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-2 items-end">
+        <div><label class="label">Symbol</label><input type="text" name="symbol" required class="input mono" placeholder="AAPL" /></div>
+        <div><label class="label">Type</label>
+          <select name="txn_type" class="select">
+            {% for t in data.transaction_types %}<option value="{{ t }}" {{ 'selected' if t == 'buy' else '' }}>{{ t }}</option>{% endfor %}
+          </select>
+        </div>
+        <div><label class="label">Quantity</label><input type="number" name="quantity" step="any" required class="input mono" value="0" /></div>
+        <div><label class="label">Price</label><input type="number" name="price" step="any" required class="input mono" value="0" /></div>
+        <div><label class="label">Date</label><input type="date" name="date" value="{{ data.stats.data_as_of or '' }}" class="input mono" /></div>
+        <div><label class="label">Currency</label>
+          <select name="currency" class="select">
+            <option value="">Default</option>
+            {% for c in data.currencies %}<option value="{{ c }}">{{ c }}</option>{% endfor %}
+          </select>
+        </div>
+        <div><button type="submit" class="btn btn-accent w-full"><i data-lucide="check" class="h-4 w-4"></i> Add</button></div>
+      </div>
+      <input type="text" name="notes" class="input mt-2" placeholder="Notes (optional)" />
+    </form>
+
+    <div class="overflow-x-auto" style="max-height: 460px;">
+      <table class="tbl">
+        <thead class="sticky-head"><tr>
+          <th>Date</th><th>Symbol</th><th>Type</th><th class="num">Qty</th>
+          <th class="num">Price</th><th class="num">Total</th><th>Notes</th><th class="num">Actions</th>
+        </tr></thead>
+        <tbody>
+          {% for t in data.transactions %}
+          <tr>
+            <td class="mono text-xs">{{ t.date }}</td>
+            <td class="font-semibold">{{ t.symbol }}</td>
+            <td><span class="chip {{ 'chip-buy' if t.type in ['buy','deposit','dividend','interest'] else ('chip-sell' if t.type in ['sell','withdrawal','fees'] else '') }}">{{ t.type }}</span></td>
+            <td class="num">{{ '{:,.4f}'.format(t.quantity) }}</td>
+            <td class="num">{{ '{:,.4f}'.format(t.price) }} <span class="text-muted text-xs">{{ t.currency }}</span></td>
+            <td class="num">{{ '{:,.2f}'.format(t.total_value) }}</td>
+            <td class="text-muted truncate max-w-[180px]">{{ t.notes or '—' }}</td>
+            <td class="num whitespace-nowrap">
+              <button type="button" class="btn btn-sm" @click='editTxn({{ t | tojson }})'><i data-lucide="pencil" class="h-3.5 w-3.5"></i></button>
+              <form method="post" action="/data/txn/delete" class="inline" onsubmit="return confirm('Delete this transaction? Positions will be recalculated.');">
+                <input type="hidden" name="portfolio" value="{{ active_portfolio_id or '' }}" />
+                <input type="hidden" name="transaction_id" value="{{ t.id }}" />
+                <button type="submit" class="btn btn-sm"><i data-lucide="trash-2" class="h-3.5 w-3.5 neg"></i></button>
+              </form>
+            </td>
+          </tr>
+          {% endfor %}
+          {% if not data.transactions %}
+          <tr><td colspan="8" class="text-muted text-center py-6">No transactions yet.</td></tr>
+          {% endif %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Edit transaction modal -->
+  <div x-show="edit" x-cloak class="fixed inset-0 z-50 flex items-center justify-center p-4" style="background: rgba(0,0,0,0.6);" @click.self="edit = null">
+    <div class="card w-full max-w-md">
+      <div class="flex items-center justify-between mb-3">
+        <div class="section-title">Edit transaction</div>
+        <button type="button" class="btn btn-sm" @click="edit = null"><i data-lucide="x" class="h-4 w-4"></i></button>
+      </div>
+      <template x-if="edit">
+        <form method="post" action="/data/txn/edit" class="space-y-3">
+          <input type="hidden" name="portfolio" value="{{ active_portfolio_id or '' }}" />
+          <input type="hidden" name="transaction_id" :value="edit.id" />
+          <p class="hint text-xs"><span class="font-semibold" x-text="edit.symbol"></span> · <span x-text="edit.type"></span> · <span x-text="edit.currency"></span></p>
+          <div class="grid grid-cols-2 gap-3">
+            <div><label class="label">Quantity</label><input type="number" name="quantity" step="any" class="input mono" :value="edit.quantity" /></div>
+            <div><label class="label">Price</label><input type="number" name="price" step="any" class="input mono" :value="edit.price" /></div>
+          </div>
+          <div><label class="label">Date</label><input type="date" name="date" class="input mono" :value="edit.date" /></div>
+          <div><label class="label">Notes</label><input type="text" name="notes" class="input" :value="edit.notes" /></div>
+          <div class="flex gap-2 justify-end">
+            <button type="button" class="btn" @click="edit = null">Cancel</button>
+            <button type="submit" class="btn btn-accent"><i data-lucide="save" class="h-4 w-4"></i> Save</button>
+          </div>
+        </form>
+      </template>
+    </div>
+  </div>
+
   <!-- Portfolio info -->
   <div class="card">
     <div class="section-title mb-3">Portfolio</div>
@@ -132,8 +226,9 @@
 <script>
   function dataPage() {
     return {
-      sym: '', ccy: '',
+      sym: '', ccy: '', showAdd: false, edit: null,
       pick(symbol, currency) { this.sym = symbol; this.ccy = currency || ''; window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' }); },
+      editTxn(t) { this.edit = t; this.$nextTick(() => window.lucide && window.lucide.createIcons()); },
     };
   }
 </script>

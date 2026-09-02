@@ -266,6 +266,63 @@ class PortfolioManager:
         )
         return True
 
+    def modify_transaction(
+        self,
+        transaction_id: str,
+        quantity: Optional[Decimal] = None,
+        price: Optional[Decimal] = None,
+        timestamp: Optional[datetime] = None,
+        notes: Optional[str] = None,
+    ) -> bool:
+        """Modify fields of an existing transaction, then recalc & persist."""
+        if not self.current_portfolio:
+            logging.error("No portfolio loaded")
+            return False
+
+        transaction = next(
+            (t for t in self.current_portfolio.transactions if t.id == transaction_id),
+            None,
+        )
+        if transaction is None:
+            logging.error(f"Transaction not found: {transaction_id}")
+            return False
+
+        if quantity is not None:
+            transaction.quantity = Decimal(str(quantity))
+        if price is not None:
+            transaction.price = Decimal(str(price))
+        if timestamp is not None:
+            transaction.timestamp = timestamp
+        if notes is not None:
+            transaction.notes = notes
+
+        self.current_portfolio.recalculate_positions()
+        self.storage.save_portfolio(self.current_portfolio)
+        self._invalidate_portfolio_history()
+        logging.info(f"Modified transaction {transaction_id}")
+        return True
+
+    def delete_transaction(self, transaction_id: str) -> bool:
+        """Remove a transaction by id, then recalc positions & persist."""
+        if not self.current_portfolio:
+            logging.error("No portfolio loaded")
+            return False
+
+        transaction = next(
+            (t for t in self.current_portfolio.transactions if t.id == transaction_id),
+            None,
+        )
+        if transaction is None:
+            logging.error(f"Transaction not found: {transaction_id}")
+            return False
+
+        self.current_portfolio.transactions.remove(transaction)
+        self.current_portfolio.recalculate_positions()
+        self.storage.save_portfolio(self.current_portfolio)
+        self._invalidate_portfolio_history()
+        logging.info(f"Deleted transaction {transaction_id}")
+        return True
+
     def buy_shares(
         self,
         symbol: str,

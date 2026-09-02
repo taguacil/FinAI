@@ -13,6 +13,9 @@
 
 html, body { background: var(--bg); }
 
+/* Hide Alpine-controlled elements until the component is initialised */
+[x-cloak] { display: none !important; }
+
 /* Sidebar nav links */
 .nav-link {
   display: flex; align-items: center; gap: 0.65rem;

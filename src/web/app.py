@@ -177,6 +177,41 @@ def data_set_price(portfolio: Optional[str] = Form(None), symbol: str = Form(...
     return RedirectResponse(url=f"/data{q}", status_code=303)
 
 
+@app.post("/data/txn/add")
+def data_txn_add(portfolio: Optional[str] = Form(None), symbol: str = Form(...),
+                 txn_type: str = Form(...), quantity: float = Form(...),
+                 price: float = Form(...), date: Optional[str] = Form(None),
+                 currency: Optional[str] = Form(None), notes: Optional[str] = Form(None)):
+    ctx = get_context()
+    ctx.ensure_loaded(portfolio)
+    res = ctx.add_transaction(symbol, txn_type, quantity, price, date, currency or None, notes)
+    q = f"?portfolio={portfolio or ''}"
+    q += f"&msg=Added+{symbol}+transaction" if res["ok"] else f"&err={(res.get('error') or 'Failed').replace(' ', '+')}"
+    return RedirectResponse(url=f"/data{q}", status_code=303)
+
+
+@app.post("/data/txn/edit")
+def data_txn_edit(portfolio: Optional[str] = Form(None), transaction_id: str = Form(...),
+                  quantity: Optional[float] = Form(None), price: Optional[float] = Form(None),
+                  date: Optional[str] = Form(None), notes: Optional[str] = Form(None)):
+    ctx = get_context()
+    ctx.ensure_loaded(portfolio)
+    res = ctx.modify_transaction(transaction_id, quantity, price, date or None, notes)
+    q = f"?portfolio={portfolio or ''}"
+    q += "&msg=Transaction+updated" if res["ok"] else f"&err={(res.get('error') or 'Failed').replace(' ', '+')}"
+    return RedirectResponse(url=f"/data{q}", status_code=303)
+
+
+@app.post("/data/txn/delete")
+def data_txn_delete(portfolio: Optional[str] = Form(None), transaction_id: str = Form(...)):
+    ctx = get_context()
+    ctx.ensure_loaded(portfolio)
+    res = ctx.delete_transaction(transaction_id)
+    q = f"?portfolio={portfolio or ''}"
+    q += "&msg=Transaction+deleted" if res["ok"] else f"&err={(res.get('error') or 'Failed').replace(' ', '+')}"
+    return RedirectResponse(url=f"/data{q}", status_code=303)
+
+
 @app.post("/data/refresh")
 def data_refresh(portfolio: Optional[str] = Form(None), historical: int = Form(0)):
     ctx = get_context()
