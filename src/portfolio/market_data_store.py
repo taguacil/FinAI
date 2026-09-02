@@ -263,6 +263,41 @@ class MarketDataStore:
 
         return None
 
+    def get_last_price_on_or_before(
+        self, symbol: str, target_date: date
+    ) -> Optional[Decimal]:
+        """Get the most recent price at or before a date, with no look-back limit.
+
+        Unlike ``get_price_with_fallback``, this does not cap how far back it
+        looks. It is used to carry a held position's last-known price forward
+        when its quote series ends before the position is closed, so a held
+        instrument never silently drops out of the value history.
+
+        Args:
+            symbol: The trading symbol
+            target_date: The date to get price for
+
+        Returns:
+            The most recent price on or before ``target_date``, or None if the
+            symbol has no prices at or before that date.
+        """
+        symbol = symbol.upper().strip()
+        self._load_symbol_cache(symbol)
+
+        if symbol not in self._cache:
+            return None
+
+        prices = self._cache[symbol]
+        best_date: Optional[date] = None
+        for d in prices.keys():
+            if d <= target_date and (best_date is None or d > best_date):
+                best_date = d
+
+        if best_date is not None:
+            return prices[best_date]
+
+        return None
+
     def set_price(
         self,
         symbol: str,

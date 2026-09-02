@@ -179,6 +179,20 @@ class PortfolioHistory:
             if price is not None:
                 return price
 
+        # Carry-forward: this position is held on target_date, so it must have a
+        # value. If no recent quote exists within the normal fallback window
+        # (e.g. a bond whose price series ends weeks before it is sold), fall
+        # back to the last-known price with no look-back limit so the position
+        # never silently drops out of the value history.
+        for identifier in (pos.data_provider_symbol, pos.symbol, pos.isin):
+            if not identifier:
+                continue
+            price = self.market_data.get_last_price_on_or_before(
+                identifier, target_date
+            )
+            if price is not None:
+                return price
+
         return None
 
     def _replay_transactions_to_date(self, target_date: date) -> PortfolioState:
