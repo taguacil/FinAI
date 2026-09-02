@@ -126,7 +126,38 @@ class AppContext:
         current = self.manager.current_portfolio
         if not current or current.id != target:
             self.manager.load_portfolio(target)
+            self._hydrate_prices_from_store()
         return target
+
+    def _hydrate_prices_from_store(self) -> None:
+        """Populate each position's current_price from the local price cache.
+
+        The web app is cache-only, so nothing fetches live prices to fill
+        ``position.current_price`` — leaving invested / P&L at zero even when
+        the store holds prices. This reads the latest cached price (in the
+        instrument's own currency) as a decoupled populate step; it is
+        in-memory only and never persisted or fetched over the network.
+        """
+        portfolio = self.manager.current_portfolio
+        store = self.manager.market_data_store
+        if not portfolio or store is None:
+            return
+        for symbol, position in portfolio.positions.items():
+            if position.quantity == 0:
+                continue
+            dps = getattr(position.instrument, "data_provider_symbol", None)
+            latest = None
+            for candidate in (symbol, dps):
+                if not candidate:
+                    continue
+                try:
+                    latest = store.get_latest_price(candidate)
+                except Exception:  # noqa: BLE001
+                    latest = None
+                if latest:
+                    break
+            if latest and latest[1] is not None:
+                position.current_price = latest[1]
 
     # -- data assemblers -----------------------------------------------------
 
