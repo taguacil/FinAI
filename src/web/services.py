@@ -91,6 +91,49 @@ def _pct(value: Any) -> Optional[float]:
     return v * 100 if v is not None else None
 
 
+def _rebased_benchmark_curve(
+    benchmark_prices: Dict[Any, float],
+    df_index: "pd.Index",
+    ret_idx: List[int],
+    n: int,
+) -> Optional[List[Optional[float]]]:
+    """Benchmark cumulative-return curve (%), aligned to the portfolio curve.
+
+    ``ret_idx`` are the positional indices (into ``df_index``) on which the
+    portfolio return series has a point -- i.e. every day whose prior value was
+    > 0. The portfolio curve is rebased to 0% at ``ret_idx[0] - 1`` (the day
+    before its first return), so the benchmark must use that SAME day as its
+    base. Anchoring the benchmark at the window start instead would credit it
+    with the gains it made while the portfolio held nothing, making it appear to
+    jump ahead -- and to change -- whenever the window begins before a position
+    was opened (e.g. any single-class view, since each class is acquired on a
+    different date). ``None`` is returned when no benchmark price is usable.
+    """
+    if not benchmark_prices or not ret_idx:
+        return None
+    s = pd.Series(benchmark_prices)
+    s.index = pd.to_datetime(list(s.index))
+    s = s.sort_index()
+    last_real = s.index.max()
+    # ffill fills weekends/holidays within the covered range, but we must NOT
+    # fabricate a flat tail past the last real observation (that produced a
+    # misleading straight benchmark line).
+    s = s.reindex(df_index, method="ffill").where(df_index <= last_real)
+    anchor = ret_idx[0] - 1
+    base_val = s.iloc[anchor] if 0 <= anchor < len(s) else None
+    if base_val is None or pd.isna(base_val):
+        clean = s.dropna()
+        base_val = clean.iloc[0] if not clean.empty else None
+    if base_val is None or pd.isna(base_val):
+        return None
+    base0 = float(base_val)
+    if not base0:
+        return None
+    full = [((float(v) / base0) - 1.0) * 100 if pd.notna(v) else None for v in s]
+    # Same positional return dates as the portfolio curve so both share an x-axis.
+    return [full[i] for i in ret_idx[:n]]
+
+
 class AppContext:
     """Holds the portfolio backend for the lifetime of the web process."""
 
@@ -551,25 +594,12 @@ class AppContext:
         # comparison metrics (beta/alpha/…) require >=2 aligned points.
         bench_available = bool(m.get("benchmark_available"))
         bench_cum = None
-        if m.get("benchmark_prices"):
-            try:
-                s = pd.Series(m["benchmark_prices"])
-                s.index = pd.to_datetime(list(s.index))
-                s = s.sort_index()
-                last_real = s.index.max()
-                # ffill fills weekends/holidays within the covered range, but we
-                # must NOT fabricate a flat tail past the last real observation
-                # (that produced a misleading straight benchmark line).
-                s = s.reindex(df.index, method="ffill").where(df.index <= last_real)
-                clean = s.dropna()
-                base0 = float(clean.iloc[0]) if not clean.empty else None
-                if base0:
-                    full = [((float(v) / base0) - 1.0) * 100 if pd.notna(v) else None for v in s]
-                    # Align the benchmark curve to the same return dates as the
-                    # portfolio curve (see ret_idx above) so both share an x-axis.
-                    bench_cum = [full[i] for i in ret_idx[:n]]
-            except Exception:
-                bench_cum = None
+        try:
+            bench_cum = _rebased_benchmark_curve(
+                m.get("benchmark_prices"), df.index, ret_idx, n
+            )
+        except Exception:
+            bench_cum = None
 
         # returns distribution (%)
         rp = [r * 100 for r in returns]
