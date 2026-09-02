@@ -14,6 +14,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 import pandas as pd
 
+from . import asset_classes
 from .market_data_store import MarketDataStore
 from .models import Currency, Portfolio, Position, Transaction, TransactionType
 
@@ -87,12 +88,11 @@ class PortfolioHistory:
     replaying all transactions for each query.
     """
 
-    # Instrument type categories for filtering
-    EQUITY_TYPES = {"stock", "etf"}
-    FIXED_INCOME_TYPES = {"bond"}
-    # Structured products are their own class — kept distinct from plain bonds
-    # so fixed-income analytics aren't polluted by equity-linked risk.
-    STRUCTURED_TYPES = {"structured_product"}
+    # Instrument type categories for filtering (canonical taxonomy lives in
+    # asset_classes; aliased here for backwards compatibility).
+    EQUITY_TYPES = asset_classes.EQUITY_TYPES
+    FIXED_INCOME_TYPES = asset_classes.FIXED_INCOME_TYPES
+    STRUCTURED_TYPES = asset_classes.STRUCTURED_TYPES
 
     def __init__(
         self,
@@ -499,6 +499,82 @@ class PortfolioHistory:
 
         return df
 
+    def get_value_history_by_type(
+        self, start_date: date, end_date: date,
+        types: Optional[List[str]] = None,
+        target_currency: Optional[Currency] = None,
+    ) -> pd.DataFrame:
+        """Per-instrument-type positions value over time, in a single replay.
+
+        Returns a DataFrame indexed by date with one column per instrument type,
+        each holding that type's positions market value in the target currency
+        (cash excluded). Computing every class band in one pass avoids replaying
+        the whole history once per class (as calling get_value_history with an
+        instrument_types filter N times would).
+
+        Args:
+            start_date: Start date
+            end_date: End date
+            types: Optional list of instrument types to include; None = all.
+            target_currency: Currency to express values in. Defaults to base.
+        """
+        base = target_currency or self.portfolio.base_currency
+        type_filter = set(types) if types is not None else None
+
+        txn_dates_in_range = set(
+            d for d in self._transaction_dates if start_date < d <= end_date
+        )
+        state = self._replay_transactions_to_date(start_date)
+        warned_fx: set = set()
+
+        data: List[Dict] = []
+        current = start_date
+        while current <= end_date:
+            if current in txn_dates_in_range:
+                state = self._replay_transactions_to_date(current)
+
+            row: Dict = {"date": current}
+            per_type: Dict[str, Decimal] = {}
+            for symbol, pos in state.positions.items():
+                itype = pos.instrument_type
+                if type_filter is not None and itype not in type_filter:
+                    continue
+
+                price = self._get_price_for_position(pos, current)
+                if price is None or pos.quantity <= 0:
+                    continue
+
+                pv = pos.quantity * price
+                if pos.currency == base:
+                    val = pv
+                else:
+                    rate = self._get_fx_rate(pos.currency, base, as_of=current)
+                    if not rate:
+                        if symbol not in warned_fx:
+                            warned_fx.add(symbol)
+                            logging.warning(
+                                "No FX rate for %s->%s around %s; excluding %s "
+                                "from value history. Run a historical refresh "
+                                "to seed FX rates.",
+                                pos.currency.value, base.value, current, symbol,
+                            )
+                        continue
+                    val = pv * rate
+
+                per_type[itype] = per_type.get(itype, Decimal("0")) + val
+
+            for itype, val in per_type.items():
+                row[itype] = float(val)
+            data.append(row)
+            current += timedelta(days=1)
+
+        df = pd.DataFrame(data)
+        if not df.empty:
+            df["date"] = pd.to_datetime(df["date"])
+            df = df.set_index("date").fillna(0.0)
+
+        return df
+
     def get_positions_history(
         self, start_date: date, end_date: date
     ) -> pd.DataFrame:
@@ -685,13 +761,7 @@ class PortfolioHistory:
 
     def _get_instrument_category(self, instrument_type: str) -> str:
         """Map instrument type to category."""
-        if instrument_type in self.EQUITY_TYPES:
-            return "equity"
-        elif instrument_type in self.FIXED_INCOME_TYPES:
-            return "fixed_income"
-        elif instrument_type in self.STRUCTURED_TYPES:
-            return "structured"
-        return "other"
+        return asset_classes.category_for_instrument_type(instrument_type)
 
     def _category_by_symbol(self) -> Dict[str, str]:
         """One authoritative category per symbol, matching the replayed position.

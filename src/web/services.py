@@ -18,6 +18,10 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 
 from src.data_providers.manager import DataProviderManager
+from src.portfolio.asset_classes import (
+    CATEGORY_BY_VIEW_MODE,
+    category_for_instrument_type,
+)
 from src.portfolio.manager import PortfolioManager
 from src.portfolio.models import Currency, TransactionType
 from src.portfolio.optimizer import (
@@ -55,25 +59,10 @@ ASSET_CLASS_VIEWS = [
     ("other_only", "Other"),
 ]
 
-# view_mode -> instrument category. "all" has no single category.
-_CATEGORY_BY_VIEW_MODE = {
-    "equities_only": "equity",
-    "fixed_income_only": "fixed_income",
-    "structured_only": "structured",
-    "other_only": "other",
-}
-
-# instrument_type -> category (mirrors PortfolioHistory._get_instrument_category).
-_INSTRUMENT_CATEGORY = {
-    "stock": "equity", "etf": "equity",
-    "bond": "fixed_income",
-    "structured_product": "structured",
-}
-
-
-def _instrument_category(instrument_type: Optional[str]) -> str:
-    """Map an instrument type to its asset-class category."""
-    return _INSTRUMENT_CATEGORY.get(instrument_type or "", "other")
+# view_mode -> instrument category and instrument_type -> category both come
+# from the canonical taxonomy in src.portfolio.asset_classes (imported above).
+_CATEGORY_BY_VIEW_MODE = CATEGORY_BY_VIEW_MODE
+_instrument_category = category_for_instrument_type
 
 
 def _f(value: Any) -> Optional[float]:
@@ -298,13 +287,17 @@ class AppContext:
                 pos.instrument.instrument_type.value
                 for pos in portfolio.positions.values() if pos.quantity != 0
             })
-            for t in types_present:
-                dfc = pm.get_portfolio_history(
-                    start, date.today(), instrument_types=[t], include_cash=False
-                )
-                if isinstance(dfc, pd.DataFrame) and "positions_value" in dfc and not dfc.empty:
-                    s = dfc["positions_value"].reindex(dates_idx).fillna(0.0)
-                    vals = [float(v) for v in s.tolist()]
+            # One replay computes every class band; reindex each type column to
+            # the master date axis (avoids a full history replay per class).
+            by_type = pm.get_value_history_by_type(
+                start, date.today(), types=types_present
+            )
+            if isinstance(by_type, pd.DataFrame) and not by_type.empty:
+                by_type = by_type.reindex(dates_idx).fillna(0.0)
+                for t in types_present:
+                    if t not in by_type.columns:
+                        continue
+                    vals = [float(v) for v in by_type[t].tolist()]
                     if any(v > 0 for v in vals):
                         class_history["series"].append({
                             "label": _ASSET_CLASS_LABELS.get(t, t.title()),

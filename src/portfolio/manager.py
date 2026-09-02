@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 import pandas as pd
 
 from ..data_providers.manager import DataProviderManager
+from . import asset_classes
 from .analyzer import PortfolioAnalyzer
 from .instrument_resolver import InstrumentResolver
 from .market_data_store import MarketDataStore, PriceEntry
@@ -860,6 +861,30 @@ class PortfolioManager:
 
         return pd.DataFrame()
 
+    def get_value_history_by_type(
+        self,
+        start_date: date,
+        end_date: date,
+        types: Optional[List[str]] = None,
+        target_currency: Optional[Currency] = None,
+    ) -> pd.DataFrame:
+        """Per-instrument-type positions value history in a single replay.
+
+        Returns a DataFrame indexed by date with one column per instrument type
+        (positions market value, cash excluded). Use this to build per-class
+        bands without replaying the whole history once per class.
+        """
+        if not self.current_portfolio:
+            return pd.DataFrame()
+
+        history = self._get_portfolio_history()
+        if not history:
+            return pd.DataFrame()
+
+        return history.get_value_history_by_type(
+            start_date, end_date, types=types, target_currency=target_currency
+        )
+
     def get_portfolio_history_filtered(
         self,
         start_date: date,
@@ -897,12 +922,7 @@ class PortfolioManager:
             return pd.DataFrame()
 
         # Map view mode -> attribution category (None = all assets, all cash).
-        category_by_mode = {
-            "equities_only": "equity",
-            "fixed_income_only": "fixed_income",
-            "structured_only": "structured",
-            "other_only": "other",
-        }
+        category = asset_classes.category_for_view_mode(view_mode)
 
         if view_mode == "all":
             # Standard behavior - all assets with all cash
@@ -912,13 +932,13 @@ class PortfolioManager:
                 include_cash=True,
                 target_currency=target_currency,
             )
-        elif view_mode in category_by_mode:
+        elif category is not None:
             # Single asset class: market value of just that class's positions.
             # Returns are made currency- and flow-aware by the caller via
             # get_category_cash_flows_by_day (buys/sells are external flows).
             return history.get_category_value_history(
                 start_date, end_date,
-                category=category_by_mode[view_mode],
+                category=category,
                 target_currency=target_currency,
             )
         else:
@@ -930,15 +950,6 @@ class PortfolioManager:
                 include_cash=True,
                 target_currency=target_currency,
             )
-
-    # Maps analytics view modes to instrument categories (mirrors the mapping in
-    # get_portfolio_history_filtered). "all" has no single category.
-    _CATEGORY_BY_VIEW_MODE = {
-        "equities_only": "equity",
-        "fixed_income_only": "fixed_income",
-        "structured_only": "structured",
-        "other_only": "other",
-    }
 
     def get_category_cash_flows_by_day(
         self,
@@ -953,7 +964,7 @@ class PortfolioManager:
         reflect performance rather than capital deployment. Returns an empty dict
         for the "all" view mode (which uses external deposit/withdrawal flows).
         """
-        category = self._CATEGORY_BY_VIEW_MODE.get(view_mode)
+        category = asset_classes.category_for_view_mode(view_mode)
         if not category or not self.current_portfolio:
             return {}
         history = self._get_portfolio_history()

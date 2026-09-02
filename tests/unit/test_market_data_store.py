@@ -71,3 +71,14 @@ def test_last_price_returns_none_before_first_quote(store):
 
 def test_last_price_unknown_symbol(store):
     assert store.get_last_price_on_or_before("NOPE", date(2026, 1, 1)) is None
+
+
+def test_last_price_reflects_writes_after_first_lookup(store):
+    """The bisect date cache must invalidate when new prices are written."""
+    _write_series(store, "BOND", date(2026, 1, 1), [1.00, 1.01])
+    # Prime the sorted-date cache.
+    got = store.get_last_price_on_or_before("BOND", date(2026, 1, 5))
+    assert got == Decimal("1.01")
+    # A later price written afterwards must be seen, not the stale cached tail.
+    store.set_price("BOND", date(2026, 1, 10), Decimal("2.00"), Currency.USD)
+    assert store.get_last_price_on_or_before("BOND", date(2026, 1, 15)) == Decimal("2.00")

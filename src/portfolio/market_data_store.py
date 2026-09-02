@@ -5,6 +5,7 @@ This module provides a single source of truth for all market prices,
 replacing the duplicated price data in snapshots.
 """
 
+import bisect
 import json
 import logging
 import sqlite3
@@ -55,6 +56,9 @@ class MarketDataStore:
         # In-memory cache: symbol -> {date -> price}
         self._cache: Dict[str, Dict[date, Decimal]] = {}
         self._cache_loaded: Set[str] = set()
+        # Lazily-built sorted date list per symbol, for bisect lookups. Dropped
+        # for a symbol whenever its prices change (set_price/set_prices_batch).
+        self._sorted_dates: Dict[str, List[date]] = {}
 
         # Initialize database
         self._init_db()
@@ -75,6 +79,7 @@ class MarketDataStore:
         """
         self._cache.clear()
         self._cache_loaded.clear()
+        self._sorted_dates.clear()
         logging.debug("MarketDataStore cache cleared")
 
     def _init_db(self) -> None:
@@ -284,19 +289,22 @@ class MarketDataStore:
         symbol = symbol.upper().strip()
         self._load_symbol_cache(symbol)
 
-        if symbol not in self._cache:
+        if symbol not in self._cache or not self._cache[symbol]:
             return None
 
-        prices = self._cache[symbol]
-        best_date: Optional[date] = None
-        for d in prices.keys():
-            if d <= target_date and (best_date is None or d > best_date):
-                best_date = d
+        # Sorted date list is built once per symbol and reused across the many
+        # per-day calls of a value-history loop, so this is a bisect rather than
+        # a full linear scan of the price history.
+        sorted_dates = self._sorted_dates.get(symbol)
+        if sorted_dates is None:
+            sorted_dates = sorted(self._cache[symbol].keys())
+            self._sorted_dates[symbol] = sorted_dates
 
-        if best_date is not None:
-            return prices[best_date]
-
-        return None
+        # Rightmost date <= target_date.
+        idx = bisect.bisect_right(sorted_dates, target_date)
+        if idx == 0:
+            return None
+        return self._cache[symbol][sorted_dates[idx - 1]]
 
     def set_price(
         self,
@@ -345,6 +353,7 @@ class MarketDataStore:
                 self._cache[symbol] = {}
             self._cache[symbol][price_date] = price
             self._cache_loaded.add(symbol)
+            self._sorted_dates.pop(symbol, None)
 
             logging.debug(f"Stored price for {symbol} on {price_date}: {price}")
             return True
@@ -393,6 +402,7 @@ class MarketDataStore:
                     self._cache[symbol] = {}
                 self._cache[symbol][entry.date] = entry.price
                 self._cache_loaded.add(symbol)
+                self._sorted_dates.pop(symbol, None)
 
             conn.commit()
             logging.info(f"Batch stored {len(prices)} prices")
@@ -645,9 +655,11 @@ class MarketDataStore:
                 if symbol in self._cache:
                     del self._cache[symbol]
                 self._cache_loaded.discard(symbol)
+                self._sorted_dates.pop(symbol, None)
             else:
                 self._cache.clear()
                 self._cache_loaded.clear()
+                self._sorted_dates.clear()
 
             logging.info(f"Deleted {deleted} prices")
             return deleted
@@ -690,6 +702,7 @@ class MarketDataStore:
         """Clear the in-memory cache."""
         self._cache.clear()
         self._cache_loaded.clear()
+        self._sorted_dates.clear()
         logging.debug("MarketDataStore cache cleared")
 
     def migrate_from_snapshots(self, snapshot_store) -> int:
