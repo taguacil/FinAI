@@ -654,6 +654,53 @@ class AppContext:
                 "benchmark_volatility": _pct(m.get("benchmark_volatility")),
             }
 
+        # Side-by-side portfolio vs benchmark, both computed over the same dates.
+        # kind: "pct" signed percent, "loss" percent shown as a negative,
+        # "num" plain ratio, "days" integer. better: which direction is good.
+        comparison = None
+        bp = m.get("benchmark_profile")
+        if bp:
+            # Share of days with a move that were up. Days with no change
+            # (weekends, holidays) are excluded for both series.
+            moved = [r for r in returns if abs(r) > 1e-12]
+            port_pos = (sum(1 for r in moved if r > 0) / len(moved) * 100) if moved else None
+            bench_pos = (bp["positive_days"] / bp["moving_days"] * 100
+                         if bp.get("moving_days") else None)
+            comparison = [
+                {"label": "Total return", "kind": "pct", "better": "higher",
+                 "port": metrics["total_return"], "bench": _pct(bp["total_return"])},
+                {"label": "Annualized return", "kind": "pct", "better": "higher",
+                 "port": metrics["annualized_return"], "bench": _pct(bp["annualized_return"])},
+                {"label": "Volatility", "kind": "pct", "better": "lower",
+                 "port": metrics["volatility"], "bench": _pct(bp["volatility"])},
+                {"label": "Sharpe", "kind": "num", "better": "higher",
+                 "port": metrics["sharpe"], "bench": _num(bp["sharpe_ratio"])},
+                {"label": "Sortino", "kind": "num", "better": "higher",
+                 "port": metrics["sortino"], "bench": _num(bp["sortino_ratio"])},
+                {"label": "Max drawdown", "kind": "loss", "better": "lower",
+                 "port": metrics["max_drawdown"], "bench": _pct(bp["max_drawdown"])},
+                {"label": "Max DD days", "kind": "days", "better": "lower",
+                 "port": metrics["max_dd_duration"], "bench": bp["max_drawdown_duration"]},
+                {"label": "Calmar", "kind": "num", "better": "higher",
+                 "port": metrics["calmar"], "bench": _num(bp["calmar_ratio"])},
+                {"label": "VaR (5%)", "kind": "loss", "better": "lower",
+                 "port": metrics["var_5pct"], "bench": _pct(bp["var_5pct"])},
+                {"label": "CVaR (5%)", "kind": "loss", "better": "lower",
+                 "port": metrics["cvar_5pct"], "bench": _pct(bp["cvar_5pct"])},
+                {"label": "Best day", "kind": "pct", "better": "higher",
+                 "port": _num(dist["best"]), "bench": _pct(bp["best_day"])},
+                {"label": "Worst day", "kind": "pct", "better": "higher",
+                 "port": _num(dist["worst"]), "bench": _pct(bp["worst_day"])},
+                {"label": "Up days (of days that moved)", "kind": "pct", "better": "higher",
+                 "port": _num(port_pos), "bench": _num(bench_pos)},
+            ]
+            # Losses compare on magnitude regardless of how they are signed.
+            for row in comparison:
+                if row["kind"] == "loss":
+                    for k in ("port", "bench"):
+                        if row[k] is not None:
+                            row[k] = abs(row[k])
+
         return {
             "empty": False,
             "no_history": False,
@@ -670,6 +717,7 @@ class AppContext:
             "distribution": dist,
             "metrics": metrics,
             "benchmark": bench_metrics,
+            "comparison": comparison,
         }
 
 

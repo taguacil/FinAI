@@ -1231,7 +1231,65 @@ class FinancialMetricsCalculator:
                 "benchmark_volatility": self.calculate_volatility(benchmark_aligned),
             })
 
+        profile = self._benchmark_profile(benchmark_prices, df_dates, risk_free_rate)
+        if profile:
+            metrics["benchmark_profile"] = profile
+
         return metrics
+
+    def _benchmark_profile(
+        self,
+        benchmark_prices: Dict[date, float],
+        df_dates: List[date],
+        risk_free_rate: float,
+    ) -> Optional[Dict[str, float]]:
+        """Standalone metrics for the benchmark, computed like the portfolio's.
+
+        The benchmark price is forward-filled onto the portfolio's calendar dates
+        so both series have the same days: weekend zero-returns are filtered the
+        same way, and drawdown durations count the same calendar days. The
+        series starts at the first portfolio date that has a benchmark price.
+        """
+        if not benchmark_prices:
+            return None
+        bench_dates = sorted(benchmark_prices)
+        values: List[float] = []
+        j = -1
+        for d in df_dates:
+            while j + 1 < len(bench_dates) and bench_dates[j + 1] <= d:
+                j += 1
+            if j >= 0:
+                values.append(float(benchmark_prices[bench_dates[j]]))
+        if len(values) < 2 or values[0] <= 0:
+            return None
+
+        returns = [
+            (values[i] - values[i - 1]) / values[i - 1]
+            for i in range(1, len(values))
+            if values[i - 1] > 0
+        ]
+        total_return = values[-1] / values[0] - 1
+        n_days = len(values) - 1  # calendar days covered
+        years = n_days / 365.25
+        annualized = (1 + total_return) ** (1 / years) - 1 if years > 0 else 0.0
+        max_dd, max_dd_days = self._calculate_max_drawdown_from_values(values)
+        trading = self._filter_zero_returns(returns)
+        return {
+            "total_return": total_return,
+            "annualized_return": annualized,
+            "volatility": self.calculate_volatility(returns),
+            "sharpe_ratio": self.calculate_sharpe_ratio(returns, risk_free_rate),
+            "sortino_ratio": self.calculate_sortino_ratio(returns, risk_free_rate=risk_free_rate),
+            "max_drawdown": max_dd,
+            "max_drawdown_duration": max_dd_days,
+            "calmar_ratio": annualized / max_dd if max_dd > 0 else float("inf"),
+            "var_5pct": self.calculate_value_at_risk(returns, 0.05),
+            "cvar_5pct": self.calculate_conditional_var(returns, 0.05),
+            "best_day": max(trading) if trading else None,
+            "worst_day": min(trading) if trading else None,
+            "positive_days": sum(1 for r in trading if r > 0),
+            "moving_days": len(trading),
+        }
 
     def _calculate_max_drawdown_from_values(
         self, values: List[float]

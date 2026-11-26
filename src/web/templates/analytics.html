@@ -168,6 +168,32 @@
       </div>
     </div>
   </div>
+
+  <!-- Portfolio vs benchmark, same metrics over the same dates -->
+  <template x-if="d.comparison">
+    <div class="card mt-4">
+      <div class="flex items-center justify-between mb-3">
+        <span class="section-title" x-text="'Portfolio vs ' + d.benchmark_symbol"></span>
+        <span class="text-xs text-muted">Same period and method for both</span>
+      </div>
+      <table class="tbl">
+        <thead><tr>
+          <th>Metric</th><th class="num">Portfolio</th>
+          <th class="num" x-text="d.benchmark_symbol"></th><th class="num">Difference</th>
+        </tr></thead>
+        <tbody>
+          <template x-for="r in d.comparison" :key="r.label">
+            <tr>
+              <td x-text="r.label"></td>
+              <td class="num mono" :class="edge(r) > 0 ? 'pos' : ''" x-text="cell(r, r.port)"></td>
+              <td class="num mono" :class="edge(r) < 0 ? 'pos' : ''" x-text="cell(r, r.bench)"></td>
+              <td class="num mono" :class="edge(r) > 0 ? 'pos' : (edge(r) < 0 ? 'neg' : '')" x-text="diff(r)"></td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+    </div>
+  </template>
   {% endif %}
 </div>
 
@@ -179,6 +205,30 @@
       num(v, dcml) { return FINAI.fmtNum(v, dcml ?? 2); },
       pct(v) { return FINAI.fmtPct(v); },
       cls(v) { return FINAI.signClass(v); },
+      // Comparison table: format one cell by the row's kind.
+      cell(r, v) {
+        if (v === null || v === undefined) return '—';
+        if (r.kind === 'days') return String(v);
+        if (r.kind === 'num') return this.num(v);
+        if (r.kind === 'loss') return '-' + this.num(v) + '%';
+        return this.pct(v);
+      },
+      // >0 when the portfolio is better on this row, <0 when the benchmark is.
+      edge(r) {
+        if (r.port === null || r.bench === null || r.port === undefined || r.bench === undefined) return 0;
+        const d = r.port - r.bench;
+        if (Math.abs(d) < 1e-9) return 0;
+        return r.better === 'higher' ? Math.sign(d) : -Math.sign(d);
+      },
+      diff(r) {
+        if (r.port === null || r.bench === null || r.port === undefined || r.bench === undefined) return '—';
+        const d = r.port - r.bench;
+        if (r.kind === 'days') return (d > 0 ? '+' : '') + d;
+        if (r.kind === 'num') return (d > 0 ? '+' : '') + this.num(d);
+        // percentage points; for losses a larger magnitude is worse, shown signed as a loss
+        const pp = r.kind === 'loss' ? -d : d;
+        return (pp > 0 ? '+' : '') + this.num(pp) + ' pp';
+      },
       init() {
         if (this.d.no_history) return;
         const c = this.d.cumulative;
