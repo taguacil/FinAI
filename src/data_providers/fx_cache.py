@@ -6,12 +6,21 @@ Provides persistent storage and management of historical exchange rates.
 import csv
 import logging
 import os
+from bisect import bisect_left
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Dict, Optional, Set, Tuple
+from typing import Dict, List, NamedTuple, Optional, Set, Tuple
 
 from ..portfolio.models import Currency
+
+
+class _PairTable(NamedTuple):
+    """One currency pair's CSV, parsed. ``signature`` is (mtime_ns, size)."""
+
+    signature: Tuple[int, int]
+    rates: Dict[date, Decimal]
+    dates: List[date]  # sorted ascending
 
 
 class FXRateCache:
@@ -20,6 +29,9 @@ class FXRateCache:
     # Rate validation bounds - most currency pairs fall within these ranges
     MIN_VALID_RATE = Decimal("0.0001")  # 1:10000 ratio
     MAX_VALID_RATE = Decimal("100000")  # 100000:1 ratio
+
+    # When a date has no rate (weekend/holiday), use the nearest one this close.
+    NEAREST_DATE_WINDOW_DAYS = 7
 
     def __init__(self, cache_dir: Optional[str] = None):
         """Initialize the FX rate cache.
@@ -33,6 +45,9 @@ class FXRateCache:
         # In-memory cache for frequently accessed rates
         self._memory_cache: Dict[str, Decimal] = {}
         self._memory_cache_dates: Dict[str, date] = {}
+
+        # Parsed CSV per pair file, so lookups never rescan the file
+        self._tables: Dict[Path, _PairTable] = {}
 
         # Track which currency pairs we have data for
         self._available_pairs: Set[str] = set()
@@ -158,43 +173,65 @@ class FXRateCache:
         self._available_pairs.add(pair)
         return True
 
-    def _load_rate_from_csv(self, from_currency: Currency, to_currency: Currency, rate_date: date) -> Optional[Decimal]:
-        """Load exchange rate from CSV file."""
-        cache_file = self._get_cache_filename(from_currency, to_currency)
+    def _get_table(self, cache_file: Path) -> Optional[_PairTable]:
+        """Return the parsed contents of a pair's CSV, loading it at most once.
 
-        if not cache_file.exists():
+        The table is reloaded only when the file's mtime/size changes, so writes
+        from another process (e.g. the MCP server) are still picked up.
+        """
+        try:
+            st = cache_file.stat()
+        except FileNotFoundError:
+            self._tables.pop(cache_file, None)
             return None
 
+        signature = (st.st_mtime_ns, st.st_size)
+        table = self._tables.get(cache_file)
+        if table is not None and table.signature == signature:
+            return table
+
+        rates: Dict[date, Decimal] = {}
         try:
             with open(cache_file, 'r', newline='') as csvfile:
-                reader = csv.DictReader(csvfile)
-
-                # Look for exact date first
-                for row in reader:
-                    if row['date'] == rate_date.isoformat():
-                        return Decimal(row['rate'])
-
-                # If exact date not found, look for closest date within reasonable range
-                csvfile.seek(0)
-                next(reader)  # Skip header
-
-                closest_rate = None
-                closest_days_diff = float('inf')
-
-                for row in reader:
-                    row_date = datetime.strptime(row['date'], '%Y-%m-%d').date()
-                    days_diff = abs((row_date - rate_date).days)
-
-                    # Only consider rates within a reasonable timeframe (e.g., 7 days)
-                    if days_diff <= 7 and days_diff < closest_days_diff:
-                        closest_days_diff = days_diff
-                        closest_rate = Decimal(row['rate'])
-
-                return closest_rate
-
+                for row in csv.DictReader(csvfile):
+                    try:
+                        rates[date.fromisoformat(row['date'])] = Decimal(row['rate'])
+                    except (KeyError, TypeError, ValueError, ArithmeticError):
+                        continue  # skip malformed rows rather than losing the file
         except Exception as e:
             logging.warning(f"Error reading FX cache file {cache_file}: {e}")
             return None
+
+        table = _PairTable(signature, rates, sorted(rates))
+        self._tables[cache_file] = table
+        return table
+
+    def _load_rate_from_csv(self, from_currency: Currency, to_currency: Currency, rate_date: date) -> Optional[Decimal]:
+        """Look up a rate for a pair: exact date, else the nearest within 7 days.
+
+        Ties between an earlier and a later date resolve to the earlier one.
+        """
+        table = self._get_table(self._get_cache_filename(from_currency, to_currency))
+        if table is None:
+            return None
+
+        rate = table.rates.get(rate_date)
+        if rate is not None:
+            return rate
+
+        # Nearest neighbours either side of rate_date in the sorted date list.
+        i = bisect_left(table.dates, rate_date)
+        best: Optional[date] = None
+        for candidate in (table.dates[i - 1] if i > 0 else None,
+                          table.dates[i] if i < len(table.dates) else None):
+            if candidate is None:
+                continue
+            diff = abs((candidate - rate_date).days)
+            if diff <= self.NEAREST_DATE_WINDOW_DAYS and (
+                best is None or diff < abs((best - rate_date).days)
+            ):
+                best = candidate
+        return table.rates[best] if best is not None else None
 
     def _store_rate_in_csv(self, from_currency: Currency, to_currency: Currency, rate_date: date, rate: Decimal):
         """Store exchange rate in CSV file."""
@@ -232,13 +269,13 @@ class FXRateCache:
 
     def _store_in_memory_cache(self, cache_key: str, rate: Decimal, rate_date: date):
         """Store rate in in-memory cache with size management."""
-        # Remove oldest entries if cache is full
-        if len(self._memory_cache) >= self.max_memory_cache_size:
-            # Find and remove the oldest entry
-            oldest_key = min(self._memory_cache_dates.keys(),
-                           key=lambda k: self._memory_cache_dates[k])
+        # Evict the earliest-inserted entry (dicts keep insertion order), which is
+        # O(1); scanning all keys for the oldest rate date made every insert
+        # O(n) once the cache filled up.
+        if cache_key not in self._memory_cache and len(self._memory_cache) >= self.max_memory_cache_size:
+            oldest_key = next(iter(self._memory_cache))
             del self._memory_cache[oldest_key]
-            del self._memory_cache_dates[oldest_key]
+            self._memory_cache_dates.pop(oldest_key, None)
 
         self._memory_cache[cache_key] = rate
         self._memory_cache_dates[cache_key] = rate_date
@@ -266,24 +303,10 @@ class FXRateCache:
 
     def _get_newest_rate_from_file(self, cache_file: Path) -> Optional[Decimal]:
         """Get the newest rate from a CSV file."""
-        try:
-            with open(cache_file, 'r', newline='') as csvfile:
-                reader = csv.DictReader(csvfile)
-
-                newest_rate = None
-                newest_date = None
-
-                for row in reader:
-                    row_date = datetime.strptime(row['date'], '%Y-%m-%d').date()
-                    if newest_date is None or row_date > newest_date:
-                        newest_date = row_date
-                        newest_rate = Decimal(row['rate'])
-
-                return newest_rate
-
-        except Exception as e:
-            logging.warning(f"Error reading newest rate from {cache_file}: {e}")
+        table = self._get_table(cache_file)
+        if table is None or not table.dates:
             return None
+        return table.rates[table.dates[-1]]
 
     def is_rate_fresh(self, from_currency: Currency, to_currency: Currency, rate_date: date) -> bool:
         """Check if we have a fresh rate for the given date.
@@ -380,6 +403,7 @@ class FXRateCache:
         # Clear memory cache
         self._memory_cache.clear()
         self._memory_cache_dates.clear()
+        self._tables.clear()
 
         # Remove all CSV files
         for cache_file in self.cache_dir.glob("*.csv"):
