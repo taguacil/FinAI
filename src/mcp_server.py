@@ -22,6 +22,9 @@ Environment variables:
     FINAI_API_KEY - API key for Bearer token auth (required for HTTP/SSE modes)
     HOST - Server host (default: "localhost", HTTP/SSE modes only)
     PORT - Server port (default: 8000, HTTP/SSE modes only)
+    SSL_CERTFILE - Path to TLS certificate; enables HTTPS (HTTP/SSE modes only)
+    SSL_KEYFILE - Path to TLS private key; required when SSL_CERTFILE is set
+    SSL_KEYFILE_PASSWORD - Passphrase for the TLS private key (optional)
 """
 
 import logging
@@ -1546,6 +1549,26 @@ def _build_auth_middleware_class(api_key: str):
     return APIKeyAuthMiddleware
 
 
+def _tls_options() -> dict:
+    """Return uvicorn TLS kwargs from env, or an empty dict for plain HTTP.
+
+    HTTPS is enabled by setting SSL_CERTFILE (and SSL_KEYFILE). A cert without a
+    key is a misconfiguration, so bail out rather than silently serving HTTP.
+    """
+    certfile = os.environ.get("SSL_CERTFILE", "").strip()
+    keyfile = os.environ.get("SSL_KEYFILE", "").strip()
+    if not certfile and not keyfile:
+        return {}
+    if not certfile or not keyfile:
+        logger.error("SSL_CERTFILE and SSL_KEYFILE must both be set to enable HTTPS")
+        sys.exit(1)
+    opts = {"ssl_certfile": certfile, "ssl_keyfile": keyfile}
+    password = os.environ.get("SSL_KEYFILE_PASSWORD", "")
+    if password:
+        opts["ssl_keyfile_password"] = password
+    return opts
+
+
 def _run_streamable_http():
     """Run the Streamable HTTP server (modern MCP transport) with API key auth."""
     import uvicorn
@@ -1563,12 +1586,14 @@ def _run_streamable_http():
     app = mcp.streamable_http_app()
     app.add_middleware(_build_auth_middleware_class(api_key))
 
+    tls = _tls_options()
+    scheme = "https" if tls else "http"
     logger.info(f"Starting FinAI MCP server (streamable HTTP) on {host}:{port}")
     logger.info(
-        f"MCP endpoint: http://{host}:{port}{mcp.settings.streamable_http_path}"
+        f"MCP endpoint: {scheme}://{host}:{port}{mcp.settings.streamable_http_path}"
     )
     logger.info("API key auth enabled")
-    uvicorn.run(app, host=host, port=port)
+    uvicorn.run(app, host=host, port=port, **tls)
 
 
 def _run_sse():
@@ -1606,10 +1631,12 @@ def _run_sse():
         middleware=[Middleware(_build_auth_middleware_class(api_key))],
     )
 
+    tls = _tls_options()
+    scheme = "https" if tls else "http"
     logger.info(f"Starting FinAI MCP server on {host}:{port}")
-    logger.info(f"SSE endpoint: http://{host}:{port}/sse")
+    logger.info(f"SSE endpoint: {scheme}://{host}:{port}/sse")
     logger.info("API key auth enabled")
-    uvicorn.run(app, host=host, port=port)
+    uvicorn.run(app, host=host, port=port, **tls)
 
 
 if __name__ == "__main__":
