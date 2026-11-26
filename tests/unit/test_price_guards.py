@@ -156,3 +156,108 @@ def test_currency_conversion_still_works_when_configured():
         assert latest[0] == date(2026, 9, 1)
         # 36.67 * 1.372 ~= 50.31, within threshold of the 50 anchor.
         assert abs(float(latest[1]) - 50.31) < 0.1
+
+
+def test_unheld_symbol_is_fetched_and_stored():
+    """A benchmark like SPY (not a holding) is stored as quoted, not skipped."""
+    with tempfile.TemporaryDirectory() as tmp:
+        m = _make_manager(tmp)
+        m.data_manager.get_historical_prices = Mock(return_value=[
+            PriceData(symbol="SPY", date=date(2026, 9, 2), close_price=Decimal("763.26"),
+                      currency=Currency.USD),
+            PriceData(symbol="SPY", date=date(2026, 9, 3), close_price=Decimal("771.25"),
+                      currency=Currency.USD),
+        ])
+
+        stored, failed = m._fetch_and_store_prices("SPY", date(2026, 9, 2), date(2026, 9, 3))
+
+        assert stored == 2 and failed == []
+        assert m._market_data_store.get_price("SPY", date(2026, 9, 3)) == Decimal("771.25")
+
+
+def test_backfill_anchors_to_price_before_window_not_latest():
+    """Backfilling Sep must compare against Aug, not a much later stored price."""
+    with tempfile.TemporaryDirectory() as tmp:
+        m = _make_manager(tmp)
+        inst = _instrument(symbol="IBIT", currency=Currency.USD)
+        # Aug 31 = 45, then today's price after a >50% fall = 20.
+        _seed(m, "IBIT", Currency.USD, [(date(2026, 8, 31), 45), (date(2026, 11, 26), 20)])
+        m.data_manager.get_historical_prices = Mock(return_value=[
+            PriceData(symbol="IBIT", date=date(2026, 9, 1), close_price=Decimal("44"),
+                      currency=Currency.USD),
+            PriceData(symbol="IBIT", date=date(2026, 9, 2), close_price=Decimal("43.5"),
+                      currency=Currency.USD),
+        ])
+
+        stored, failed = m._fetch_and_store_prices(
+            "IBIT", date(2026, 9, 1), date(2026, 9, 2), inst)
+
+        assert stored == 2 and failed == []
+
+
+# -- provider symbol persistence ---------------------------------------------
+
+from datetime import datetime
+
+from src.portfolio.models import Portfolio, Position, Transaction, TransactionType
+
+
+def _txn(inst, ttype, qty, price, day):
+    return Transaction(
+        id=f"t{day}", timestamp=datetime(2026, 1, day), instrument=inst,
+        transaction_type=ttype, quantity=Decimal(qty), price=Decimal(price),
+        currency=inst.currency,
+    )
+
+
+def test_recalculate_positions_keeps_provider_symbol():
+    """Rebuilding positions from transactions must not drop the ticker."""
+    inst = _instrument(symbol="EQQQ", currency=Currency.USD)
+    p = Portfolio(id="p", name="p", base_currency=Currency.USD, created_at=datetime(2026, 1, 1))
+    p.add_transaction(_txn(inst.model_copy(), TransactionType.BUY, "10", "500", 2))
+    # As loaded from JSON: the position has its own instrument copy, and only it
+    # carries the provider settings.
+    p.positions["EQQQ"].instrument = inst.model_copy(
+        update={"data_provider_symbol": "EQAC.SW", "price_currency": Currency.USD})
+
+    p.recalculate_positions()
+
+    assert p.positions["EQQQ"].instrument.data_provider_symbol == "EQAC.SW"
+    assert p.positions["EQQQ"].instrument.price_currency == Currency.USD
+
+
+def test_mapping_in_db_survives_rebuild_and_reload():
+    """The DB mapping is the source of truth and is re-applied after edits."""
+    with tempfile.TemporaryDirectory() as tmp:
+        m = _make_manager(tmp)
+        inst = _instrument(symbol="EQQQ", currency=Currency.USD)
+        m.current_portfolio = Portfolio(
+            id="p", name="p", base_currency=Currency.USD, created_at=datetime(2026, 1, 1))
+        m.current_portfolio.add_transaction(_txn(inst.model_copy(), TransactionType.BUY, "10", "500", 2))
+        m.current_portfolio.add_transaction(_txn(inst.model_copy(), TransactionType.BUY, "5", "510", 3))
+
+        assert m.set_data_provider_symbol("EQQQ", "eqac.sw")
+        assert m._market_data_store.get_instrument_mapping("EQQQ")["data_provider_symbol"] == "EQAC.SW"
+        # Written onto every copy, transactions included.
+        assert all(t.instrument.data_provider_symbol == "EQAC.SW"
+                   for t in m.current_portfolio.transactions)
+
+        # Simulate an old file where the ticker was lost, then a delete+rebuild.
+        for t in m.current_portfolio.transactions:
+            t.instrument.data_provider_symbol = None
+        m.current_portfolio.positions["EQQQ"].instrument.data_provider_symbol = None
+        assert m.delete_transaction("t3")
+        assert m.current_portfolio.positions["EQQQ"].instrument.data_provider_symbol == "EQAC.SW"
+
+
+def test_existing_portfolio_ticker_is_migrated_into_db():
+    with tempfile.TemporaryDirectory() as tmp:
+        m = _make_manager(tmp)
+        inst = _instrument(symbol="ASML", currency=Currency.EUR, data_provider_symbol="ASML.AS")
+        m.current_portfolio = Portfolio(
+            id="p", name="p", base_currency=Currency.USD, created_at=datetime(2026, 1, 1))
+        m.current_portfolio.add_transaction(_txn(inst, TransactionType.BUY, "1", "1000", 2))
+
+        m._apply_instrument_mappings()
+
+        assert m._market_data_store.get_instrument_mapping("ASML")["data_provider_symbol"] == "ASML.AS"

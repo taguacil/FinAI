@@ -113,6 +113,21 @@ class MarketDataStore:
                 ON market_prices(symbol)
             """)
 
+            # Provider mapping per portfolio symbol. This is the source of truth
+            # for how a symbol is looked up at a data provider. Copies on the
+            # portfolio's instruments are re-applied from here, because rebuilding
+            # positions from transactions used to drop them.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS instrument_mappings (
+                    symbol TEXT PRIMARY KEY,
+                    isin TEXT,
+                    data_provider_symbol TEXT,
+                    price_currency TEXT,
+                    notes TEXT,
+                    updated_at TEXT NOT NULL
+                )
+            """)
+
             conn.commit()
             logging.debug("MarketDataStore database initialized")
 
@@ -524,6 +539,74 @@ class MarketDataStore:
             logging.error(f"Error ensuring prices for {symbol}: {e}")
 
         return False
+
+    # -- instrument mappings -------------------------------------------------
+
+    _UNSET = object()
+
+    def get_instrument_mappings(self) -> Dict[str, Dict[str, Optional[str]]]:
+        """Return every stored provider mapping, keyed by portfolio symbol."""
+        conn = self._get_connection()
+        try:
+            rows = conn.execute(
+                "SELECT symbol, isin, data_provider_symbol, price_currency, notes "
+                "FROM instrument_mappings"
+            ).fetchall()
+        finally:
+            conn.close()
+        return {
+            r[0]: {"isin": r[1], "data_provider_symbol": r[2],
+                   "price_currency": r[3], "notes": r[4]}
+            for r in rows
+        }
+
+    def get_instrument_mapping(self, symbol: str) -> Optional[Dict[str, Optional[str]]]:
+        """Return the provider mapping for one symbol, or None."""
+        return self.get_instrument_mappings().get(symbol.upper().strip())
+
+    def set_instrument_mapping(
+        self,
+        symbol: str,
+        *,
+        isin: object = _UNSET,
+        data_provider_symbol: object = _UNSET,
+        price_currency: object = _UNSET,
+        notes: object = _UNSET,
+    ) -> None:
+        """Create or update a symbol's provider mapping.
+
+        Only the fields passed are changed; pass ``None`` to clear one.
+        ``price_currency`` may be a Currency or its code.
+        """
+        symbol = symbol.upper().strip()
+        current = self.get_instrument_mapping(symbol) or {
+            "isin": None, "data_provider_symbol": None, "price_currency": None, "notes": None,
+        }
+        if isin is not self._UNSET:
+            current["isin"] = isin.upper().strip() if isin else None
+        if data_provider_symbol is not self._UNSET:
+            current["data_provider_symbol"] = (
+                data_provider_symbol.upper().strip() if data_provider_symbol else None
+            )
+        if price_currency is not self._UNSET:
+            current["price_currency"] = (
+                getattr(price_currency, "value", price_currency) if price_currency else None
+            )
+        if notes is not self._UNSET:
+            current["notes"] = notes
+
+        conn = self._get_connection()
+        try:
+            conn.execute(
+                "INSERT OR REPLACE INTO instrument_mappings "
+                "(symbol, isin, data_provider_symbol, price_currency, notes, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (symbol, current["isin"], current["data_provider_symbol"],
+                 current["price_currency"], current["notes"], datetime.now().isoformat()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
     def get_symbols(self) -> List[str]:
         """Get all symbols in the store.

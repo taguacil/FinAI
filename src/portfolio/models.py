@@ -437,6 +437,13 @@ class Portfolio(BaseModel):
         transactions in chronological order to rebuild the current state.
         Use after modifying or deleting transactions.
         """
+        # Provider settings live on the position's instrument and usually not on
+        # the transactions, so remember them and restore after the rebuild.
+        provider_fields = {
+            sym: (pos.instrument.data_provider_symbol, pos.instrument.price_currency)
+            for sym, pos in self.positions.items()
+        }
+
         # Clear existing positions and cash balances
         self.positions.clear()
         self.cash_balances.clear()
@@ -445,6 +452,19 @@ class Portfolio(BaseModel):
         sorted_transactions = sorted(self.transactions, key=lambda t: t.timestamp)
         for transaction in sorted_transactions:
             self._update_position_from_transaction(transaction)
+
+        for sym, (dps, price_ccy) in provider_fields.items():
+            pos = self.positions.get(sym)
+            if pos is None:
+                continue
+            # Copy the instrument so the transaction it came from is not mutated.
+            update = {}
+            if dps and not pos.instrument.data_provider_symbol:
+                update["data_provider_symbol"] = dps
+            if price_ccy and not pos.instrument.price_currency:
+                update["price_currency"] = price_ccy
+            if update:
+                pos.instrument = pos.instrument.model_copy(update=update)
 
     class Config:
         use_enum_values = False

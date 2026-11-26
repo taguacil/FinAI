@@ -164,6 +164,8 @@ class PortfolioManager:
                     if txn.instrument.symbol != norm:
                         txn.instrument.symbol = norm
 
+                self._apply_instrument_mappings()
+
                 # Persist normalization changes
                 self.storage.save_portfolio(self.current_portfolio)
             except Exception as e:
@@ -263,6 +265,7 @@ class PortfolioManager:
         transaction.current_balance = post_transaction_balance
 
         self.current_portfolio.add_transaction(transaction)
+        self._apply_instrument_mappings()
         self.storage.save_portfolio(self.current_portfolio)
 
         # Invalidate portfolio history cache since transactions changed
@@ -304,6 +307,7 @@ class PortfolioManager:
             transaction.notes = notes
 
         self.current_portfolio.recalculate_positions()
+        self._apply_instrument_mappings()
         self.storage.save_portfolio(self.current_portfolio)
         self._invalidate_portfolio_history()
         logging.info(f"Modified transaction {transaction_id}")
@@ -325,6 +329,7 @@ class PortfolioManager:
 
         self.current_portfolio.transactions.remove(transaction)
         self.current_portfolio.recalculate_positions()
+        self._apply_instrument_mappings()
         self.storage.save_portfolio(self.current_portfolio)
         self._invalidate_portfolio_history()
         logging.info(f"Deleted transaction {transaction_id}")
@@ -730,6 +735,57 @@ class PortfolioManager:
             logging.error(f"Error in batch price update: {e}")
             return 0
 
+    def _apply_instrument_mappings(self) -> int:
+        """Copy provider settings from the DB onto every instrument of the portfolio.
+
+        The ``instrument_mappings`` table is the source of truth. Positions and
+        transactions each hold their own instrument copy, and rebuilding positions
+        from transactions used to drop the position-only settings, so they are
+        re-applied on load and after every transaction change. Settings already on
+        an instrument but missing from the DB are migrated into the DB first.
+        Returns the number of instruments updated.
+        """
+        if not self.current_portfolio:
+            return 0
+        try:
+            mappings = self._market_data_store.get_instrument_mappings()
+        except Exception as e:  # noqa: BLE001
+            logging.warning(f"Could not read instrument mappings: {e}")
+            return 0
+
+        instruments = [p.instrument for p in self.current_portfolio.positions.values()]
+        instruments += [t.instrument for t in self.current_portfolio.transactions]
+
+        # Migrate settings that exist only on the portfolio into the DB.
+        for inst in instruments:
+            sym = inst.symbol.upper()
+            if sym in mappings:
+                continue
+            if inst.data_provider_symbol or inst.price_currency:
+                self._market_data_store.set_instrument_mapping(
+                    sym,
+                    isin=inst.isin,
+                    data_provider_symbol=inst.data_provider_symbol,
+                    price_currency=inst.price_currency,
+                )
+                mappings[sym] = {
+                    "data_provider_symbol": inst.data_provider_symbol,
+                    "price_currency": getattr(inst.price_currency, "value", inst.price_currency),
+                }
+
+        updated = 0
+        for inst in instruments:
+            m = mappings.get(inst.symbol.upper())
+            if not m:
+                continue
+            dps = m.get("data_provider_symbol")
+            pc = Currency(m["price_currency"]) if m.get("price_currency") else None
+            if inst.data_provider_symbol != dps or inst.price_currency != pc:
+                inst.data_provider_symbol = dps
+                inst.price_currency = pc
+                updated += 1
+        return updated
+
     def set_data_provider_symbol(
         self,
         symbol: str,
@@ -759,7 +815,10 @@ class PortfolioManager:
             return False
 
         try:
-            self.current_portfolio.positions[symbol].instrument.data_provider_symbol = data_provider_symbol
+            self._market_data_store.set_instrument_mapping(
+                symbol, data_provider_symbol=data_provider_symbol
+            )
+            self._apply_instrument_mappings()
             self.storage.save_portfolio(self.current_portfolio)
             logging.info(f"Set data_provider_symbol for {symbol} to {data_provider_symbol}")
             return True
@@ -796,7 +855,10 @@ class PortfolioManager:
             return False
 
         try:
-            self.current_portfolio.positions[symbol].instrument.price_currency = price_currency
+            self._market_data_store.set_instrument_mapping(
+                symbol, price_currency=price_currency
+            )
+            self._apply_instrument_mappings()
             self.storage.save_portfolio(self.current_portfolio)
             logging.info(f"Set price_currency for {symbol} to {price_currency.value}")
             return True
@@ -1047,13 +1109,23 @@ class PortfolioManager:
             instrument = position.instrument if position else None
 
         if instrument is None:
-            logging.warning(f"No instrument found for {symbol}")
-            return 0, []
-
-        lookup_symbol = instrument.data_provider_symbol or symbol
-        price_currency = instrument.price_currency
-        target_currency = instrument.currency
-        needs_conversion = price_currency is not None and price_currency != target_currency
+            # Not a current holding (a benchmark such as SPY, or a sold
+            # instrument): store the provider's series as quoted, in the
+            # currency the provider reports. No conversion is configured.
+            logging.info(f"{symbol} is not a held instrument; storing provider series as quoted")
+            mapping = self._market_data_store.get_instrument_mapping(symbol) or {}
+            lookup_symbol = mapping.get("data_provider_symbol") or symbol
+            price_currency = None
+            target_currency = None
+        else:
+            lookup_symbol = instrument.data_provider_symbol or symbol
+            price_currency = instrument.price_currency
+            target_currency = instrument.currency
+        needs_conversion = (
+            price_currency is not None
+            and target_currency is not None
+            and price_currency != target_currency
+        )
 
         try:
             prices = self.data_manager.get_historical_prices(lookup_symbol, start_date, end_date)
@@ -1072,11 +1144,20 @@ class PortfolioManager:
         # price_currency when conversion is set up, otherwise the storage currency.
         expected_provider_currency = price_currency if needs_conversion else target_currency
 
-        # Scale-continuity guard anchor: the last known-good stored price for this
-        # symbol (in target_currency). ref_price advances to each accepted price so
-        # a whole block of wrong-scale values is rejected, not just the first.
-        latest = self._market_data_store.get_latest_price(symbol)
-        ref_price = float(latest[1]) if latest and latest[1] is not None else None
+        # Scale-continuity guard anchor: the last known-good stored price *before*
+        # the requested window (in target_currency). Anchoring to the newest stored
+        # price instead would compare a backfill of e.g. September against today's
+        # price, rejecting genuine multi-month moves. When nothing precedes the
+        # window, use the earliest stored price. ref_price then advances to each
+        # accepted price so a whole block of wrong-scale values is rejected.
+        anchor = self._market_data_store.get_last_price_on_or_before(
+            symbol, start_date - timedelta(days=1)
+        )
+        if anchor is None:
+            stored_range = self._market_data_store.get_date_range(symbol)
+            if stored_range:
+                anchor = self._market_data_store.get_price(symbol, stored_range[0])
+        ref_price = float(anchor) if anchor is not None else None
 
         # Process in chronological order so ref_price advances correctly.
         for p in sorted(prices, key=lambda pr: pr.date):
@@ -1088,7 +1169,11 @@ class PortfolioManager:
             # Currency guard: reject when the provider quotes a currency we are not
             # set up to handle. Applies whether or not conversion is configured, so a
             # foreign listing (e.g. a GBP line) is never stored as the target currency.
-            if p.currency is not None and p.currency != expected_provider_currency:
+            if (
+                expected_provider_currency is not None
+                and p.currency is not None
+                and p.currency != expected_provider_currency
+            ):
                 logging.warning(
                     f"Currency mismatch for {symbol} on {p.date}: "
                     f"expected {expected_provider_currency.value} but provider returned "
@@ -1131,7 +1216,7 @@ class PortfolioManager:
                 symbol=symbol,
                 date=p.date,
                 price=raw_price,
-                currency=target_currency,
+                currency=target_currency or p.currency or Currency.USD,
                 source="market_data",
             ))
 
