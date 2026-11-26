@@ -46,6 +46,34 @@ from .models import (
 )
 
 
+def _positions_total_in_base(data_manager, positions, base_currency) -> Decimal:
+    """Sum position market values converted into ``base_currency``.
+
+    ``Position.market_value`` is in the instrument's native currency, so summing
+    it directly across a multi-currency portfolio inflates the total (e.g. adding
+    raw JPY prices onto USD). Each position is converted via the data manager's
+    FX rates so the total is a true base-currency figure.
+    """
+    total = Decimal(0)
+    for pos in positions.values():
+        if pos.quantity <= 0:
+            continue
+        mv = pos.market_value or (pos.quantity * pos.average_cost)
+        if not mv:
+            continue
+        pos_ccy = pos.instrument.currency if pos.instrument else base_currency
+        if pos_ccy != base_currency:
+            rate = data_manager.get_exchange_rate(pos_ccy, base_currency)
+            if not rate:
+                raise ValueError(
+                    f"No FX rate available for {pos_ccy.value}->{base_currency.value}; "
+                    "cannot value the portfolio in base currency."
+                )
+            mv = mv * Decimal(str(rate))
+        total += mv
+    return total
+
+
 class AddTransactionTool(BaseTool):
     """Tool for adding transactions to the portfolio."""
 
@@ -3369,6 +3397,9 @@ class OptimizePortfolioTool(BaseTool):
                 return "❌ No portfolio loaded. Please create or load a portfolio first."
 
             portfolio = self.portfolio_manager.current_portfolio
+            # Fill current_price from the local cache; loading from disk leaves
+            # it unset, which would make the optimizer value positions at cost.
+            self.portfolio_manager.hydrate_prices_from_store()
             positions = portfolio.positions
 
             if len(positions) < 2:
@@ -3398,11 +3429,9 @@ class OptimizePortfolioTool(BaseTool):
             }
             opt_objective = objective_map.get(objective.lower(), OptimizationObjective.MAX_SHARPE)
 
-            # Calculate total portfolio value
-            total_value = sum(
-                pos.market_value or (pos.quantity * pos.average_cost)
-                for pos in positions.values()
-                if pos.quantity > 0
+            # Total portfolio value in base currency (FX-converted).
+            total_value = _positions_total_in_base(
+                self.data_manager, positions, portfolio.base_currency
             )
 
             # Get cash balances if including cash
@@ -3718,6 +3747,9 @@ class ScenarioOptimizationTool(BaseTool):
                 return "❌ No portfolio loaded. Please create or load a portfolio first."
 
             portfolio = self.portfolio_manager.current_portfolio
+            # Fill current_price from the local cache; loading from disk leaves
+            # it unset, which would make the optimizer value positions at cost.
+            self.portfolio_manager.hydrate_prices_from_store()
             positions = portfolio.positions
 
             if len(positions) < 2:
@@ -3780,11 +3812,9 @@ class ScenarioOptimizationTool(BaseTool):
             }
             opt_objective = objective_map.get(objective.lower(), OptimizationObjective.MAX_SHARPE)
 
-            # Calculate total portfolio value
-            total_value = sum(
-                pos.market_value or (pos.quantity * pos.average_cost)
-                for pos in positions.values()
-                if pos.quantity > 0
+            # Total portfolio value in base currency (FX-converted).
+            total_value = _positions_total_in_base(
+                self.data_manager, positions, portfolio.base_currency
             )
 
             cash_balances = portfolio.cash_balances if include_cash else None

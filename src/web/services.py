@@ -201,30 +201,10 @@ class AppContext:
 
         The web app is cache-only, so nothing fetches live prices to fill
         ``position.current_price`` — leaving invested / P&L at zero even when
-        the store holds prices. This reads the latest cached price (in the
-        instrument's own currency) as a decoupled populate step; it is
-        in-memory only and never persisted or fetched over the network.
+        the store holds prices. Delegates to the manager so every entry point
+        (web, MCP, optimizer) shares one hydration path.
         """
-        portfolio = self.manager.current_portfolio
-        store = self.manager.market_data_store
-        if not portfolio or store is None:
-            return
-        for symbol, position in portfolio.positions.items():
-            if position.quantity == 0:
-                continue
-            dps = getattr(position.instrument, "data_provider_symbol", None)
-            latest = None
-            for candidate in (symbol, dps):
-                if not candidate:
-                    continue
-                try:
-                    latest = store.get_latest_price(candidate)
-                except Exception:  # noqa: BLE001
-                    latest = None
-                if latest:
-                    break
-            if latest and latest[1] is not None:
-                position.current_price = latest[1]
+        self.manager.hydrate_prices_from_store()
 
     # -- data assemblers -----------------------------------------------------
 
@@ -695,6 +675,34 @@ class AppContext:
 
     # -- optimize ------------------------------------------------------------
 
+    def _positions_base_value(self, positions: Dict[str, Any]) -> Decimal:
+        """Sum position market values converted into the portfolio base currency.
+
+        ``Position.market_value`` is in the instrument's native currency, so a
+        naive sum over a multi-currency portfolio silently inflates the total
+        (e.g. adding raw JPY prices to USD). We convert each position via the
+        data manager's FX rates so the total, and any trade sizing derived from
+        it, is expressed in the base currency.
+        """
+        pm = self.manager
+        base = pm.current_portfolio.base_currency
+        total = Decimal(0)
+        for p in positions.values():
+            mv = p.market_value if p.market_value else (p.quantity * p.average_cost)
+            if not mv:
+                continue
+            pos_ccy = p.instrument.currency if p.instrument else base
+            if pos_ccy != base:
+                rate = pm.data_manager.get_exchange_rate(pos_ccy, base)
+                if not rate:
+                    raise ValueError(
+                        f"No FX rate available for {pos_ccy.value}->{base.value}; "
+                        "cannot value the portfolio in base currency."
+                    )
+                mv = mv * Decimal(str(rate))
+            total += mv
+        return total
+
     def optimize(
         self,
         run: bool,
@@ -760,10 +768,7 @@ class AppContext:
         else:
             locked_symbols = None
 
-        total_value = Decimal(0)
-        for p in positions.values():
-            mv = p.market_value if p.market_value else (p.quantity * p.average_cost)
-            total_value += mv or Decimal(0)
+        total_value = self._positions_base_value(positions)
 
         obj = (OptimizationObjective.MIN_VOLATILITY
                if objective == "min_volatility" else OptimizationObjective.MAX_SHARPE)
@@ -1053,10 +1058,7 @@ class AppContext:
         positions = {s: p for s, p in portfolio.positions.items() if p.quantity != 0}
         if len(positions) < 2:
             raise ValueError("Need at least 2 tradable positions to derive a strategy.")
-        total_value = Decimal(0)
-        for p in positions.values():
-            mv = p.market_value if p.market_value else (p.quantity * p.average_cost)
-            total_value += mv or Decimal(0)
+        total_value = self._positions_base_value(positions)
         optimizer = PortfolioOptimizer(
             pm.data_manager, base_currency=portfolio.base_currency,
             storage=pm.storage, portfolio_id=portfolio.id,

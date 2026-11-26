@@ -480,8 +480,21 @@ class PortfolioOptimizer:
         # Calculate rebalancing trades with FX conversion
         rebalancing_trades = []
         if total_portfolio_value:
-            # Add existing cash to total for weight calculations
-            effective_total = total_portfolio_value
+            # Recompute the risky-asset value in base currency as the single
+            # source of truth. The caller-supplied total_portfolio_value is often
+            # a raw native-currency sum (no FX applied), which for a
+            # multi-currency portfolio inflates trade sizes and lets foreign
+            # positions dominate. This value uses the same FX-converted
+            # per-position values that produced current_weights, so it matches
+            # the weight denominator exactly.
+            positions_value_base = sum(
+                (
+                    self._get_position_value_in_base(pos)
+                    for pos in active_positions.values()
+                ),
+                Decimal("0"),
+            )
+            effective_total = positions_value_base
             if include_cash:
                 effective_total += cash_value_base
 
@@ -684,27 +697,50 @@ class PortfolioOptimizer:
         return total_base
 
     def _get_fx_rate(self, from_currency: Currency, to_currency: Currency) -> Decimal:
-        """Get FX rate for currency conversion.
+        """Get FX rate to convert one unit of ``from_currency`` into ``to_currency``.
 
-        For optimization purposes, uses 1.0 as a fallback since weights are relative.
+        A correct rate is mandatory: both position weights and trade sizes are
+        computed from base-currency values, so a wrong rate (e.g. a silent 1.0
+        fallback) lets a foreign-currency position dominate the portfolio. This
+        method therefore raises ``ValueError`` when no rate can be resolved
+        rather than guessing.
         """
         if from_currency == to_currency:
             return Decimal("1")
 
-        # Try to get FX rate from data provider cache
+        # Prefer the market data service when available: it applies staleness
+        # handling and consistent historical/current resolution.
+        if self.market_data_service is not None:
+            try:
+                result = self.market_data_service.get_fx_rate(from_currency, to_currency)
+                if result is not None and result.rate is not None:
+                    return Decimal(str(result.rate))
+            except Exception as e:
+                self.logger.debug(f"market_data_service FX lookup failed: {e}")
+
+        # Fall back to the persistent FX cache (nearest-within-7-days + inverse).
         try:
-            rate = self.data_provider.fx_cache.get_rate(from_currency, to_currency)
+            rate = self.data_provider.fx_cache.get_rate(
+                from_currency, to_currency, date.today()
+            )
             if rate:
                 return rate
         except Exception as e:
-            self.logger.debug(f"Could not get FX rate from cache: {e}")
+            self.logger.debug(f"fx_cache FX lookup failed: {e}")
 
-        # For optimization purposes, use 1.0 - the weights are relative anyway
-        # FX only matters for absolute trade values, not weight calculations
-        self.logger.debug(
-            f"Using 1.0 for {from_currency.value}/{to_currency.value} (no cached rate available)"
+        # Last resort: ask the data manager for a live/exchange rate.
+        try:
+            rate = self.data_provider.get_exchange_rate(from_currency, to_currency)
+            if rate:
+                return Decimal(str(rate))
+        except Exception as e:
+            self.logger.debug(f"data_manager exchange-rate lookup failed: {e}")
+
+        raise ValueError(
+            f"No FX rate available for {from_currency.value}->{to_currency.value}. "
+            "Cannot value multi-currency positions in base currency without it. "
+            "Fetch historical FX rates before optimizing."
         )
-        return Decimal("1")
 
     def _get_position_value_in_base(self, position: Position) -> Decimal:
         """Get position value converted to base currency."""

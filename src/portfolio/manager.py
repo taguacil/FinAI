@@ -44,6 +44,12 @@ class PortfolioManager:
     PortfolioHistory for on-demand portfolio state calculation.
     """
 
+    # Scale/continuity guard: reject a fetched price that deviates from the last
+    # known-good price for the same symbol by more than this fraction (single step).
+    # Catches wrong-listing / wrong-scale errors (e.g. a 10x or 220x jump) before
+    # they overwrite good data. Set to None to disable the guard.
+    MAX_PRICE_STEP_DEVIATION: Optional[float] = 0.5
+
     def __init__(
         self,
         storage: Optional[FileBasedStorage] = None,
@@ -501,6 +507,44 @@ class PortfolioManager:
         # Save updated portfolio
         self.storage.save_portfolio(self.current_portfolio)
         return results
+
+    def hydrate_prices_from_store(self) -> int:
+        """Populate each position's ``current_price`` from the local price cache.
+
+        Loading a portfolio from disk leaves ``current_price`` unset, so any
+        code path that does not fetch live prices (optimizer, MCP tools) would
+        otherwise fall back to cost basis. This fills ``current_price`` from the
+        latest cached price (in the instrument's own currency) as a decoupled,
+        offline step: it is in-memory only and never persisted or fetched over
+        the network. Returns the number of positions hydrated.
+
+        Prefer this over a network fetch when the store is the source of truth
+        (cache-only / offline operation).
+        """
+        if not self.current_portfolio:
+            return 0
+
+        hydrated = 0
+        for symbol, position in self.current_portfolio.positions.items():
+            if position.quantity == 0:
+                continue
+            dps = getattr(position.instrument, "data_provider_symbol", None)
+            latest = None
+            for candidate in (symbol, dps):
+                if not candidate:
+                    continue
+                try:
+                    latest = self._market_data_store.get_latest_price(candidate)
+                except Exception as e:  # noqa: BLE001
+                    logging.debug(f"Store lookup failed for {candidate}: {e}")
+                    latest = None
+                if latest:
+                    break
+            if latest and latest[1] is not None:
+                position.current_price = latest[1]
+                hydrated += 1
+
+        return hydrated
 
     def set_position_price(
         self,
@@ -1024,18 +1068,31 @@ class PortfolioManager:
         failed_dates = []
         today = date.today()
 
-        for p in prices:
+        # The currency the provider is expected to quote in: the configured
+        # price_currency when conversion is set up, otherwise the storage currency.
+        expected_provider_currency = price_currency if needs_conversion else target_currency
+
+        # Scale-continuity guard anchor: the last known-good stored price for this
+        # symbol (in target_currency). ref_price advances to each accepted price so
+        # a whole block of wrong-scale values is rejected, not just the first.
+        latest = self._market_data_store.get_latest_price(symbol)
+        ref_price = float(latest[1]) if latest and latest[1] is not None else None
+
+        # Process in chronological order so ref_price advances correctly.
+        for p in sorted(prices, key=lambda pr: pr.date):
             raw_price = p.close_price or p.open_price or p.high_price or p.low_price
             if raw_price is None:
                 failed_dates.append(p.date)
                 continue
 
-            # Validate that the data provider returned the expected currency
-            if needs_conversion and p.currency is not None and p.currency != price_currency:
+            # Currency guard: reject when the provider quotes a currency we are not
+            # set up to handle. Applies whether or not conversion is configured, so a
+            # foreign listing (e.g. a GBP line) is never stored as the target currency.
+            if p.currency is not None and p.currency != expected_provider_currency:
                 logging.warning(
                     f"Currency mismatch for {symbol} on {p.date}: "
-                    f"expected {price_currency.value} but provider returned {p.currency.value}, "
-                    f"skipping date to avoid double-conversion"
+                    f"expected {expected_provider_currency.value} but provider returned "
+                    f"{p.currency.value}, skipping date (set price_currency to convert)"
                 )
                 failed_dates.append(p.date)
                 continue
@@ -1052,6 +1109,24 @@ class PortfolioManager:
                     failed_dates.append(p.date)
                     continue
 
+            # Scale/continuity guard: reject a price that jumps implausibly versus the
+            # last known-good price. Catches wrong-listing/wrong-scale corruption.
+            if (
+                self.MAX_PRICE_STEP_DEVIATION is not None
+                and ref_price is not None
+                and ref_price > 0
+            ):
+                deviation = abs(float(raw_price) - ref_price) / ref_price
+                if deviation > self.MAX_PRICE_STEP_DEVIATION:
+                    logging.warning(
+                        f"Scale guard: rejecting {symbol} price on {p.date}: "
+                        f"{float(raw_price):.4g} deviates {deviation:.0%} from last known "
+                        f"{ref_price:.4g} (threshold {self.MAX_PRICE_STEP_DEVIATION:.0%}); "
+                        f"likely wrong listing/scale for lookup '{lookup_symbol}'"
+                    )
+                    failed_dates.append(p.date)
+                    continue
+
             entries.append(PriceEntry(
                 symbol=symbol,
                 date=p.date,
@@ -1059,6 +1134,9 @@ class PortfolioManager:
                 currency=target_currency,
                 source="market_data",
             ))
+
+            # This price is accepted; use it as the reference for the next date.
+            ref_price = float(raw_price)
 
             # Keep position.current_price in sync when today is fetched
             if p.date == today and self.current_portfolio:
