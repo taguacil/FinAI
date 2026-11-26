@@ -484,7 +484,7 @@ class RefreshDataTool(BaseTool):
                             rates_fetched += 1
                         elif last_fx_rate is not None:
                             # Carry forward the last known FX rate
-                            fx_cache.set_rate(currency, portfolio.base_currency, last_fx_rate, current_date)
+                            fx_cache.store_rate(currency, portfolio.base_currency, current_date, last_fx_rate)
                             fx_rates_stored += 1
                         current_date += timedelta(days=1)
 
