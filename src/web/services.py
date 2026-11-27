@@ -322,6 +322,7 @@ class AppContext:
 
         ytd = pm.get_ytd_performance()
         ytd_pct = (ytd.get("portfolio") or {}).get("ytd_pct")
+        ytd_by_symbol = {r["symbol"]: r for r in ytd.get("positions", [])}
 
         # equity curve — always show from Jan 1 2024 (or the first transaction,
         # whichever is later, to avoid a long flat-zero prefix).
@@ -400,6 +401,10 @@ class AppContext:
                     "fx_rate": fx,
                     "is_fx": p["original_currency"] != base_ccy,
                     "has_price": p["has_current_price"],
+                    # price change since 31 Dec (local currency); since purchase
+                    # when bought this year
+                    "ytd_pct": _f((ytd_by_symbol.get(p["symbol"]) or {}).get("ytd_pct")),
+                    "ytd_since_buy": bool((ytd_by_symbol.get(p["symbol"]) or {}).get("since_inception")),
                 }
             )
         pos_rows.sort(key=lambda r: r["value"] or 0, reverse=True)

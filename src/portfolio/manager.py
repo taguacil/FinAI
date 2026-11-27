@@ -1507,6 +1507,10 @@ class PortfolioManager:
         # Get current positions with prices at as_of_date
         positions = self.get_positions_with_prices(as_of_date)
 
+        # Position states (provider symbol, ISIN) once, not per position.
+        history = self._get_portfolio_history()
+        pos_states = history.get_positions_at_date(as_of_date) if history else {}
+
         results = []
         for pos in positions:
             symbol = pos["symbol"]
@@ -1530,28 +1534,23 @@ class PortfolioManager:
             # Look up Dec 31 price using all identifiers (same fallback pattern)
             year_end_price = None
 
-            # Get the position state to access data_provider_symbol and isin
-            history = self._get_portfolio_history()
-            if history:
-                pos_states = history.get_positions_at_date(as_of_date)
-                pos_state = pos_states.get(symbol)
-
-                if pos_state:
-                    # Try data_provider_symbol first
-                    if pos_state.data_provider_symbol:
-                        year_end_price = self._market_data_store.get_price_with_fallback(
-                            pos_state.data_provider_symbol, year_end
-                        )
-                    # Try portfolio symbol
-                    if year_end_price is None:
-                        year_end_price = self._market_data_store.get_price_with_fallback(
-                            symbol, year_end
-                        )
-                    # Try ISIN
-                    if year_end_price is None and pos_state.isin:
-                        year_end_price = self._market_data_store.get_price_with_fallback(
-                            pos_state.isin, year_end
-                        )
+            pos_state = pos_states.get(symbol)
+            if pos_state:
+                # Try data_provider_symbol first
+                if pos_state.data_provider_symbol:
+                    year_end_price = self._market_data_store.get_price_with_fallback(
+                        pos_state.data_provider_symbol, year_end
+                    )
+                # Try portfolio symbol
+                if year_end_price is None:
+                    year_end_price = self._market_data_store.get_price_with_fallback(
+                        symbol, year_end
+                    )
+                # Try ISIN
+                if year_end_price is None and pos_state.isin:
+                    year_end_price = self._market_data_store.get_price_with_fallback(
+                        pos_state.isin, year_end
+                    )
 
             # Compute YTD return — all prices in native currency
             since_inception = False

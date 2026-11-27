@@ -78,7 +78,7 @@
           <thead><tr>
             <th>Instrument</th><th class="num">Qty</th>
             <th class="num">Price</th><th class="num">Value</th>
-            <th class="num">P&amp;L (<span x-text="d.base_currency"></span>)</th><th class="num">%</th>
+            <th class="num">P&amp;L (<span x-text="d.base_currency"></span>)</th><th class="num">%</th><th class="num">YTD</th>
           </tr></thead>
           <tbody>
             <template x-for="p in d.positions" :key="p.symbol">
@@ -103,9 +103,13 @@
                 </td>
                 <td class="num" :class="cls(p.pnl)" x-text="money(p.pnl)"></td>
                 <td class="num" :class="cls(p.pnl_pct)" x-text="pct(p.pnl_pct)"></td>
+                <td class="num" :class="cls(p.ytd_pct)"
+                    :title="p.ytd_since_buy ? 'Bought this year: change since purchase' : 'Price change since 31 Dec, local currency'">
+                  <span x-text="p.ytd_pct === null ? '—' : pct(p.ytd_pct)"></span><span class="text-xs text-muted" x-show="p.ytd_since_buy">*</span>
+                </td>
               </tr>
             </template>
-            <tr x-show="!d.positions.length"><td colspan="6" class="text-muted text-center py-6">No positions.</td></tr>
+            <tr x-show="!d.positions.length"><td colspan="7" class="text-muted text-center py-6">No positions.</td></tr>
           </tbody>
         </table>
       </div>
