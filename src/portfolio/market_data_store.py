@@ -378,12 +378,12 @@ class MarketDataStore:
 
             conn.commit()
 
-            # Update cache
-            if symbol not in self._cache:
-                self._cache[symbol] = {}
-            self._cache[symbol][price_date] = price
-            self._cache_loaded.add(symbol)
-            self._sorted_dates.pop(symbol, None)
+            # Update the cache only if this symbol's history is already loaded;
+            # otherwise the next read loads it in full from the database.
+            # (Marking a partial cache as loaded would hide older prices.)
+            if symbol in self._cache_loaded:
+                self._cache.setdefault(symbol, {})[price_date] = price
+                self._sorted_dates.pop(symbol, None)
 
             logging.debug(f"Stored price for {symbol} on {price_date}: {price}")
             return True
@@ -427,12 +427,11 @@ class MarketDataStore:
                     now,
                 ))
 
-                # Update cache
-                if symbol not in self._cache:
-                    self._cache[symbol] = {}
-                self._cache[symbol][entry.date] = entry.price
-                self._cache_loaded.add(symbol)
-                self._sorted_dates.pop(symbol, None)
+                # Update the cache only for symbols whose history is loaded;
+                # others load in full from the database on next read.
+                if symbol in self._cache_loaded:
+                    self._cache.setdefault(symbol, {})[entry.date] = entry.price
+                    self._sorted_dates.pop(symbol, None)
 
             conn.commit()
             logging.info(f"Batch stored {len(prices)} prices")

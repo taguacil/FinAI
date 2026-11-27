@@ -261,3 +261,17 @@ def test_existing_portfolio_ticker_is_migrated_into_db():
         m._apply_instrument_mappings()
 
         assert m._market_data_store.get_instrument_mapping("ASML")["data_provider_symbol"] == "ASML.AS"
+
+
+def test_store_write_does_not_hide_older_prices():
+    """Writing a price for an unloaded symbol must not truncate its history in memory."""
+    from src.portfolio.market_data_store import MarketDataStore
+    with tempfile.TemporaryDirectory() as tmp:
+        MarketDataStore(tmp).set_prices_batch([PriceEntry(symbol="X", date=date(2026, 1, 1), price=Decimal("1"),
+                                                         currency=Currency.USD, source="t")])
+        st = MarketDataStore(tmp)  # fresh process: nothing cached
+        st.set_prices_batch([PriceEntry(symbol="X", date=date(2026, 1, 2), price=Decimal("2"),
+                                        currency=Currency.USD, source="t")])
+        st.set_price("X", date(2026, 1, 3), Decimal("3"), Currency.USD)
+        assert sorted(st.get_prices("X", date(2026, 1, 1), date(2026, 1, 3))) == [
+            date(2026, 1, 1), date(2026, 1, 2), date(2026, 1, 3)]
