@@ -15,6 +15,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 import pandas as pd
 
 from . import asset_classes
+from .accrued_interest import accrued_interest
 from .market_data_store import MarketDataStore
 from .models import Currency, Portfolio, Position, Transaction, TransactionType
 
@@ -114,6 +115,13 @@ class PortfolioHistory:
         self._fx_rate_func = fx_rate_func
         self._fx_rate_func_with_date = fx_rate_func_with_date
 
+        # Coupon terms for accrued interest (bonds, CLNs, reverse convertibles).
+        try:
+            self._coupon_terms = market_data.get_coupon_terms()
+        except Exception as e:  # noqa: BLE001
+            logging.warning(f"Could not load coupon terms; no accrued interest: {e}")
+            self._coupon_terms = {}
+
         # Cache of position states at transaction dates
         # Key: date -> PortfolioState
         self._state_cache: Dict[date, PortfolioState] = {}
@@ -139,6 +147,14 @@ class PortfolioHistory:
             return self._fx_rate_func_with_date(from_currency, to_currency, as_of)
 
         return self._fx_rate_func(from_currency, to_currency)
+
+    def _market_value(self, pos: PositionState, price: Decimal, on: date) -> Decimal:
+        """Position value in its own currency: quantity x clean price + accrued interest."""
+        value = pos.quantity * price
+        terms = self._coupon_terms.get(pos.symbol)
+        if terms is not None:
+            value += accrued_interest(terms, pos.quantity, on)
+        return value
 
     def _get_price_for_position(
         self, pos: PositionState, target_date: date
@@ -394,7 +410,7 @@ class PortfolioHistory:
             price = self._get_price_for_position(pos, target_date)
 
             if price is not None and pos.quantity > 0:
-                position_value = pos.quantity * price
+                position_value = self._market_value(pos, price, target_date)
                 if pos.currency == base:
                     total += position_value
                 else:
@@ -465,7 +481,7 @@ class PortfolioHistory:
                 price = self._get_price_for_position(pos, current)
 
                 if price is not None and pos.quantity > 0:
-                    pv = pos.quantity * price
+                    pv = self._market_value(pos, price, current)
                     if pos.currency == base:
                         positions_value += pv
                     else:
@@ -544,7 +560,7 @@ class PortfolioHistory:
                 if price is None or pos.quantity <= 0:
                     continue
 
-                pv = pos.quantity * price
+                pv = self._market_value(pos, price, current)
                 if pos.currency == base:
                     val = pv
                 else:
@@ -625,7 +641,7 @@ class PortfolioHistory:
                     price = self._get_price_for_position(pos, current)
 
                     if price is not None:
-                        row[symbol] = float(pos.quantity * price)
+                        row[symbol] = float(self._market_value(pos, price, current))
                     else:
                         row[symbol] = None
                 else:
@@ -838,7 +854,7 @@ class PortfolioHistory:
 
                 price = self._get_price_for_position(pos, current)
                 if price is not None and pos.quantity > 0:
-                    pv = pos.quantity * price
+                    pv = self._market_value(pos, price, current)
                     if pos.currency == base:
                         positions_value += pv
                     else:

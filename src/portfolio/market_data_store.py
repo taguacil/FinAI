@@ -128,6 +128,21 @@ class MarketDataStore:
                 )
             """)
 
+            # Fixed-coupon terms, used to add accrued interest to bond values.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS coupon_terms (
+                    symbol TEXT PRIMARY KEY,
+                    rate TEXT NOT NULL,
+                    frequency INTEGER NOT NULL,
+                    anchor TEXT NOT NULL,
+                    maturity TEXT NOT NULL,
+                    day_count TEXT NOT NULL,
+                    issue_date TEXT,
+                    notes TEXT,
+                    updated_at TEXT NOT NULL
+                )
+            """)
+
             conn.commit()
             logging.debug("MarketDataStore database initialized")
 
@@ -604,6 +619,57 @@ class MarketDataStore:
                 (symbol, current["isin"], current["data_provider_symbol"],
                  current["price_currency"], current["notes"], datetime.now().isoformat()),
             )
+            conn.commit()
+        finally:
+            conn.close()
+
+    # -- coupon terms --------------------------------------------------------
+
+    def get_coupon_terms(self) -> Dict[str, "CouponTerms"]:
+        """Return stored coupon terms keyed by portfolio symbol."""
+        from .accrued_interest import CouponTerms
+
+        conn = self._get_connection()
+        try:
+            rows = conn.execute(
+                "SELECT symbol, rate, frequency, anchor, maturity, day_count, issue_date "
+                "FROM coupon_terms"
+            ).fetchall()
+        finally:
+            conn.close()
+        out: Dict[str, CouponTerms] = {}
+        for sym, rate, freq, anchor, maturity, dc, issue in rows:
+            try:
+                out[sym] = CouponTerms(
+                    rate=Decimal(rate), frequency=int(freq),
+                    anchor=date.fromisoformat(anchor), maturity=date.fromisoformat(maturity),
+                    day_count=dc, issue_date=date.fromisoformat(issue) if issue else None,
+                )
+            except (ValueError, ArithmeticError) as e:
+                logging.warning(f"Ignoring invalid coupon terms for {sym}: {e}")
+        return out
+
+    def set_coupon_terms(self, symbol: str, terms: "CouponTerms", notes: Optional[str] = None) -> None:
+        """Create or replace the coupon terms for a symbol."""
+        conn = self._get_connection()
+        try:
+            conn.execute(
+                "INSERT OR REPLACE INTO coupon_terms "
+                "(symbol, rate, frequency, anchor, maturity, day_count, issue_date, notes, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (symbol.upper().strip(), str(terms.rate), terms.frequency, terms.anchor.isoformat(),
+                 terms.maturity.isoformat(), terms.day_count,
+                 terms.issue_date.isoformat() if terms.issue_date else None,
+                 notes, datetime.now().isoformat()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def delete_coupon_terms(self, symbol: str) -> None:
+        conn = self._get_connection()
+        try:
+            conn.execute("DELETE FROM coupon_terms WHERE symbol = ?", (symbol.upper().strip(),))
             conn.commit()
         finally:
             conn.close()
